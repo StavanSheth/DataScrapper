@@ -732,79 +732,41 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 verified_company_url = clean_base
                 emit_event("log", f"🔗 [LinkedIn Step 1/5] Using verified LinkedIn company URL from website: {verified_company_url}")
             else:
-                # Query Google index with quoted company name first
+                # Query LinkedIn company directory directly
+                encoded_name = urllib.parse.quote(name)
+                search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_name}"
+                emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn: {name}")
                 try:
-                    g_co_url = f"https://www.google.com/search?q=%22{urllib.parse.quote(name)}%22+site:linkedin.com/company"
-                    await tab_page.goto(g_co_url, wait_until="domcontentloaded", timeout=10000)
-                    await tab_page.wait_for_timeout(1200)
-                    g_result = await tab_page.evaluate(r"""() => {
-                        const bodyText = document.body.innerText || "";
-                        if (bodyText.includes("No results found for") || 
-                            bodyText.includes("did not match any documents") || 
-                            bodyText.includes("(without quotes)") || 
-                            bodyText.includes("Showing results for")) {
-                            return null;
-                        }
-                        const results = document.querySelectorAll('div.g, div[data-hveid]');
-                        for (const res of results) {
-                            const link = res.querySelector('a[href*="linkedin.com/company/"]');
-                            const titleEl = res.querySelector('h3');
+                    await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
+                    await tab_page.wait_for_timeout(1500)
+                    li_result = await tab_page.evaluate(r"""() => {
+                        const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
+                        for (const card of cards) {
+                            const link = card.querySelector('a[href*="/company/"]:not([href*="ads"])');
+                            const titleEl = card.querySelector('.entity-result__title-text, .app-aware-link');
                             if (link && titleEl) {
                                 const href = link.href.split('?')[0].replace(/\/+$/, '');
                                 const title = titleEl.innerText.trim();
-                                if (!href.includes('/search') && !href.includes('/help') && !href.includes('/posts') && !href.includes('/feed')) {
+                                if (!href.includes('/search') && !href.includes('/help') && !href.includes('/feed')) {
                                     return { href, title };
                                 }
                             }
                         }
                         return null;
                     }""")
-                    if g_result and isinstance(g_result, dict):
-                        cand_href = g_result.get("href", "")
-                        cand_title = g_result.get("title", "")
+                    if li_result and isinstance(li_result, dict):
+                        cand_href = li_result.get("href", "")
+                        cand_title = li_result.get("title", "")
                         if verify_company_name_match(name, cand_title):
                             verified_company_url = cand_href
-                            emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified canonical LinkedIn company page: {verified_company_url}")
+                            emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified company via LinkedIn directory: {verified_company_url}")
                         else:
-                            emit_event("log", f"⚠️ [LinkedIn Step 1/5] Discarded non-matching Google result '{cand_title}' for '{name}'")
+                            emit_event("log", f"⚠️ [LinkedIn Step 1/5] Discarded non-matching LinkedIn directory result '{cand_title}' for '{name}'")
                 except Exception:
                     pass
 
-                # Fallback to LinkedIn internal search if Google didn't resolve
                 if not verified_company_url:
-                    encoded_name = urllib.parse.quote(name)
-                    search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_name}"
-                    try:
-                        await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
-                        await tab_page.wait_for_timeout(1500)
-                        li_result = await tab_page.evaluate(r"""() => {
-                            const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
-                            for (const card of cards) {
-                                const link = card.querySelector('a[href*="/company/"]:not([href*="ads"])');
-                                const titleEl = card.querySelector('.entity-result__title-text, .app-aware-link');
-                                if (link && titleEl) {
-                                    const href = link.href.split('?')[0].replace(/\/+$/, '');
-                                    const title = titleEl.innerText.trim();
-                                    if (!href.includes('/search') && !href.includes('/help') && !href.includes('/feed')) {
-                                        return { href, title };
-                                    }
-                                }
-                            }
-                            return null;
-                        }""")
-                        if li_result and isinstance(li_result, dict):
-                            cand_href = li_result.get("href", "")
-                            cand_title = li_result.get("title", "")
-                            if verify_company_name_match(name, cand_title):
-                                verified_company_url = cand_href
-                                emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified company via LinkedIn directory: {verified_company_url}")
-                            else:
-                                emit_event("log", f"⚠️ [LinkedIn Step 1/5] Discarded non-matching LinkedIn directory result '{cand_title}' for '{name}'")
-                    except Exception:
-                        pass
-
-                if not verified_company_url:
-                    emit_event("log", f"ℹ️ [LinkedIn Step 1/5] No official corporate page for '{name}'. Searching verified personnel directly...")
+                    emit_event("log", f"ℹ️ [LinkedIn Step 1/5] No official corporate page for '{name}'. Searching verified personnel directly on LinkedIn...")
 
             # Step 2: Open company's /people/ directory
             people_target = f"{verified_company_url}/people/" if verified_company_url else f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
@@ -889,69 +851,47 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
             except Exception as e:
                 emit_event("log", f"⚠️ Employee DOM parse note: {str(e)[:50]}")
 
-            # 4B: If login wall hit or 0 cards extracted, fall back to public Google search index
-            if len(employees) == 0:
+            # 4B: If 0 cards extracted, search LinkedIn personnel directory directly (never navigate away to Google)
+            if len(employees) == 0 and verified_company_url:
                 try:
-                    emit_event("log", f"🌐 [LinkedIn Public Fallback] Querying Google index for {name} verified LinkedIn employees...")
-                    g_url = f"https://www.google.com/search?q=%22{urllib.parse.quote(name)}%22+site:linkedin.com/in"
-                    await tab_page.goto(g_url, wait_until="domcontentloaded", timeout=12000)
+                    search_people_url = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
+                    emit_event("log", f"👥 [LinkedIn Directory Search] Searching verified personnel directly on LinkedIn for {name}...")
+                    await tab_page.goto(search_people_url, wait_until="domcontentloaded", timeout=12000)
                     await tab_page.wait_for_timeout(1800)
-                    google_extracted = await tab_page.evaluate(r"""() => {
-                        const bodyText = document.body.innerText || "";
-                        if (bodyText.includes("No results found for") || 
-                            bodyText.includes("did not match any documents") || 
-                            bodyText.includes("(without quotes)") || 
-                            bodyText.includes("Showing results for")) {
-                            return [];
-                        }
+                    for s_i in range(2):
+                        await tab_page.evaluate("window.scrollBy({top: 650, behavior: 'smooth'})")
+                        await tab_page.wait_for_timeout(700)
+                    li_peop_extracted = await tab_page.evaluate(r"""() => {
                         const list = [];
-                        const seen = new Set();
-                        document.querySelectorAll('div.g, div[data-hveid]').forEach(res => {
-                            const link = res.querySelector('a[href*="linkedin.com/in/"]');
-                            const titleEl = res.querySelector('h3');
-                            const snippetEl = res.querySelector('div.VwiC3b, span.aCOpRe');
-                            if (link && titleEl) {
-                                const rawTitle = titleEl.innerText.trim();
-                                const profile = link.href.split('?')[0];
-                                const parts = rawTitle.replace(/\|.*LinkedIn/gi, '').split(/[-–—]/);
-                                if (parts.length >= 2) {
-                                    let fullName = parts[0]
-                                        .replace(/•\s*(1st|2nd|3rd\+?)/gi, '')
-                                        .replace(/\(He\/Him\)|\(She\/Her\)|\(They\/Them\)/gi, '')
-                                        .replace(/[\r\n]+/g, ' ')
-                                        .replace(/\s+/g, ' ')
-                                        .trim();
-                                    let jobTitle = parts.slice(1).join(' - ').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
-                                    if (fullName && !seen.has(fullName) && fullName.length > 2 && fullName.length < 50 && fullName !== "LinkedIn") {
-                                        seen.add(fullName);
-                                        const snippet = snippetEl ? snippetEl.innerText.trim() : "";
-                                        list.push({
-                                            full_name: fullName,
-                                            title: jobTitle || "Employee",
-                                            linkedin_profile_url: profile,
-                                            avatar_url: "",
-                                            location: snippet.substring(0, 80)
-                                        });
-                                    }
-                                }
+                        const seenNames = new Set();
+                        const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container, div.org-people-profile-card');
+                        cards.forEach(card => {
+                            let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
+                            let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
+                            let linkEl = card.querySelector('a[href*="/in/"]');
+                            let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
+                            let rawName = nameEl ? (nameEl.innerText || nameEl.textContent) : "";
+                            let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent) : "";
+                            let profile = linkEl ? linkEl.href.split('?')[0] : "";
+                            let loc = locEl ? locEl.innerText.trim() : "";
+                            let cleanName = rawName.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+                            let cleanTitle = rawTitle.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+                            if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
+                                seenNames.add(cleanName);
+                                list.push({
+                                    full_name: cleanName,
+                                    title: cleanTitle || "Employee",
+                                    linkedin_profile_url: profile,
+                                    avatar_url: "",
+                                    location: loc
+                                });
                             }
                         });
                         return list;
                     }""")
-                    if google_extracted and isinstance(google_extracted, list) and len(google_extracted) > 0:
-                        # Verify that the extracted cards actually mention this company or its distinctive tokens
-                        verified_emps = []
-                        clean_target = name.lower()
-                        distinct_tokens = [t for t in re.sub(r'[^a-zA-Z0-9\s]', ' ', clean_target).split() if len(t) > 3]
-                        for ge in google_extracted:
-                            card_text = (ge.get("title", "") + " " + ge.get("location", "")).lower()
-                            if clean_target in card_text or any(dt in card_text for dt in distinct_tokens):
-                                verified_emps.append(ge)
-                        if verified_emps:
-                            employees = verified_emps
-                            emit_event("log", f"✅ [LinkedIn Step 4/5] Discovered {len(employees)} verified LinkedIn employee profiles via public index for {name}")
-                        else:
-                            emit_event("log", f"ℹ️ [LinkedIn Step 4/5] Discarded search cards that did not match '{name}'")
+                    if li_peop_extracted and isinstance(li_peop_extracted, list) and len(li_peop_extracted) > 0:
+                        employees = li_peop_extracted
+                        emit_event("log", f"✅ [LinkedIn Step 4/5] Discovered {len(employees)} verified LinkedIn employee profiles for {name}")
                 except Exception:
                     pass
 
@@ -974,8 +914,8 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                             break
 
             # Step 5: Classify & save into Database
-            final_linkedin_url = verified_company_url or (tab_page.url.split("?")[0].rstrip("/") if tab_page.url else known_linkedin)
-            if "/people" in final_linkedin_url:
+            final_linkedin_url = verified_company_url or (tab_page.url.split("?")[0].rstrip("/") if (tab_page.url and "linkedin.com" in tab_page.url) else known_linkedin)
+            if final_linkedin_url and "/people" in final_linkedin_url:
                 final_linkedin_url = final_linkedin_url.replace("/people", "")
 
             # Save batch to SQLite
@@ -1210,12 +1150,21 @@ async def run_scraper(
         # =============================================================
         # By default, open ONLY 2 tabs on startup: Tab 1 (Maps) and Tab 2 (LinkedIn)
         # Tab 3 (Shop Website) opens dynamically based on shop website
-        pages_dict = {"website": None}
+        pages_dict = {"website": None, "linkedin": None}
         if cdp_connected:
             existing_maps = [p for p in context.pages if "google.com/maps" in p.url]
             existing_li = [p for p in context.pages if "linkedin.com" in p.url]
             maps_page = existing_maps[0] if (existing_maps and enable_maps) else (await context.new_page() if enable_maps else None)
-            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else (await context.new_page() if enable_linkedin else None)
+            if existing_li and enable_linkedin:
+                linkedin_page = existing_li[0]
+            elif enable_linkedin:
+                candidate_li = [p for p in context.pages if p != maps_page and "google.com/maps" not in p.url]
+                if candidate_li:
+                    linkedin_page = candidate_li[0]
+                else:
+                    linkedin_page = await context.new_page()
+            else:
+                linkedin_page = None
         else:
             pages_avail = list(context.pages)
             maps_page = pages_avail.pop(0) if (enable_maps and pages_avail) else (await context.new_page() if enable_maps else None)
@@ -1230,6 +1179,7 @@ async def run_scraper(
         if maps_page:
             await clear_fixed_viewport(maps_page)
         if linkedin_page:
+            pages_dict["linkedin"] = linkedin_page
             await clear_fixed_viewport(linkedin_page)
 
     
