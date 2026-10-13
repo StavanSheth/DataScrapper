@@ -12,7 +12,7 @@ import math
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, get_platform_listings
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -542,6 +542,30 @@ async def frame_streamer_loop(maps_page=None, linkedin_page=None, pages_dict=Non
                             "url": li_url,
                             "title": li_title[:50] if li_title else "LinkedIn Org Intelligence",
                             "is_linkedin": True
+                        })
+        except Exception:
+            pass
+
+        # 4. Stream Tab 4 (Platform Directory Agent: Fresha, Airbnb, Yelp, etc.)
+        platform_page = pages_dict.get("platform") if pages_dict else None
+        try:
+            if platform_page and not platform_page.is_closed():
+                plat_url = platform_page.url or ""
+                if plat_url and "about:blank" not in plat_url:
+                    buf_plat = await platform_page.screenshot(type="jpeg", quality=55)
+                    if len(buf_plat) > 6000:
+                        b64_plat = base64.b64encode(buf_plat).decode("ascii")
+                        plat_title = ""
+                        try:
+                            plat_title = await platform_page.title()
+                        except Exception:
+                            pass
+                        emit_event("live_frame", {
+                            "tab": "platform",
+                            "image": f"data:image/jpeg;base64,{b64_plat}",
+                            "url": plat_url,
+                            "title": plat_title[:50] if plat_title else "Platform Directory Agent",
+                            "is_platform": True
                         })
         except Exception:
             pass
@@ -1078,6 +1102,197 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
         finally:
             queue.task_done()
 
+async def platform_worker(
+    context,
+    queue: asyncio.Queue,
+    done_event: asyncio.Event,
+    pages_dict: Dict,
+    platform_name: str = "Fresha",
+    custom_url_pattern: str = "",
+    cdp_connected: bool = False,
+    maps_page = None,
+    linkedin_page = None,
+    general_location: str = ""
+):
+    """
+    Dedicated Worker for Tab 4 (Multi-Platform Directory Agent: Fresha, Airbnb, Yelp, TripAdvisor, Custom).
+    Searches target platforms using location and radius context, verifies brand matches,
+    extracts direct booking URLs, platform ratings, reviews, and pricing tiers,
+    and merges the normalized directory intelligence into the database.
+    """
+    tab_page = None
+    p_name = platform_name.strip() if platform_name else "Fresha"
+
+    while not done_event.is_set() or not queue.empty():
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:
+            break
+
+        idx = item.get("index", 1)
+        name = item.get("name", "").strip()
+        address = item.get("address", "")
+        lead_id = item.get("id")
+
+        if not name:
+            queue.task_done()
+            continue
+
+        city = extract_city_from_address(address) or general_location
+        core_brand = clean_brand_tokens(name, city=city)
+
+        emit_event("log", f"🟣 [Tab 4 - Platform Agent] Searching {p_name} for #{idx} '{name}' (Brand: '{core_brand}', Loc: '{city}')...")
+        emit_event("status", f"Scanning {p_name}: {core_brand}")
+
+        try:
+            # 1. Ensure Tab 4 page exists
+            if tab_page is None or tab_page.is_closed():
+                if cdp_connected:
+                    other_pages = [
+                        p for p in context.pages
+                        if p != maps_page
+                        and p != linkedin_page
+                        and p != (pages_dict.get("website") if pages_dict else None)
+                        and "google.com/maps" not in p.url
+                        and "linkedin.com" not in p.url
+                    ]
+                    if other_pages:
+                        tab_page = other_pages[0]
+                    else:
+                        tab_page = await context.new_page()
+                else:
+                    tab_page = await context.new_page()
+
+                await clear_fixed_viewport(tab_page)
+                if pages_dict is not None:
+                    pages_dict["platform"] = tab_page
+
+            # 2. Build platform search URL
+            enc_brand = urllib.parse.quote(core_brand)
+            enc_city = urllib.parse.quote(city) if city else ""
+            target_url = ""
+
+            p_lower = p_name.lower()
+            if custom_url_pattern and "http" in custom_url_pattern:
+                target_url = custom_url_pattern.replace("{query}", enc_brand).replace("{location}", enc_city).replace("{city}", enc_city)
+            elif "fresha" in p_lower:
+                target_url = f"https://www.fresha.com/search?query={enc_brand}&address={enc_city}" if enc_city else f"https://www.fresha.com/search?query={enc_brand}"
+            elif "airbnb" in p_lower:
+                target_url = f"https://www.airbnb.com/s/{enc_city or enc_brand}/homes?query={enc_brand}"
+            elif "yelp" in p_lower:
+                target_url = f"https://www.yelp.com/search?find_desc={enc_brand}&find_loc={enc_city}"
+            elif "tripadvisor" in p_lower:
+                target_url = f"https://www.tripadvisor.com/Search?q={enc_brand}+{enc_city}"
+            else:
+                target_url = f"https://www.google.com/search?q={urllib.parse.quote(f'{core_brand} {city} {p_name}')}"
+
+            emit_event("log", f"🌐 [Tab 4] Navigating to {p_name}: {target_url}")
+            try:
+                await tab_page.goto(target_url, wait_until="domcontentloaded", timeout=14000)
+                await tab_page.wait_for_timeout(1800)
+            except Exception as nav_e:
+                emit_event("log", f"⚠️ Tab 4 navigation note: {str(nav_e)[:50]}")
+
+            # HUD on Tab 4
+            try:
+                safe_brand = re.sub(r'[\'"]', '', core_brand)[:20]
+                await tab_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform: {p_name}', 'Matching {safe_brand}...', '#a855f7')")
+            except Exception:
+                pass
+
+            # Scroll once to trigger listings
+            try:
+                await tab_page.evaluate("window.scrollBy({top: 500, behavior: 'smooth'})")
+                await tab_page.wait_for_timeout(800)
+            except Exception:
+                pass
+
+            # 3. Extract candidate listings across platforms
+            extracted_listings = await tab_page.evaluate(r"""() => {
+                const results = [];
+                const cards = document.querySelectorAll(
+                    'a[href*="/a/"], div[data-qa="venue-card"], div.venue-card, ' +
+                    'div[data-testid="card-container"], div[itemprop="itemListElement"], ' +
+                    'div[data-testid="serp-ia-card"], li.border-color--default__09f24__Nrmcg, ' +
+                    '.search-result-card, a.property-card, div.result-card'
+                );
+
+                cards.forEach(card => {
+                    let titleEl = card.querySelector('h2, h3, h4, .title, [data-qa="venue-name"], [data-testid="listing-card-title"], a.booking-link');
+                    let ratingEl = card.querySelector('[data-qa="rating-badge"], .rating, [aria-label*="rating"], [aria-label*="star"], span[class*="rating"]');
+                    let reviewsEl = card.querySelector('[data-qa="reviews-count"], .review-count, span[class*="review"], span[class*="count"]');
+                    let priceEl = card.querySelector('[data-qa="price"], .price, [class*="price"], span:has-text("$"), span:has-text("£"), span:has-text("₹")');
+                    let linkEl = card.matches('a') ? card : card.querySelector('a[href]');
+
+                    let title = titleEl ? (titleEl.innerText || titleEl.textContent).trim() : (linkEl ? (linkEl.innerText || "").trim() : "");
+                    let url = linkEl ? linkEl.href : window.location.href;
+                    let rawRating = ratingEl ? (ratingEl.innerText || ratingEl.getAttribute('aria-label') || "").trim() : "";
+                    let rawReviews = reviewsEl ? (reviewsEl.innerText || "").trim() : "";
+                    let rawPrice = priceEl ? (priceEl.innerText || "").trim() : "";
+
+                    let rMatch = rawRating.match(/(\d+(?:\.\d+)?)/);
+                    let ratingVal = rMatch ? parseFloat(rMatch[1]) : 0.0;
+
+                    let revMatch = rawReviews.match(/(\d[\d,]*)/);
+                    let revCount = revMatch ? parseInt(revMatch[1].replace(/,/g, ''), 10) : 0;
+
+                    if (title && url && url.startsWith('http') && !url.includes('/login') && !url.includes('/signup')) {
+                        results.push({
+                            title: title.replace(/[\r\n]+/g, ' ').trim(),
+                            url: url.split('?')[0],
+                            rating: ratingVal,
+                            reviews_count: revCount,
+                            price_info: rawPrice.replace(/[\r\n]+/g, ' ').trim()
+                        });
+                    }
+                });
+
+                return results;
+            }""")
+
+            # 4. Filter & Match best listing
+            best_match = None
+            if extracted_listings and isinstance(extracted_listings, list):
+                for cand in extracted_listings:
+                    c_title = cand.get("title", "")
+                    if verify_company_name_match(core_brand, c_title) or verify_company_name_match(name, c_title):
+                        best_match = cand
+                        break
+
+            if best_match:
+                listing_data = {
+                    "lead_id": lead_id,
+                    "platform": p_name,
+                    "title": best_match.get("title", core_brand),
+                    "clean_brand": core_brand,
+                    "url": best_match.get("url", target_url),
+                    "booking_url": best_match.get("url", target_url),
+                    "rating": best_match.get("rating", 0.0),
+                    "reviews_count": best_match.get("reviews_count", 0),
+                    "price_info": best_match.get("price_info", ""),
+                    "address": address,
+                    "verified": 1
+                }
+                save_platform_listing(listing_data)
+                emit_event("platform_listing_found", {
+                    "name": name,
+                    "platform": p_name,
+                    "rating": best_match.get("rating", 0.0),
+                    "reviews": best_match.get("reviews_count", 0),
+                    "url": best_match.get("url", target_url),
+                    "price": best_match.get("price_info", "")
+                })
+                emit_event("log", f"🟣 [Tab 4 Finished: #{idx} {name}] Verified on {p_name}: {best_match.get('rating')} ★ ({best_match.get('reviews_count')} reviews) | 🔗 {best_match.get('url')}")
+            else:
+                emit_event("log", f"ℹ️ [Tab 4] No matching listing found on {p_name} for '{name}'")
+
+        except Exception as err:
+            emit_event("log", f"⚠️ Error scanning {p_name} for #{idx} {name}: {str(err)[:60]}")
+        finally:
+            queue.task_done()
+
 async def run_scraper(
     query: str,
     max_results: int = 15,
@@ -1091,6 +1306,9 @@ async def run_scraper(
     enable_maps: bool = True,
     enable_website: bool = True,
     enable_linkedin: bool = True,
+    enable_platform: bool = False,
+    platform_name: str = "Fresha",
+    platform_custom_url: Optional[str] = None,
     dedup_area: bool = True,
     skip_existing_db: bool = False,
     standalone_companies: Optional[str] = None,
@@ -1315,7 +1533,7 @@ async def run_scraper(
         # =============================================================
         # By default, open ONLY 2 tabs on startup: Tab 1 (Maps) and Tab 2 (LinkedIn)
         # Tab 3 (Shop Website) opens dynamically based on shop website
-        pages_dict = {"website": None, "linkedin": None}
+        pages_dict = {"website": None, "linkedin": None, "platform": None}
         if cdp_connected:
             existing_maps = [p for p in context.pages if "google.com/maps" in p.url]
             existing_li = [p for p in context.pages if "linkedin.com" in p.url]
@@ -1358,11 +1576,13 @@ async def run_scraper(
             except Exception:
                 pass
 
-        # Setup Parallel Asynchronous Queues for Tab 2 and Tab 3
+        # Setup Parallel Asynchronous Queues for Tab 2, Tab 3, and Tab 4
         website_queue = asyncio.Queue() if (enable_website and extract_emails) else None
         linkedin_queue = asyncio.Queue() if linkedin_page else None
+        platform_queue = asyncio.Queue() if enable_platform else None
         website_done_event = asyncio.Event()
         linkedin_done_event = asyncio.Event()
+        platform_done_event = asyncio.Event()
 
         worker_task = None
         if website_queue:
@@ -1371,6 +1591,21 @@ async def run_scraper(
         linkedin_task = None
         if linkedin_page and linkedin_queue:
             linkedin_task = asyncio.create_task(linkedin_worker(linkedin_page, linkedin_queue, linkedin_done_event))
+
+        platform_task = None
+        if enable_platform and platform_queue:
+            platform_task = asyncio.create_task(platform_worker(
+                context=context,
+                queue=platform_queue,
+                done_event=platform_done_event,
+                pages_dict=pages_dict,
+                platform_name=platform_name,
+                custom_url_pattern=platform_custom_url or "",
+                cdp_connected=cdp_connected,
+                maps_page=maps_page,
+                linkedin_page=linkedin_page,
+                general_location=cleaned_query
+            ))
 
         # Dynamic zoom from radius_km
         effective_zoom = radius_to_zoom(radius_km) if radius_km else zoom
@@ -1680,6 +1915,15 @@ async def run_scraper(
                             "linkedin_url": "",
                         })
 
+                    if enable_platform and platform_queue:
+                        platform_queue.put_nowait({
+                            "index": idx,
+                            "name": place_title,
+                            "address": address or "N/A",
+                            "lat": lat_val,
+                            "lon": lon_val,
+                        })
+
                 except Exception as e:
                     emit_event("log", f"⚠️ Card error: {type(e).__name__} - {e}")
                     continue
@@ -1740,6 +1984,15 @@ async def run_scraper(
                 pass
             linkedin_task.cancel()
 
+        # Signal Platform worker that all places have been pushed and wait for directory scan to complete
+        platform_done_event.set()
+        if platform_task and platform_queue:
+            try:
+                await asyncio.wait_for(platform_queue.join(), timeout=60.0)
+            except Exception:
+                pass
+            platform_task.cancel()
+
         stop_stream_event.set()
         if stream_task:
             try:
@@ -1788,6 +2041,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-website", dest="enable_website", action="store_false")
     parser.add_argument("--enable-linkedin", dest="enable_linkedin", action="store_true", default=True)
     parser.add_argument("--no-linkedin", dest="enable_linkedin", action="store_false")
+    parser.add_argument("--enable-platform", dest="enable_platform", action="store_true", default=False)
+    parser.add_argument("--no-platform", dest="enable_platform", action="store_false")
+    parser.add_argument("--platform-name", type=str, default="Fresha")
+    parser.add_argument("--platform-custom-url", type=str, default="")
     parser.add_argument("--dedup-area", dest="dedup_area", action="store_true", default=True)
     parser.add_argument("--no-dedup-area", dest="dedup_area", action="store_false")
     parser.add_argument("--skip-existing-db", action="store_true", default=False)
@@ -1807,6 +2064,9 @@ if __name__ == "__main__":
         enable_maps=args.enable_maps,
         enable_website=args.enable_website,
         enable_linkedin=args.enable_linkedin,
+        enable_platform=args.enable_platform,
+        platform_name=args.platform_name,
+        platform_custom_url=args.platform_custom_url,
         dedup_area=args.dedup_area,
         skip_existing_db=args.skip_existing_db,
         standalone_companies=args.standalone_companies,

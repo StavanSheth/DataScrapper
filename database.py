@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -133,12 +134,58 @@ def init_db():
             )
         """)
 
+        # Safely migrate leads table to add platform directory columns if missing
+        new_platform_cols = [
+            ("platform_name", "TEXT DEFAULT ''"),
+            ("platform_url", "TEXT DEFAULT ''"),
+            ("platform_rating", "TEXT DEFAULT ''"),
+            ("platform_reviews", "TEXT DEFAULT '0'"),
+            ("booking_url", "TEXT DEFAULT ''"),
+            ("platform_price", "TEXT DEFAULT ''"),
+            ("platform_verified", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in new_platform_cols:
+            try:
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_def};")
+            except Exception:
+                pass
+
+        # Create platform_listings directory table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS platform_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER,
+                platform TEXT NOT NULL,
+                listing_id TEXT,
+                title TEXT NOT NULL,
+                clean_brand TEXT,
+                category TEXT,
+                url TEXT NOT NULL,
+                booking_url TEXT,
+                rating REAL DEFAULT 0.0,
+                reviews_count INTEGER DEFAULT 0,
+                price_info TEXT,
+                address TEXT,
+                latitude REAL,
+                longitude REAL,
+                verified INTEGER DEFAULT 0,
+                services_json TEXT,
+                raw_metadata_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE SET NULL,
+                UNIQUE(platform, url)
+            )
+        """)
+
         # Create indexes for fast lookup, collision matching, and hierarchy queries
         try:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_name_addr ON leads(name, address);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_website ON leads(website);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emp_company ON employees(company_name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emp_seniority ON employees(seniority_level);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_brand ON platform_listings(clean_brand);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_lead ON platform_listings(lead_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_platform ON platform_listings(platform);")
         except Exception:
             pass
 
@@ -704,6 +751,13 @@ def get_all_leads() -> List[Dict[str, Any]]:
                    COALESCE(cookie_status, 'None') AS cookie_status,
                    COALESCE(employee_count, '0') AS employee_count,
                    COALESCE(org_scraped, 0) AS org_scraped,
+                   COALESCE(platform_name, '') AS platform_name,
+                   COALESCE(platform_url, '') AS platform_url,
+                   COALESCE(platform_rating, '') AS platform_rating,
+                   COALESCE(platform_reviews, '0') AS platform_reviews,
+                   COALESCE(booking_url, '') AS booking_url,
+                   COALESCE(platform_price, '') AS platform_price,
+                   COALESCE(platform_verified, 0) AS platform_verified,
                    created_at
             FROM leads ORDER BY id DESC
         """)
@@ -840,3 +894,103 @@ def get_company_hierarchy(company_name: str) -> Dict[str, Any]:
             "all_employees": rows
         }
         return hierarchy
+
+def save_platform_listing(listing: Dict[str, Any]) -> int:
+    """
+    Saves a platform directory listing (Fresha, Airbnb, Yelp, TripAdvisor, etc.) into platform_listings.
+    Cross-references and merges normalized fields (booking_url, platform_rating, reviews, price) into matching lead in leads.db.
+    """
+    platform = str(listing.get("platform", "Platform")).strip()
+    title = str(listing.get("title", "") or listing.get("company_name", "") or listing.get("name", "")).strip()
+    if not title:
+        return 0
+
+    clean_brand = str(listing.get("clean_brand", "") or title).strip()
+    category = str(listing.get("category", "")).strip()
+    url = str(listing.get("url", "") or listing.get("listing_url", "")).strip()
+    booking_url = str(listing.get("booking_url", "") or url).strip()
+    try:
+        rating = float(listing.get("rating", 0.0) or 0.0)
+    except Exception:
+        rating = 0.0
+    try:
+        reviews_count = int(listing.get("reviews_count", 0) or listing.get("review_count", 0) or 0)
+    except Exception:
+        reviews_count = 0
+    price_info = str(listing.get("price_info", "") or listing.get("price_range", "")).strip()
+    address = str(listing.get("address", "")).strip()
+    lat = listing.get("latitude")
+    lon = listing.get("longitude")
+    verified = 1 if listing.get("verified") else 0
+    services_json = json.dumps(listing.get("services", [])) if isinstance(listing.get("services"), list) else str(listing.get("services", ""))
+    raw_metadata = json.dumps(listing.get("metadata", {})) if isinstance(listing.get("metadata"), dict) else "{}"
+    lead_id = listing.get("lead_id")
+
+    with get_connection() as conn:
+        # If lead_id not explicitly given, attempt to find matching lead
+        if not lead_id:
+            lead_id = find_matching_lead_id(conn, name=title, address=address)
+            if not lead_id and clean_brand:
+                lead_id = find_matching_lead_id(conn, name=clean_brand, address=address)
+
+        # Upsert into platform_listings
+        cursor = conn.execute("""
+            INSERT INTO platform_listings (
+                lead_id, platform, listing_id, title, clean_brand, category, url, booking_url,
+                rating, reviews_count, price_info, address, latitude, longitude, verified,
+                services_json, raw_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, url) DO UPDATE SET
+                lead_id = COALESCE(excluded.lead_id, platform_listings.lead_id),
+                title = excluded.title,
+                clean_brand = excluded.clean_brand,
+                rating = excluded.rating,
+                reviews_count = excluded.reviews_count,
+                price_info = excluded.price_info,
+                booking_url = excluded.booking_url,
+                verified = excluded.verified,
+                services_json = excluded.services_json
+            RETURNING id;
+        """, (
+            lead_id, platform, str(listing.get("listing_id", "")), title, clean_brand, category, url, booking_url,
+            rating, reviews_count, price_info, address, lat, lon, verified,
+            services_json, raw_metadata
+        ))
+        row = cursor.fetchone()
+        inserted_id = row[0] if row else 0
+
+        # If linked to a lead, update leads table with normalized platform metadata
+        if lead_id:
+            conn.execute("""
+                UPDATE leads SET
+                    platform_name = ?,
+                    platform_url = ?,
+                    platform_rating = ?,
+                    platform_reviews = ?,
+                    booking_url = ?,
+                    platform_price = CASE WHEN ? != '' THEN ? ELSE platform_price END,
+                    platform_verified = ?
+                WHERE id = ?;
+            """, (
+                platform, url, str(rating) if rating > 0 else "N/A", str(reviews_count), booking_url,
+                price_info, price_info, verified, lead_id
+            ))
+
+        conn.commit()
+        return inserted_id
+
+def get_platform_listings(platform: Optional[str] = None, lead_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Retrieves saved platform directory listings."""
+    with get_connection() as conn:
+        query = "SELECT * FROM platform_listings WHERE 1=1"
+        params = []
+        if platform:
+            query += " AND platform = ?"
+            params.append(platform)
+        if lead_id:
+            query += " AND lead_id = ?"
+            params.append(lead_id)
+        query += " ORDER BY id DESC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+

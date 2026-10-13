@@ -280,10 +280,10 @@
     .stat-val { font-family: 'Outfit', sans-serif; font-size: 1.6rem; font-weight: 700; color: #fff; white-space: nowrap; }
     .stat-label { font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
 
-    /* TRI-TAB LIVE STREAM CONTAINER (3-COLUMN SPLIT VIEW) */
+    /* MULTI-TAB LIVE STREAM CONTAINER (DYNAMIC 3 OR 4 COLUMNS) */
     .tri-stream-container {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 16px;
       height: clamp(250px, 28vh, 380px);
       position: relative;
@@ -292,7 +292,7 @@
     }
     @media (max-width: 1350px) {
       .tri-stream-container {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
         height: auto;
       }
     }
@@ -416,6 +416,12 @@
       background: rgba(10, 102, 194, 0.25);
       color: #38bdf8;
       border: 1px solid rgba(10, 102, 194, 0.45);
+      animation: pulse 1.5s infinite;
+    }
+    .live-indicator.platform {
+      background: rgba(168, 85, 247, 0.25);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.45);
       animation: pulse 1.5s infinite;
     }
     .stream-viewport {

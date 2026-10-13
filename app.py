@@ -24,6 +24,7 @@ from database import (
     get_company_hierarchy,
     deduplicate_database,
     renumber_and_clean_database,
+    get_platform_listings,
 )
 
 # Force UTF-8 encoding on Windows
@@ -68,6 +69,7 @@ active_websockets: List[WebSocket] = []
 last_live_frame_maps: Optional[Dict[str, Any]] = None
 last_live_frame_website: Optional[Dict[str, Any]] = None
 last_live_frame_linkedin: Optional[Dict[str, Any]] = None
+last_live_frame_platform: Optional[Dict[str, Any]] = None
 extension_ws: Optional[WebSocket] = None
 
 def add_log(message: str):
@@ -147,6 +149,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "frame_maps": last_live_frame_maps,
             "frame_website": last_live_frame_website,
             "frame_linkedin": last_live_frame_linkedin,
+            "frame_platform": last_live_frame_platform,
         })
         while True:
             data = await websocket.receive_text()
@@ -158,7 +161,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def read_process_output(proc: asyncio.subprocess.Process):
     global is_scraping, current_status, active_process
-    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin
+    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     try:
         while True:
             line = await proc.stdout.readline()
@@ -194,6 +197,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     elif etype == "org_updated":
                         # Emitted when Tab 3 finishes extracting LinkedIn hierarchy for a company
                         add_log(f"🌳 [Org Intelligence] Mapped {edata.get('employee_count', 0)} employees for {edata.get('company', '')}")
+                    elif etype == "platform_listing_found":
+                        # Emitted when Tab 4 discovers/matches a platform directory listing
+                        add_log(f"🟣 [Platform Directory] Verified {edata.get('platform', '')} listing for {edata.get('name', '')}: {edata.get('rating', '')} ★")
                     elif etype == "linkedin_navigated":
                         if extension_ws and edata.get("url"):
                             asyncio.create_task(extension_ws.send_json({"action": "NAVIGATE_LINKEDIN", "payload": edata}))
@@ -203,7 +209,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         add_log(str(edata))
                     elif etype == "live_frame":
                         tab = edata.get("tab")
-                        if tab == "linkedin" or edata.get("is_linkedin"):
+                        if tab == "platform" or edata.get("is_platform"):
+                            last_live_frame_platform = edata
+                        elif tab == "linkedin" or edata.get("is_linkedin"):
                             last_live_frame_linkedin = edata
                         elif tab == "website" or edata.get("is_website"):
                             last_live_frame_website = edata
@@ -247,6 +255,9 @@ async def start_scraping(payload: Dict[str, Any]):
     enable_maps = bool(payload.get("enable_maps", True))
     enable_website = bool(payload.get("enable_website", True))
     enable_linkedin = bool(payload.get("enable_linkedin", True))
+    enable_platform = bool(payload.get("enable_platform", False))
+    platform_name = str(payload.get("platform_name", "Fresha")).strip()
+    platform_custom_url = str(payload.get("platform_custom_url", "")).strip()
     dedup_area = bool(payload.get("dedup_area", True))
     skip_existing_db = bool(payload.get("skip_existing_db", False))
 
@@ -254,12 +265,14 @@ async def start_scraping(payload: Dict[str, Any]):
     last_live_frame_maps = None
     last_live_frame_website = None
     last_live_frame_linkedin = None
+    last_live_frame_platform = None
     is_scraping = True
     current_status = "Opening Chrome window on screen..."
     agents_desc = []
     if enable_maps: agents_desc.append("Maps")
     if enable_website: agents_desc.append("Website")
     if enable_linkedin: agents_desc.append("LinkedIn")
+    if enable_platform: agents_desc.append(f"Platform ({platform_name})")
     active_str = " + ".join(agents_desc) if agents_desc else "None"
     add_log(f"🚀 Launching Live Chrome Agents [{active_str}] for: '{query}' (Radius: {radius_km}km, Continuous: {scrape_all})")
 
@@ -297,6 +310,14 @@ async def start_scraping(payload: Dict[str, Any]):
         cmd.append("--enable-linkedin")
     else:
         cmd.append("--no-linkedin")
+
+    if enable_platform:
+        cmd.append("--enable-platform")
+        cmd.extend(["--platform-name", platform_name])
+        if platform_custom_url:
+            cmd.extend(["--platform-custom-url", platform_custom_url])
+    else:
+        cmd.append("--no-platform")
 
     if dedup_area:
         cmd.append("--dedup-area")
@@ -549,6 +570,10 @@ async def launch_chrome_debug():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch Chrome: {e}")
 
+@app.get("/api/platform-listings")
+async def get_all_platform_directory_listings(platform: Optional[str] = None, lead_id: Optional[int] = None):
+    return get_platform_listings(platform=platform, lead_id=lead_id)
+
 @app.get("/api/export/csv")
 async def export_csv(request: Request):
     leads = get_all_leads()
@@ -560,6 +585,8 @@ async def export_csv(request: Request):
     fieldnames = [
         "id", "name", "category", "phone", "email", "instagram", "facebook",
         "linkedin", "twitter", "bot_protection", "cookie_status", "employee_count",
+        "platform_name", "platform_url", "platform_rating", "platform_reviews",
+        "booking_url", "platform_price", "platform_verified",
         "screenshot", "screenshot_url", "screenshot_file_path",
         "address", "hours", "price", "plus_code", "rating",
         "reviews", "website", "maps_url", "lat", "lon", "created_at"

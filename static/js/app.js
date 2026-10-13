@@ -198,13 +198,36 @@ let placesData = [];
       }
     }
 
+    function handlePlatformToggleChange() {
+      const toggle = document.getElementById('agent-platform-toggle');
+      const panel = document.getElementById('platform-config-panel');
+      const card = document.getElementById('card-platform');
+      if (toggle && panel) {
+        panel.style.display = toggle.checked ? 'block' : 'none';
+      }
+      if (card) {
+        card.style.display = toggle.checked ? 'flex' : 'none';
+      }
+      handleAgentToggleChange();
+    }
+
+    function handlePlatformPresetChange() {
+      const preset = document.getElementById('platform-preset-select').value;
+      const customGroup = document.getElementById('platform-custom-input-group');
+      if (customGroup) {
+        customGroup.style.display = (preset === 'Custom') ? 'block' : 'none';
+      }
+      handleAgentToggleChange();
+    }
+
     function handleAgentToggleChange() {
       const mapsOn = document.getElementById('agent-maps-toggle').checked;
       const siteOn = document.getElementById('agent-website-toggle').checked;
       const liOn = document.getElementById('agent-linkedin-toggle').checked;
+      const platOn = document.getElementById('agent-platform-toggle')?.checked || false;
       const startBtn = document.getElementById('start-btn');
 
-      if (!mapsOn && !siteOn && !liOn) {
+      if (!mapsOn && !siteOn && !liOn && !platOn) {
         alert("Warning: At least one agent must be enabled!");
         document.getElementById('agent-maps-toggle').checked = true;
         return;
@@ -214,6 +237,10 @@ let placesData = [];
       if (mapsOn) parts.push("Maps");
       if (siteOn) parts.push("Website");
       if (liOn) parts.push("LinkedIn");
+      if (platOn) {
+        const pPreset = document.getElementById('platform-preset-select')?.value || "Platform";
+        parts.push(pPreset);
+      }
 
       if (startBtn && currentMode === 'maps') {
         startBtn.innerHTML = `<span>🚀 Launch Agent (${parts.join(' + ')})</span>`;
@@ -480,6 +507,30 @@ let placesData = [];
           }
         }
 
+        let platformHtml = `<span class="badge badge-none">—</span>`;
+        if (place.platform_name && place.platform_name !== 'N/A') {
+          const pName = escapeHtml(place.platform_name);
+          const pRating = (place.platform_rating && place.platform_rating !== 'N/A') ? `★ ${place.platform_rating}` : '';
+          const pReviews = (place.platform_reviews && place.platform_reviews !== 'N/A') ? `(${place.platform_reviews})` : '';
+          const bookLink = (place.booking_url && place.booking_url !== 'N/A')
+            ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:2px 6px; text-decoration:none;" title="Direct Booking / Listing" onclick="event.stopPropagation();">📅 Book</a>`
+            : '';
+          const listLink = (place.platform_url && place.platform_url !== 'N/A')
+            ? `<a href="${encodeURI(place.platform_url)}" target="_blank" class="link-btn" style="color:#c084fc; border-color:rgba(168,85,247,0.3); font-size:0.72rem; padding:2px 6px;" title="View on ${pName}" onclick="event.stopPropagation();">📍 ${pName}</a>`
+            : `<span class="badge" style="background:rgba(168,85,247,0.15); color:#d8b4fe;">📍 ${pName}</span>`;
+
+          platformHtml = `
+            <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
+              <div style="display:flex; align-items:center; gap:4px;">
+                ${listLink}
+                ${bookLink}
+              </div>
+              ${pRating ? `<span style="font-size:0.72rem; color:#d8b4fe; white-space:nowrap;">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span>` : ''}
+              ${place.platform_price && place.platform_price !== 'N/A' ? `<span style="font-size:0.68rem; color:#cbd5e1; white-space:nowrap;">💰 ${escapeHtml(place.platform_price)}</span>` : ''}
+            </div>
+          `;
+        }
+
         tr.innerHTML = `
           <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
           <td class="shop-title">${escapeHtml(place.name)}</td>
@@ -494,6 +545,7 @@ let placesData = [];
           <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
           <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
           <td>${ratingHtml}</td>
+          <td>${platformHtml}</td>
           <td>${linksHtml}</td>
           <td>${formatDateTime(place.created_at)}</td>
         `;
@@ -708,7 +760,11 @@ let placesData = [];
       let indicatorClass = 'live-indicator maps';
       let indicatorText = '🔴 TAB 1: MAPS LIVE';
 
-      if (frame.tab === 'linkedin' || frame.is_linkedin) {
+      if (frame.tab === 'platform' || frame.is_platform) {
+        prefix = 'platform';
+        indicatorClass = 'live-indicator platform';
+        indicatorText = '🟣 TAB 4: DIRECTORY LIVE';
+      } else if (frame.tab === 'linkedin' || frame.is_linkedin) {
         prefix = 'linkedin';
         indicatorClass = 'live-indicator linkedin';
         indicatorText = '🔵 TAB 3: LINKEDIN LIVE';
@@ -759,6 +815,7 @@ let placesData = [];
               if (msg.frame_maps) updateLiveStream(msg.frame_maps);
               if (msg.frame_website) updateLiveStream(msg.frame_website);
               if (msg.frame_linkedin) updateLiveStream(msg.frame_linkedin);
+              if (msg.frame_platform) updateLiveStream(msg.frame_platform);
             } else if (msg.type === 'live_frame') {
               updateLiveStream(msg.data);
             } else if (msg.type === 'place_scraped') {
@@ -771,6 +828,20 @@ let placesData = [];
                 Object.assign(target, msg.data);
               } else {
                 placesData.unshift(msg.data);
+              }
+              renderTable();
+              updateKPIs();
+            } else if (msg.type === 'platform_listing_found') {
+              const listing = msg.data;
+              const target = placesData.find(p => p.name === listing.company_name || p.id === listing.lead_id);
+              if (target) {
+                target.platform_name = listing.platform;
+                target.platform_url = listing.listing_url;
+                target.platform_rating = listing.rating;
+                target.platform_reviews = listing.review_count;
+                target.booking_url = listing.booking_url;
+                target.platform_price = listing.price_range;
+                target.platform_verified = listing.verified ? 1 : 0;
               }
               renderTable();
               updateKPIs();
@@ -825,6 +896,11 @@ let placesData = [];
           if (indLi && !indLi.innerText.includes('IDLE')) {
             indLi.className = 'live-indicator linkedin';
             indLi.innerText = '⚪ LINKEDIN IDLE';
+          }
+          const indPlat = document.getElementById('stream-indicator-platform');
+          if (indPlat && !indPlat.innerText.includes('IDLE')) {
+            indPlat.className = 'live-indicator platform';
+            indPlat.innerText = '⚪ PLATFORM IDLE';
           }
         }
 
@@ -902,11 +978,14 @@ let placesData = [];
       const agentMaps = document.getElementById('agent-maps-toggle').checked;
       const agentWebsite = document.getElementById('agent-website-toggle').checked;
       const agentLinkedin = document.getElementById('agent-linkedin-toggle').checked;
+      const agentPlatform = document.getElementById('agent-platform-toggle')?.checked || false;
+      const platformName = document.getElementById('platform-preset-select')?.value || "Fresha";
+      const platformCustomUrl = document.getElementById('platform-custom-url')?.value.trim() || "";
       const dedupArea = document.getElementById('dedup-area-toggle').checked;
       const skipExisting = document.getElementById('skip-existing-toggle').checked;
 
-      if (!agentMaps && !agentWebsite && !agentLinkedin) {
-        alert("Please enable at least one agent (Maps, Website, or LinkedIn) to start scraping!");
+      if (!agentMaps && !agentWebsite && !agentLinkedin && !agentPlatform) {
+        alert("Please enable at least one agent (Maps, Website, LinkedIn, or Platform) to start scraping!");
         return;
       }
 
@@ -915,6 +994,7 @@ let placesData = [];
       if (agentMaps) parts.push("Maps");
       if (agentWebsite) parts.push("Website");
       if (agentLinkedin) parts.push("LinkedIn");
+      if (agentPlatform) parts.push(platformName);
       logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
 
       // Trigger Extension to open tab live in this exact Chrome window if installed
@@ -952,6 +1032,9 @@ let placesData = [];
             enable_maps: agentMaps,
             enable_website: agentWebsite,
             enable_linkedin: agentLinkedin,
+            enable_platform: agentPlatform,
+            platform_name: platformName,
+            platform_custom_url: platformCustomUrl,
             dedup_area: dedupArea,
             skip_existing_db: skipExisting
           })
