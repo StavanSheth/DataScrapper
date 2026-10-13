@@ -368,17 +368,17 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                     matching_id
                 ))
                 conn.commit()
-                return True
+                return matching_id
             else:
                 # Insert brand-new lead
-                conn.execute("""
+                cursor = conn.execute("""
                     INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status))
                 conn.commit()
-                return True
+                return cursor.lastrowid
         except Exception:
-            return False
+            return 0
 
 def deduplicate_database() -> int:
     """Scans leads.db and merges any duplicate records with matching names or websites into a single clean row."""

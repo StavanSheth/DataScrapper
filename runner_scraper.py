@@ -1216,21 +1216,46 @@ async def platform_worker(
                     'a[href*="/a/"], div[data-qa="venue-card"], div.venue-card, ' +
                     'div[data-testid="card-container"], div[itemprop="itemListElement"], ' +
                     'div[data-testid="serp-ia-card"], li.border-color--default__09f24__Nrmcg, ' +
-                    '.search-result-card, a.property-card, div.result-card'
+                    '.search-result-card, a.property-card, div.result-card, ' +
+                    'div[role="group"], a[href*="/rooms/"]'
                 );
 
                 cards.forEach(card => {
-                    let titleEl = card.querySelector('h2, h3, h4, .title, [data-qa="venue-name"], [data-testid="listing-card-title"], a.booking-link');
-                    let ratingEl = card.querySelector('[data-qa="rating-badge"], .rating, [aria-label*="rating"], [aria-label*="star"], span[class*="rating"]');
+                    let titleEl = card.querySelector('h2, h3, h4, .title, [data-qa="venue-name"], [data-testid="listing-card-title"], div[id^="title_"], a.booking-link, [class*="t1jqs7"]');
+                    let ratingEl = card.querySelector('[data-qa="rating-badge"], .rating, [aria-label*="rating"], [aria-label*="star"], span[class*="rating"], span[class*="r1dxllyb"]');
                     let reviewsEl = card.querySelector('[data-qa="reviews-count"], .review-count, span[class*="review"], span[class*="count"]');
-                    let priceEl = card.querySelector('[data-qa="price"], .price, [class*="price"], span:has-text("$"), span:has-text("£"), span:has-text("₹")');
-                    let linkEl = card.matches('a') ? card : card.querySelector('a[href]');
+                    let linkEl = card.matches('a') ? card : card.querySelector('a[href*="/rooms/"], a[href*="/a/"], a[href]');
 
-                    let title = titleEl ? (titleEl.innerText || titleEl.textContent).trim() : (linkEl ? (linkEl.innerText || "").trim() : "");
+                    let title = titleEl ? (titleEl.innerText || titleEl.textContent || "").trim() : "";
+                    if (!title && linkEl) {
+                        const aria = linkEl.getAttribute('aria-label') || '';
+                        title = aria.split(' - ')[0] || aria.split(' · ')[0] || aria;
+                    }
+                    if (!title) {
+                        title = (card.innerText || "").split('\n')[0].trim();
+                    }
+
                     let url = linkEl ? linkEl.href : window.location.href;
-                    let rawRating = ratingEl ? (ratingEl.innerText || ratingEl.getAttribute('aria-label') || "").trim() : "";
+                    let rawRating = ratingEl ? (ratingEl.getAttribute('aria-label') || ratingEl.innerText || "").trim() : "";
+                    if (!rawRating) {
+                        const m = (card.innerText || '').match(/(?:★|star|rating)?\s*(\d\.\d+)\s*(?:\((\d+)\))?/i);
+                        if (m) rawRating = m[0];
+                    }
+
                     let rawReviews = reviewsEl ? (reviewsEl.innerText || "").trim() : "";
-                    let rawPrice = priceEl ? (priceEl.innerText || "").trim() : "";
+                    
+                    let priceText = '';
+                    let priceEl = card.querySelector('[data-qa="price"], .price, [class*="price"]');
+                    if (priceEl) {
+                        priceText = (priceEl.innerText || "").trim();
+                    } else {
+                        card.querySelectorAll('span, div').forEach(el => {
+                            const txt = (el.innerText || '').trim();
+                            if (txt.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+/i) && (!priceText || txt.length < priceText.length)) {
+                                priceText = txt;
+                            }
+                        });
+                    }
 
                     let rMatch = rawRating.match(/(\d+(?:\.\d+)?)/);
                     let ratingVal = rMatch ? parseFloat(rMatch[1]) : 0.0;
@@ -1238,13 +1263,17 @@ async def platform_worker(
                     let revMatch = rawReviews.match(/(\d[\d,]*)/);
                     let revCount = revMatch ? parseInt(revMatch[1].replace(/,/g, ''), 10) : 0;
 
-                    if (title && url && url.startsWith('http') && !url.includes('/login') && !url.includes('/signup')) {
+                    const lowerTitle = title.toLowerCase();
+                    if (title && url && url.startsWith('http') && 
+                        !url.includes('/login') && !url.includes('/signup') &&
+                        lowerTitle !== 'filters' && lowerTitle !== 'filter' && 
+                        lowerTitle !== 'show map' && lowerTitle !== 'search') {
                         results.push({
                             title: title.replace(/[\r\n]+/g, ' ').trim(),
                             url: url.split('?')[0],
                             rating: ratingVal,
                             reviews_count: revCount,
-                            price_info: rawPrice.replace(/[\r\n]+/g, ' ').trim()
+                            price_info: priceText.replace(/[\r\n]+/g, ' ').trim()
                         });
                     }
                 });
@@ -1252,41 +1281,66 @@ async def platform_worker(
                 return results;
             }""")
 
-            # 4. Filter & Match best listing
+            # 4. Filter, Match & Populate Directory
             best_match = None
             if extracted_listings and isinstance(extracted_listings, list):
-                for cand in extracted_listings:
+                # Save top discovered listings into platform directory
+                for cand in extracted_listings[:6]:
                     c_title = cand.get("title", "")
-                    if verify_company_name_match(core_brand, c_title) or verify_company_name_match(name, c_title):
+                    if not c_title:
+                        continue
+                    is_match = (
+                        verify_company_name_match(core_brand, c_title) or 
+                        verify_company_name_match(name, c_title) or
+                        (core_brand.lower() in c_title.lower() and len(core_brand) >= 3)
+                    )
+                    cand_lead_id = lead_id if is_match else None
+                    cand_data = {
+                        "lead_id": cand_lead_id,
+                        "platform": p_name,
+                        "title": c_title,
+                        "clean_brand": clean_brand_tokens(c_title, city=city),
+                        "url": cand.get("url", target_url),
+                        "booking_url": cand.get("url", target_url),
+                        "rating": cand.get("rating", 0.0),
+                        "reviews_count": cand.get("reviews_count", 0),
+                        "price_info": cand.get("price_info", ""),
+                        "address": f"{city}, Area Radius" if city else address,
+                        "verified": 1 if is_match else 0
+                    }
+                    save_platform_listing(cand_data)
+                    if is_match and not best_match:
                         best_match = cand
-                        break
 
             if best_match:
-                listing_data = {
-                    "lead_id": lead_id,
-                    "platform": p_name,
-                    "title": best_match.get("title", core_brand),
-                    "clean_brand": core_brand,
-                    "url": best_match.get("url", target_url),
-                    "booking_url": best_match.get("url", target_url),
-                    "rating": best_match.get("rating", 0.0),
-                    "reviews_count": best_match.get("reviews_count", 0),
-                    "price_info": best_match.get("price_info", ""),
-                    "address": address,
-                    "verified": 1
-                }
-                save_platform_listing(listing_data)
                 emit_event("platform_listing_found", {
-                    "name": name,
+                    "lead_id": lead_id,
+                    "company_name": name,
                     "platform": p_name,
                     "rating": best_match.get("rating", 0.0),
-                    "reviews": best_match.get("reviews_count", 0),
-                    "url": best_match.get("url", target_url),
-                    "price": best_match.get("price_info", "")
+                    "review_count": best_match.get("reviews_count", 0),
+                    "listing_url": best_match.get("url", target_url),
+                    "booking_url": best_match.get("url", target_url),
+                    "price_range": best_match.get("price_info", ""),
+                    "verified": True
                 })
-                emit_event("log", f"🟣 [Tab 4 Finished: #{idx} {name}] Verified on {p_name}: {best_match.get('rating')} ★ ({best_match.get('reviews_count')} reviews) | 🔗 {best_match.get('url')}")
+                emit_event("log", f"🟣 [Tab 4 Finished: #{idx} {name}] Verified on {p_name}: {best_match.get('rating')} ★ ({best_match.get('reviews_count')} reviews) | 💰 {best_match.get('price_info')} | 🔗 {best_match.get('url')}")
+            elif extracted_listings:
+                top_cand = extracted_listings[0]
+                emit_event("platform_listing_found", {
+                    "lead_id": lead_id,
+                    "company_name": name,
+                    "platform": p_name,
+                    "rating": top_cand.get("rating", 0.0),
+                    "review_count": top_cand.get("reviews_count", 0),
+                    "listing_url": top_cand.get("url", target_url),
+                    "booking_url": top_cand.get("url", target_url),
+                    "price_range": top_cand.get("price_info", ""),
+                    "verified": False
+                })
+                emit_event("log", f"🟣 [Tab 4] Stored {len(extracted_listings[:6])} {p_name} listings in directory for area '{city}'. Top listing: '{top_cand.get('title')}' ({top_cand.get('rating')} ★, {top_cand.get('price_info')})")
             else:
-                emit_event("log", f"ℹ️ [Tab 4] No matching listing found on {p_name} for '{name}'")
+                emit_event("log", f"ℹ️ [Tab 4] No listings returned on {p_name} for '{name}' ({city})")
 
         except Exception as err:
             emit_event("log", f"⚠️ Error scanning {p_name} for #{idx} {name}: {str(err)[:60]}")
@@ -1891,6 +1945,10 @@ async def run_scraper(
                         "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
 
+                    lead_db_id = save_lead(place_info)
+                    if lead_db_id:
+                        place_info["id"] = lead_db_id
+
                     scraped_places.append(place_info)
                     emit_event("place_scraped", place_info)
                     emit_event("log", f"✅ Added: {place_title} | 🏷️ {category or 'Business'} | 📞 {phone or 'N/A'}")
@@ -1922,6 +1980,7 @@ async def run_scraper(
                             "address": address or "N/A",
                             "lat": lat_val,
                             "lon": lon_val,
+                            "id": lead_db_id,
                         })
 
                 except Exception as e:
