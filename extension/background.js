@@ -124,16 +124,17 @@ try {
 // Initial connection
 connect();
 
-// Focus browser window
+// Focus browser window and maintain maximized state without shrinking
 async function bringWindowToFront(windowId) {
   try {
-    if (windowId) {
-      await chrome.windows.update(windowId, { focused: true, state: "normal" });
-    } else {
-      const win = await chrome.windows.getCurrent();
-      if (win) {
-        await chrome.windows.update(win.id, { focused: true, state: "normal" });
+    const targetId = windowId || (await chrome.windows.getCurrent().catch(() => null))?.id;
+    if (targetId) {
+      const win = await chrome.windows.get(targetId).catch(() => null);
+      const updateInfo = { focused: true };
+      if (win && win.state !== "fullscreen") {
+        updateInfo.state = "maximized";
       }
+      await chrome.windows.update(targetId, updateInfo);
     }
   } catch (e) {}
 }
@@ -322,7 +323,7 @@ async function handleCommand(msg) {
     };
   }
 
-  // 2. OPEN SHOP TAB: Opens dynamically when shop website is processed, reuse single tab
+  // 2. OPEN SHOP TAB: Opens dynamically when shop website is processed, reuse single tab in background
   if (action === "OPEN_SHOP_TAB") {
     const shopUrl = payload.url || payload.website;
     if (!shopUrl || !shopUrl.startsWith("http")) {
@@ -335,22 +336,14 @@ async function handleCommand(msg) {
     }
 
     if (existingShopTab) {
-      await chrome.tabs.update(shopTabId, { url: shopUrl, active: true });
+      await chrome.tabs.update(shopTabId, { url: shopUrl, active: false });
     } else {
-      const createOpts = targetWinId ? { windowId: targetWinId, url: shopUrl, active: true } : { url: shopUrl, active: true };
+      const createOpts = targetWinId ? { windowId: targetWinId, url: shopUrl, active: false } : { url: shopUrl, active: false };
       const t = await chrome.tabs.create(createOpts);
       shopTabId = t.id;
     }
 
-    // Ensure tab is active and window in front
-    try {
-      await chrome.tabs.update(shopTabId, { active: true });
-      const curTab = await chrome.tabs.get(shopTabId).catch(() => null);
-      if (curTab && curTab.windowId) {
-        await bringWindowToFront(curTab.windowId);
-      }
-    } catch (e) {}
-
+    // Do NOT steal tab focus or bring window to front - load and harvest quietly in background
     ensureScreencastForTab(shopTabId, "website").catch(() => {});
     return { success: true, shop_tab_id: shopTabId };
   }

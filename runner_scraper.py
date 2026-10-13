@@ -148,8 +148,7 @@ def force_foreground_window():
                 user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
                 user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
 
-                # 4. Show and maximize
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                # 4. Show and maximize (keep full-screen maximized, never shrink/restore)
                 user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
                 user32.BringWindowToTop(hwnd)
                 user32.SetForegroundWindow(hwnd)
@@ -475,11 +474,12 @@ async def clear_fixed_viewport(page):
     except Exception:
         pass
 
-async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Event, maps_page=None, linkedin_queue: asyncio.Queue = None, pages_dict: Dict = None):
+async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Event, maps_page=None, linkedin_queue: asyncio.Queue = None, pages_dict: Dict = None, cdp_connected: bool = False):
     tab_page = None
     """
     Dedicated Worker for Tab 2: Visually loads shop websites in parallel, checks Cloudflare/anti-bot,
     takes landing page screenshots, extracts emails and social media accounts simultaneously.
+    Runs quietly in the background without stealing active tab focus or window focus.
     """
     while not done_event.is_set() or not queue.empty():
         try:
@@ -505,18 +505,19 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
 
             # Open Tab 3 (Shop Website) dynamically only when a shop with website is processed
             if tab_page is None or tab_page.is_closed():
-                tab_page = await context.new_page()
+                if cdp_connected:
+                    candidate_pages = [p for p in context.pages if p != maps_page and p != (pages_dict.get("linkedin") if pages_dict else None) and "google.com/maps" not in p.url and "linkedin.com" not in p.url]
+                    if candidate_pages:
+                        tab_page = candidate_pages[0]
+                    else:
+                        tab_page = await context.new_page()
+                else:
+                    tab_page = await context.new_page()
                 await clear_fixed_viewport(tab_page)
                 if pages_dict is not None:
                     pages_dict["website"] = tab_page
 
-            try:
-                await tab_page.bring_to_front()
-                force_foreground_window()
-            except Exception:
-                pass
-
-            # Navigate Tab 3 to shop website
+            # Navigate Tab 3 to shop website quietly in background
             try:
                 await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=12000)
                 await tab_page.wait_for_timeout(1500)
@@ -1253,7 +1254,7 @@ async def run_scraper(
 
         worker_task = None
         if website_queue:
-            worker_task = asyncio.create_task(website_worker(context, website_queue, done_event, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict))
+            worker_task = asyncio.create_task(website_worker(context, website_queue, done_event, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict, cdp_connected=cdp_connected))
 
         linkedin_task = None
         if linkedin_page and linkedin_queue:
