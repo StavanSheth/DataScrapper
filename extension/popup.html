@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mavon Leads Chrome Assistant</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #121826;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --cyan: #06b6d4;
+      --green: #10b981;
+      --red: #ef4444;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, var(--accent), var(--cyan));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+      box-shadow: 0 0 12px rgba(99, 102, 241, 0.4);
+    }
+    .title h1 { font-size: 13px; font-weight: 700; letter-spacing: 0.01em; }
+    .title p { font-size: 10px; color: var(--text-muted); }
+    .server-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--red);
+      transition: background 0.2s ease;
+    }
+    .status-dot.online {
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+    }
+    .status-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+    }
+    .status-badge {
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 10px;
+    }
+    .badge-maps { background: rgba(99, 102, 241, 0.2); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.4); }
+    .badge-place { background: rgba(6, 182, 212, 0.2); color: #67e8f9; border: 1px solid rgba(6, 182, 212, 0.4); }
+    .badge-site { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.4); }
+    .badge-other { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
+    .page-title {
+      margin-top: 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #cbd5e1;
+    }
+    .btn-group { display: flex; flex-direction: column; gap: 7px; }
+    .btn {
+      width: 100%;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: none;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      transition: all 0.15s ease;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #4f46e5);
+      color: #fff;
+    }
+    .btn-primary:hover { opacity: 0.92; transform: translateY(-1px); }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: #cbd5e1;
+    }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+    .btn-save {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #ffffff;
+      font-weight: 700;
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+    }
+    .btn-save:hover { opacity: 0.94; transform: translateY(-1px); }
+    .results-box {
+      margin-top: 10px;
+      background: #030712;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 140px;
+      overflow-y: auto;
+      color: #cbd5e1;
+      display: none;
+      white-space: pre-wrap;
+    }
+    .footer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .footer a {
+      color: var(--cyan);
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .footer a:hover { text-decoration: underline; }
+    .version-tag { font-size: 10px; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <div class="icon">⚡</div>
+      <div class="title">
+        <h1>Mavon Assistant</h1>
+        <p>1-Click Browser Sync</p>
+      </div>
+    </div>
+    <div class="server-status" id="server-status" title="FastAPI Backend Health">
+      <div class="status-dot" id="server-dot"></div>
+      <span id="server-text">:8080</span>
+    </div>
+  </div>
+
+  <div class="status-card">
+    <div class="status-row">
+      <span style="color:var(--text-muted);">Current Tab:</span>
+      <span id="page-badge" class="status-badge badge-other">Detecting...</span>
+    </div>
+    <div id="page-title" class="page-title">—</div>
+  </div>
+
+  <div class="btn-group">
+    <!-- Master Live Agent Launcher in Active Chrome -->
+    <button class="btn btn-primary" id="btn-launch-agent" style="background:linear-gradient(135deg, #6366f1, #06b6d4); font-size:12px; padding:10px;">
+      <span>🚀</span> <span>Launch Live Agent in This Window</span>
+    </button>
+
+    <!-- Context: Google Maps Feed / Search -->
+    <button class="btn btn-primary" id="btn-scroll">
+      <span>🔄</span> <span>Scroll Maps Feed</span>
+    </button>
+    <button class="btn btn-secondary" id="btn-extract-feed">
+      <span>📋</span> <span>Extract Places from Feed</span>
+    </button>
+    <button class="btn btn-save" id="btn-save-feed">
+      <span>💾</span> <span>Save Feed to Database</span>
+    </button>
+
+    <!-- Context: Google Maps Single Place -->
+    <button class="btn btn-save" id="btn-save-place" style="display:none;">
+      <span>🏢</span> <span>Save Place to Database</span>
+    </button>
+
+    <!-- Context: Business Website -->
+    <button class="btn btn-secondary" id="btn-extract-site">
+      <span>🔍</span> <span>Scan Emails, Phones & Socials</span>
+    </button>
+    <button class="btn btn-save" id="btn-save-site">
+      <span>💾</span> <span>Save Website Lead to DB</span>
+    </button>
+  </div>
+
+  <div id="results" class="results-box"></div>
+
+  <div class="footer">
+    <a href="http://localhost:8080/" target="_blank">
+      <span>🚀</span> <span>Open Mavon Dashboard</span>
+    </a>
+    <span class="version-tag">v2.1</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

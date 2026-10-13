@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mavon Leads & Org Intelligence - Tri-Tab Live Harvester</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-text">
+        <h1>Mavon Leads & Org Intelligence</h1>
+        <p>Tri-Tab Live Chrome Agent: Maps Harvester, Website Inspector & LinkedIn Org Hierarchy</p>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <button id="btn-chrome-cdp" class="btn-chrome-pill disconnected" onclick="promptOrLaunchChromeDebug()" title="Chrome Port 9222 connection status">
+        <span class="chrome-dot"></span>
+        <span id="chrome-cdp-text">Checking Chrome (9222)...</span>
+      </button>
+      <button class="btn btn-secondary" onclick="openPipelineModal()" style="font-size:0.8rem; padding:7px 14px; border:1px solid rgba(99,102,241,0.35); background:rgba(99,102,241,0.15); color:#c7d2fe; display:flex; align-items:center; gap:6px;">
+        <span>📋 Verified Workflow Steps</span>
+      </button>
+      <div class="status-badge">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <!-- Mode Switcher -->
+      <div class="mode-tabs">
+        <button class="mode-tab-btn active" id="tab-mode-maps" onclick="setMode('maps')">
+          <span>🗺️ Maps Harvester</span>
+        </button>
+        <button class="mode-tab-btn" id="tab-mode-companies" onclick="setMode('companies')">
+          <span>🏢 Standalone LinkedIn Org</span>
+        </button>
+      </div>
+
+      <!-- Mode 1: Maps Harvester Controls -->
+      <div id="controls-maps" style="display:flex; flex-direction:column; gap:16px;">
+        <div class="form-group" id="query-group">
+          <label id="query-label">Business Type / Keyword <span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">(Optional if All Shops checked)</span></label>
+          <input type="text" id="query-input" placeholder="e.g. Barber, Bakery, Dentist (or leave empty for all)" value="">
+          <div class="chips">
+            <div class="chip" onclick="setQuery('Bakery London')">🥐 Bakeries</div>
+            <div class="chip" onclick="setQuery('Barber London')">💈 Barbers</div>
+            <div class="chip" onclick="setQuery('Dentist London')">🦷 Dentists</div>
+            <div class="chip" onclick="setQuery('Cafe London')">☕ Cafes</div>
+            <div class="chip" onclick="setQuery('Gym London')">🏋️ Gyms</div>
+          </div>
+        </div>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span>🔄 Scrape ALL Shops (Continuous)</span>
+            <small>Scrolls Google Maps until all area shops are harvested</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="scrape-all-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label style="margin:0;">📍 Target Location & Interactive Map</label>
+            <button type="button" id="locate-me-btn" class="btn" style="padding:4px 10px; font-size:0.75rem; background:rgba(6,182,212,0.15); border:1px solid var(--cyan); color:var(--cyan); border-radius:6px; cursor:pointer;" onclick="locateUserPosition()">
+              🎯 My Location
+            </button>
+          </div>
+
+          <!-- Location Search Bar for Map -->
+          <div style="display:flex; gap:6px; margin-bottom:8px;">
+            <input type="text" id="location-search-input" placeholder="Search city, area, address, or landmark on map..." style="flex:1; padding:7px 10px; font-size:0.8rem; border-radius:8px;" onkeydown="if(event.key==='Enter'){event.preventDefault();searchLocationOnMap();}">
+            <button type="button" class="btn" style="padding:7px 12px; font-size:0.8rem; background:var(--primary); color:#fff; border-radius:8px; border:none; cursor:pointer; font-weight:600;" onclick="searchLocationOnMap()">Find</button>
+          </div>
+
+          <!-- Quick City Preset Chips -->
+          <div class="chips" style="margin-bottom:8px; gap:4px; flex-wrap:wrap; display:flex;">
+            <div class="chip" onclick="setPresetLocation(19.0760, 72.8777, 'Mumbai', 13)">🇮🇳 Mumbai</div>
+            <div class="chip" onclick="setPresetLocation(28.6139, 77.2090, 'Delhi', 13)">🇮🇳 Delhi</div>
+            <div class="chip" onclick="setPresetLocation(12.9716, 77.5946, 'Bengaluru', 13)">🇮🇳 Bengaluru</div>
+            <div class="chip" onclick="setPresetLocation(51.5074, -0.1278, 'London', 13)">🇬🇧 London</div>
+            <div class="chip" onclick="setPresetLocation(40.7128, -74.0060, 'New York', 13)">🇺🇸 New York</div>
+            <div class="chip" onclick="setPresetLocation(25.2048, 55.2708, 'Dubai', 13)">🇦🇪 Dubai</div>
+          </div>
+
+          <div id="picker-map"></div>
+
+          <!-- Real-time Editable Lat / Lon Coordinate Inputs -->
+          <div class="coords-grid" style="margin-top: 8px;">
+            <div>
+              <label style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">Target Latitude</label>
+              <input type="number" step="any" id="lat-input" value="19.0760" style="padding:7px; font-size:0.85rem; font-family:monospace; width:100%;" oninput="onManualCoordChange()" onchange="onManualCoordChange()" placeholder="e.g. 19.0760">
+            </div>
+            <div>
+              <label style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">Target Longitude</label>
+              <input type="number" step="any" id="lon-input" value="72.8777" style="padding:7px; font-size:0.85rem; font-family:monospace; width:100%;" oninput="onManualCoordChange()" onchange="onManualCoordChange()" placeholder="e.g. 72.8777">
+            </div>
+          </div>
+          <div style="font-size:0.72rem; color:#94a3b8; margin-top:4px;">
+            💡 Click anywhere on map, drag the cyan pin, search an address above, or directly type/paste Latitude and Longitude.
+          </div>
+        </div>
+
+        <!-- Radius Selection Controls -->
+        <div class="form-group" style="background:rgba(255,255,255,0.02); border:1px solid var(--card-border); border-radius:12px; padding:12px 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <label style="margin:0;">🎯 Search Radius: <span id="radius-val" style="color:var(--cyan); font-weight:700;">5</span> km</label>
+            <span style="font-size:0.75rem; color:var(--text-muted);">(Strict Geofencing)</span>
+          </div>
+          <input type="range" id="radius-slider" min="1" max="50" step="1" value="5" style="width:100%; margin:8px 0;" oninput="updateRadius(this.value)">
+          <div class="chips" style="margin-top:2px;">
+            <div class="chip" onclick="updateRadius(1)">🚶 1 km (Local)</div>
+            <div class="chip" onclick="updateRadius(2)">🏘️ 2 km (Area)</div>
+            <div class="chip" onclick="updateRadius(5)">📍 5 km (Standard)</div>
+            <div class="chip" onclick="updateRadius(10)">🏙️ 10 km (City)</div>
+            <div class="chip" onclick="updateRadius(20)">🚗 20 km (District)</div>
+            <div class="chip" onclick="updateRadius(50)">🗺️ 50 km (Metro)</div>
+          </div>
+        </div>
+
+        <div class="form-group" id="max-results-group" style="opacity: 0.4; pointer-events: none;">
+          <label>Max Places Limit: <span id="max-label" style="color:var(--accent);">20</span></label>
+          <input type="range" id="max-slider" min="5" max="100" step="5" value="20" style="width:100%;" oninput="document.getElementById('max-label').innerText = this.value">
+        </div>
+
+        <!-- Tri-Agent Selector Toggles -->
+        <div style="display:flex; flex-direction:column; gap:8px; background:rgba(99,102,241,0.06); border:1px solid rgba(99,102,241,0.25); border-radius:12px; padding:12px 14px;">
+          <div style="font-size:0.8rem; font-weight:700; color:#e2e8f0; text-transform:uppercase; letter-spacing:0.04em; display:flex; justify-content:space-between; align-items:center;">
+            <span>🤖 Active Scraper Agents</span>
+            <span style="font-size:0.7rem; color:var(--accent); font-weight:normal;">(Toggle Permutations)</span>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🗺️ Agent 1: Google Maps Harvester</span>
+              <small>Tab 1: Discovers shops, phone, address & ratings</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="agent-maps-toggle" checked onchange="handleAgentToggleChange()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🌐 Agent 2: Shop Website Inspector</span>
+              <small>Tab 2: Visits websites for emails, socials, cookies & anti-bot</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="agent-website-toggle" checked onchange="handleAgentToggleChange()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>💼 Agent 3: LinkedIn Org Harvester</span>
+              <small>Tab 3: Crawls LinkedIn company page & employee hierarchy</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="agent-linkedin-toggle" checked onchange="handleAgentToggleChange()">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Duplication Avoidance & DB Edge Cases -->
+        <div style="display:flex; flex-direction:column; gap:8px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.25); border-radius:12px; padding:12px 14px;">
+          <div style="font-size:0.8rem; font-weight:700; color:#e2e8f0; text-transform:uppercase; letter-spacing:0.04em; display:flex; justify-content:space-between; align-items:center;">
+            <span>🛡️ Duplication Avoidance</span>
+            <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="runDbDedup()" title="Clean and merge existing duplicates in SQLite database">🧹 Merge DB Dups</button>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🛡️ Area Duplication Avoidance</span>
+              <small>Prevents re-inspecting same shops if found again in area</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="dedup-area-toggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🏢 Skip Already Saved in Database</span>
+              <small>If shop already exists in leads.db, skips to save time</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="skip-existing-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode 2: Standalone LinkedIn Org Controls -->
+      <div id="controls-companies" style="display:none; flex-direction:column; gap:16px;">
+        <div class="form-group">
+          <label>Company Names to Investigate</label>
+          <textarea id="companies-input" rows="4" placeholder="Enter company name(s), comma-separated or one per line:&#10;e.g. Grind, Marks and Spencer, Pret A Manger, Franco Manca" style="resize:vertical;"></textarea>
+          <div class="chips">
+            <div class="chip" onclick="addCompanyChip('Grind')">🥐 Grind</div>
+            <div class="chip" onclick="addCompanyChip('Marks and Spencer')">🏢 Marks & Spencer</div>
+            <div class="chip" onclick="addCompanyChip('Pret A Manger')">☕ Pret A Manger</div>
+            <div class="chip" onclick="addCompanyChip('Franco Manca')">🍕 Franco Manca</div>
+            <div class="chip" onclick="addCompanyChip('Five Guys')">🍔 Five Guys</div>
+          </div>
+        </div>
+
+        <div style="background:rgba(10, 102, 194, 0.12); border:1px solid rgba(10, 102, 194, 0.3); border-radius:10px; padding:12px 14px; font-size:0.8rem; color:#bae6fd; line-height:1.4;">
+          <strong>💼 Tab 3 Active Chrome Profile Mode:</strong><br>
+          Directly searches company LinkedIn accounts using your active logged-in Chrome profile session, crawls the People directory, classifies job roles into Seniority tiers (Executive, Management, Staff), and builds hierarchical tree charts.
+        </div>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span>🖥️ Live On Desktop Screen</span>
+          <small>Opens Google Chrome window visibly right in front of you</small>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="visible-browser-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" id="start-btn" onclick="startScraping()">
+          <span>🚀 Start Live Agent</span>
+        </button>
+        <button class="btn btn-danger" id="stop-btn" onclick="stopScraping()" style="display:none;">
+          <span>⏹️ Stop</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="right-content">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(99,102,241,0.15); color:var(--accent);">🏢</div>
+          <div>
+            <div class="stat-val" id="stat-total">0</div>
+            <div class="stat-label">Total in Database</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:var(--green);">✉️</div>
+          <div>
+            <div class="stat-val" id="stat-emails">0</div>
+            <div class="stat-label">Emails Discovered</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(168,85,247,0.15); color:var(--purple);">👥</div>
+          <div>
+            <div class="stat-val" id="stat-orgs">0</div>
+            <div class="stat-label">Team Members Mapped</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(245,158,11,0.15); color:var(--amber);">📍</div>
+          <div>
+            <div class="stat-val" id="stat-plotted">0</div>
+            <div class="stat-label">Plotted on Map</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-activity-grid">
+        <!-- TRI-TAB CONCURRENT LIVE VIEWPORTS (3-COLUMN SPLIT VIEW) -->
+        <div class="tri-stream-container">
+          <!-- Card 1: Google Maps (Tab 1) -->
+          <div class="stream-card" id="card-maps">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator" id="stream-indicator-maps">⚪ MAPS IDLE</span>
+                <span class="stream-tab-title" id="stream-title-maps">Google Maps</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-maps" title="Maps Feed">maps.google.com</span>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-maps')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-maps">
+              <img id="stream-img-maps" src="" alt="Google Maps Stream" style="display:none;" />
+              <div id="stream-placeholder-maps" class="stream-placeholder">
+                <div class="placeholder-icon">🗺️</div>
+                <div class="placeholder-title">Tab 1: Google Maps</div>
+                <small class="placeholder-desc">Live visual feed of map panning & business card clicks</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 2: Shop Website (Tab 2) -->
+          <div class="stream-card" id="card-website">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator website" id="stream-indicator-website">⚪ WEBSITE IDLE</span>
+                <span class="stream-tab-title" id="stream-title-website">Shop Website</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-website" title="Shop Website Feed">Waiting...</span>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-website')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-website">
+              <img id="stream-img-website" src="" alt="Shop Website Stream" style="display:none;" />
+              <div id="stream-placeholder-website" class="stream-placeholder">
+                <div class="placeholder-icon">🌐</div>
+                <div class="placeholder-title">Tab 2: Shop Website</div>
+                <small class="placeholder-desc">Simultaneous website crawling, anti-bot handling & screenshot capture</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 3: LinkedIn Intelligence (Tab 3) -->
+          <div class="stream-card" id="card-linkedin">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator linkedin" id="stream-indicator-linkedin">⚪ LINKEDIN IDLE</span>
+                <span class="stream-tab-title" id="stream-title-linkedin">LinkedIn Org Intel</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-linkedin" title="LinkedIn Feed">linkedin.com</span>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-linkedin')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-linkedin">
+              <img id="stream-img-linkedin" src="" alt="LinkedIn Stream" style="display:none;" />
+              <div id="stream-placeholder-linkedin" class="stream-placeholder">
+                <div class="placeholder-icon">💼</div>
+                <div class="placeholder-title">Tab 3: LinkedIn Intelligence</div>
+                <small class="placeholder-desc">Active Chrome session scraping company staff & org hierarchy</small>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Terminal Logs underneath -->
+        <div class="terminal-box" id="terminal-box">
+          <div class="log-line"><span class="log-time">[System]</span> <span>Mavon Leads & Org Intelligence Agent ready. Database connected. Click 'Start Live Agent' to begin.</span></div>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <div class="table-header">
+          <div class="panel-title">
+            <span>📋 Leads & Organization Database</span>
+            <span id="places-count-badge" class="badge" style="background:rgba(255,255,255,0.08); color:#cbd5e1;">0 places</span>
+          </div>
+          <div class="export-btns">
+            <button class="btn btn-secondary" onclick="renumberDatabase()" title="Clean and renumber database sequentially (1, 2, 3...)">🔢 Clean & Renumber</button>
+            <button class="btn btn-secondary" onclick="exportCSV()">📥 Download CSV</button>
+            <button class="btn btn-secondary" onclick="exportJSON()">📥 Download JSON</button>
+            <button class="btn btn-secondary" onclick="clearDb()" style="color:#fca5a5;">🗑️ Clear DB</button>
+          </div>
+        </div>
+
+        <div class="data-table-wrapper">
+          <table id="places-table">
+            <thead>
+              <tr>
+                <th style="width: 35px;">#</th>
+                <th>Business Name</th>
+                <th>Category</th>
+                <th>Email Address</th>
+                <th>Social Media</th>
+                <th>Bot Security</th>
+                <th>Cookies</th>
+                <th>Team / Staff</th>
+                <th>Org Chart</th>
+                <th>Landing Page</th>
+                <th>Phone</th>
+                <th>Address</th>
+                <th>Rating</th>
+                <th>Links</th>
+              </tr>
+            </thead>
+            <tbody id="places-tbody">
+              <tr id="empty-row">
+                <td colspan="14">
+                  <div class="empty-state">
+                    <div class="empty-icon">🔍</div>
+                    <p>No places in database. Click <strong>"Start Live Agent"</strong> to harvest leads and company hierarchies!</p>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Image Lightbox Modal -->
+  <div id="image-modal" class="modal-overlay" onclick="closeImageModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="modal-title">Landing Page Screenshot</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <a id="modal-img-download" href="#" target="_blank" download class="btn btn-secondary" style="font-size:0.75rem; padding:5px 10px; text-decoration:none; display:flex; align-items:center; gap:4px; color:#38bdf8; border:1px solid rgba(56,189,248,0.3);">
+            <span>💾 Download</span>
+          </a>
+          <a id="modal-img-newtab" href="#" target="_blank" class="btn btn-secondary" style="font-size:0.75rem; padding:5px 10px; text-decoration:none; display:flex; align-items:center; gap:4px; color:#c7d2fe; border:1px solid rgba(199,210,254,0.3);">
+            <span>↗️ Open Full</span>
+          </a>
+          <button class="modal-close" onclick="closeImageModal()">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" style="text-align:center;">
+        <img id="modal-img" src="" alt="Landing Page Screenshot" style="max-width:100%; max-height:75vh; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.6);" />
+      </div>
+    </div>
+  </div>
+
+  <!-- INTERACTIVE HIERARCHY TREE MODAL -->
+  <div id="org-modal" class="modal-overlay" onclick="closeOrgModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="font-size:1.3rem;">🌳</span>
+          <div>
+            <div id="org-modal-company" style="font-family:'Outfit',sans-serif; font-size:1.2rem; font-weight:700;">Company Hierarchy</div>
+            <a id="org-modal-linkedin-link" href="#" target="_blank" style="font-size:0.75rem; color:#06b6d4; text-decoration:none;">Verified LinkedIn Profile ↗</a>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeOrgModal()">&times;</button>
+      </div>
+
+      <div class="org-breakdown-bar">
+        <span class="pill-tier pill-exec" id="org-count-exec">👑 0 Leadership & Executives</span>
+        <span class="pill-tier pill-mgmt" id="org-count-mgmt">💼 0 Heads & Management</span>
+        <span class="pill-tier pill-staff" id="org-count-staff">🛠️ 0 Staff & Operations</span>
+      </div>
+
+      <div class="modal-body" id="org-modal-body">
+        <!-- Rendered Hierarchy Tree -->
+        <div class="org-tree-container" id="org-tree-render">
+          <!-- Populated dynamically via JS -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PIPELINE VERIFICATION STEPS MODAL -->
+  <div id="pipeline-modal" class="modal-overlay" onclick="closePipelineModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()" style="width:clamp(320px, 92vw, 1260px); max-width:95vw; height:clamp(480px, 86vh, 920px); border:1px solid rgba(99,102,241,0.3); background:#090d16;">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.3rem;">📋</span>
+          <div>
+            <div style="font-family:'Outfit',sans-serif; font-size:1.2rem; font-weight:700;">Verified Tri-Tab Architecture & Execution Protocol</div>
+            <div style="font-size:0.75rem; color:#94a3b8;">Deterministic 5-Step Verification Process for Maps, Websites & LinkedIn Org Intelligence</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closePipelineModal()">&times;</button>
+      </div>
+
+      <div class="modal-body" style="padding:24px; display:grid; grid-template-columns:repeat(auto-fit, minmax(290px, 1fr)); gap:18px; overflow-y:auto;">
+        <!-- Card 1: Google Maps -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(99, 102, 241, 0.3); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🗺️</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 1: Google Maps Harvester</div>
+              <div style="font-size:0.72rem; color:#a5b4fc;">Master Area Pinning & Place Capture</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#6366f1;">Step 1: Geolocation Lock</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Calculates lat/lon coordinates and establishes the 4km radius search bounding box on Google Maps.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 2: Infinite Feed Panning</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Continuously scrolls the results feed and detects end banner to harvest all businesses in the area.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 3: Side-Panel Verification</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Clicks into each place card, validates business name, category, rating, reviews, address, phone, and opening hours.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 4: Real-Time Map Plotting</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Parses exact GPS coordinates, commits record to SQLite DB, and plots interactive pin on Leaflet map.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 5: Multi-Tab Queue Dispatch</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Automatically hands over verified website to Tab 2 and business name to Tab 3 for parallel execution.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 2: Shop Website -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(16, 185, 129, 0.3); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🌐</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 2: Shop Website Inspector</div>
+              <div style="font-size:0.72rem; color:#34d399;">Anti-Bot, Consent & Email Capture</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#10b981;">Step 1: Domain Navigation & Health</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Opens official URL with anti-hang timeouts and verifies page is reachable without breaking the pipeline.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 2: Anti-Bot & Cloudflare Check</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Detects Cloudflare Turnstile, challenge pages, Datadome, PerimeterX, and auto-handles checkboxes.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 3: Cookie Banner Auto-Accept</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Detects OneTrust, Cookiebot, and GDPR overlays, clicks 'Accept' buttons, and logs consent status.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 4: Visual Screenshot Archiving</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Captures landing page image (with anti-bot warning if active) and saves to persistent `/static/screenshots/`.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 5: Multi-Method Contact Extraction</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Extracts clean contact emails, Instagram, Facebook, LinkedIn, Twitter/X profiles, and passes to Tab 3.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: LinkedIn Intelligence -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(10, 102, 194, 0.35); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">💼</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 3: LinkedIn Org Intelligence</div>
+              <div style="font-size:0.72rem; color:#38bdf8;">Company Hierarchy & Leadership Mapping</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#38bdf8;">Step 1: Canonical Company Resolution</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Cross-references verified company page from website or Google canonical index, avoiding promotional ads.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 2: People Directory Access</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Navigates directly to the `/people/` directory in your active Chrome profile to preserve session cookies.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 3: Progressive Infinite Scrolling</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Smoothly triggers lazy loading to discover up to 40+ employees, executive directors, and department heads.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 4: Card Sanitization & Validation</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Cleans name strings, strips connection degree tags (`• 1st`, `• 2nd`, `• 3rd+`), extracts titles, avatars, and `/in/` profile URLs.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 5: 3-Tier Seniority Classification</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Classifies into 👑 Executive, 💼 Management, and 🛠️ Staff tiers, saving to SQLite and rendering the Org Tree.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

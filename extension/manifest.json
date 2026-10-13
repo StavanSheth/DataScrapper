@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Mavon Leads Scraper - Chrome Assistant",
+  "version": "2.1.0",
+  "description": "Premium Chrome assistant for Mavon Leads: 1-click DOM extraction, Google Maps place inspector, Cloudflare email decoding, phone harvesting, and instant sync to Mavon Leads Database.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "alarms",
+    "debugger",
+    "cookies"
+  ],
+  "host_permissions": [
+    "https://*.google.com/maps/*",
+    "https://*.linkedin.com/*",
+    "http://127.0.0.1:8080/*",
+    "http://localhost:8080/*",
+    "https://*/*",
+    "http://*/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Mavon Leads Scraper Assistant",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.google.com/maps/*",
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": ["content_script.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected_bridge.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

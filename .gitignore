@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Browser profiles, sessions & caches (keep repo clean and light)
+chrome_live_profile/
+.tempmediaStorage/
+
+# SQLite WAL and lock files
+*.db-shm
+*.db-wal
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
