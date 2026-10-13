@@ -736,6 +736,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 encoded_name = urllib.parse.quote(name)
                 search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_name}"
                 emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn: {name}")
+                emit_event("linkedin_navigated", {"url": search_co_url, "name": name})
                 try:
                     await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
                     await tab_page.wait_for_timeout(1500)
@@ -771,6 +772,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
             # Step 2: Open company's /people/ directory
             people_target = f"{verified_company_url}/people/" if verified_company_url else f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
             emit_event("log", f"👥 [LinkedIn Step 2/5 - Directory Navigation] Opening people directory: {people_target}")
+            emit_event("linkedin_navigated", {"url": people_target, "name": name})
             try:
                 await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
                 await tab_page.wait_for_timeout(2000)
@@ -856,6 +858,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 try:
                     search_people_url = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
                     emit_event("log", f"👥 [LinkedIn Directory Search] Searching verified personnel directly on LinkedIn for {name}...")
+                    emit_event("linkedin_navigated", {"url": search_people_url, "name": name})
                     await tab_page.goto(search_people_url, wait_until="domcontentloaded", timeout=12000)
                     await tab_page.wait_for_timeout(1800)
                     for s_i in range(2):
@@ -1055,6 +1058,36 @@ async def run_scraper(
                 except Exception:
                     pass
 
+        # Inject Synced LinkedIn Session Cookies (from active Chrome session via Extension)
+        cookies_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "linkedin_cookies.json"))
+        if os.path.exists(cookies_file) and not cdp_connected and context:
+            try:
+                with open(cookies_file, "r", encoding="utf-8") as f:
+                    saved_cookies = json.load(f)
+                if saved_cookies:
+                    pw_cookies = []
+                    for c in saved_cookies:
+                        item = {
+                            "name": str(c["name"]),
+                            "value": str(c["value"]),
+                            "domain": str(c["domain"]),
+                            "path": str(c.get("path", "/")),
+                            "httpOnly": bool(c.get("httpOnly", False)),
+                            "secure": bool(c.get("secure", False)),
+                        }
+                        same_site = str(c.get("sameSite", "Lax")).capitalize()
+                        if same_site in ("Strict", "Lax", "None"):
+                            item["sameSite"] = same_site
+                        else:
+                            item["sameSite"] = "Lax"
+                        if "expires" in c and c["expires"] > 0:
+                            item["expires"] = float(c["expires"])
+                        pw_cookies.append(item)
+                    await context.add_cookies(pw_cookies)
+                    emit_event("log", f"🔐 Injected {len(pw_cookies)} authenticated LinkedIn session cookies from your active Chrome.")
+            except Exception as e:
+                logger.warning(f"Cookie injection notice: {e}")
+
         # Inject Mavon Scraper Extension Bridge into all tabs
         bridge_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "extension", "injected_bridge.js"))
         if os.path.exists(bridge_file):
@@ -1158,11 +1191,7 @@ async def run_scraper(
             if existing_li and enable_linkedin:
                 linkedin_page = existing_li[0]
             elif enable_linkedin:
-                candidate_li = [p for p in context.pages if p != maps_page and "google.com/maps" not in p.url]
-                if candidate_li:
-                    linkedin_page = candidate_li[0]
-                else:
-                    linkedin_page = await context.new_page()
+                linkedin_page = await context.new_page()
             else:
                 linkedin_page = None
         else:
@@ -1200,15 +1229,16 @@ async def run_scraper(
         # Setup Parallel Asynchronous Queues for Tab 2 and Tab 3
         website_queue = asyncio.Queue() if (enable_website and extract_emails) else None
         linkedin_queue = asyncio.Queue() if linkedin_page else None
-        done_event = asyncio.Event()
+        website_done_event = asyncio.Event()
+        linkedin_done_event = asyncio.Event()
 
         worker_task = None
         if website_queue:
-            worker_task = asyncio.create_task(website_worker(context, website_queue, done_event, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict, cdp_connected=cdp_connected))
+            worker_task = asyncio.create_task(website_worker(context, website_queue, website_done_event, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict, cdp_connected=cdp_connected))
 
         linkedin_task = None
         if linkedin_page and linkedin_queue:
-            linkedin_task = asyncio.create_task(linkedin_worker(linkedin_page, linkedin_queue, done_event))
+            linkedin_task = asyncio.create_task(linkedin_worker(linkedin_page, linkedin_queue, linkedin_done_event))
 
         # Dynamic zoom from radius_km
         effective_zoom = radius_to_zoom(radius_km) if radius_km else zoom
@@ -1558,18 +1588,20 @@ async def run_scraper(
 
         emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
 
-        # Signal workers and wait for pending queues
-        done_event.set()
-        if worker_task:
+        # Signal website worker that no more places will be added from Maps
+        website_done_event.set()
+        if worker_task and website_queue:
             try:
-                await asyncio.wait_for(website_queue.join(), timeout=35.0)
+                await asyncio.wait_for(website_queue.join(), timeout=45.0)
             except Exception:
                 pass
             worker_task.cancel()
 
-        if linkedin_task:
+        # Signal LinkedIn worker that all companies have been pushed and wait for org intelligence to complete
+        linkedin_done_event.set()
+        if linkedin_task and linkedin_queue:
             try:
-                await asyncio.wait_for(linkedin_queue.join(), timeout=50.0)
+                await asyncio.wait_for(linkedin_queue.join(), timeout=60.0)
             except Exception:
                 pass
             linkedin_task.cancel()

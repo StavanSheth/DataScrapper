@@ -113,6 +113,17 @@ async def extension_ws_endpoint(websocket: WebSocket):
                     elif st == "linkedin":
                         last_live_frame_linkedin = {"stream_type": "linkedin", "image_base64": b64, "tab": "linkedin", "image": f"data:image/jpeg;base64,{b64}"}
                         await broadcast({"type": "live_frame", "data": last_live_frame_linkedin})
+                elif data.get("type") == "SYNC_COOKIES":
+                    cookies = data.get("cookies", [])
+                    if cookies:
+                        cookies_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linkedin_cookies.json")
+                        try:
+                            with open(cookies_file, "w", encoding="utf-8") as f:
+                                json.dump(cookies, f, indent=2)
+                            logger.info(f"💾 Synced {len(cookies)} live LinkedIn session cookies from Extension to {cookies_file}")
+                            add_log(f"🔑 Live LinkedIn session detected & saved ({len(cookies)} cookies synced from your Chrome).")
+                        except Exception as e:
+                            logger.error(f"Failed to save cookies: {e}")
             except Exception:
                 pass
     except (WebSocketDisconnect, Exception):
@@ -183,6 +194,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     elif etype == "org_updated":
                         # Emitted when Tab 3 finishes extracting LinkedIn hierarchy for a company
                         add_log(f"🌳 [Org Intelligence] Mapped {edata.get('employee_count', 0)} employees for {edata.get('company', '')}")
+                    elif etype == "linkedin_navigated":
+                        if extension_ws and edata.get("url"):
+                            asyncio.create_task(extension_ws.send_json({"action": "NAVIGATE_LINKEDIN", "payload": edata}))
                     elif etype == "status":
                         current_status = str(edata)
                     elif etype == "log":
@@ -523,12 +537,14 @@ async def launch_chrome_debug():
         except Exception:
             pass
 
-        profile_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\ScraperProfile")
-        cmd = f'start "" "{chrome_exe}" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="{profile_dir}" "http://localhost:8080"'
+        # Relaunch Chrome with port 9222 and session restore to preserve all real user accounts & logins
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+        await asyncio.sleep(1.0)
+        cmd = f'start "" "{chrome_exe}" --remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session --start-maximized "http://localhost:8080"'
         subprocess.Popen(cmd, shell=True)
         return {
             "status": "success",
-            "message": "Chrome launched on Remote Debugging Port 9222! The scraper can now open and control tabs directly in this window."
+            "message": "Chrome launched on Remote Debugging Port 9222 with all your logins, accounts, and tabs preserved!"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch Chrome: {e}")

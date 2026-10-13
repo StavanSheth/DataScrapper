@@ -13,12 +13,6 @@
     "cookies"
   ],
   "host_permissions": [
-    "https://*.google.com/maps/*",
-    "https://*.linkedin.com/*",
-    "http://127.0.0.1:8080/*",
-    "http://localhost:8080/*",
-    "https://*/*",
-    "http://*/*",
     "<all_urls>"
   ],
   "action": {
@@ -41,9 +35,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.google.com/maps/*",
-        "https://*/*",
-        "http://*/*"
+        "<all_urls>"
       ],
       "js": ["content_script.js"],
       "run_at": "document_start",

@@ -37,6 +37,33 @@ async function isBackendReachable() {
   }
 }
 
+// Sync user's real LinkedIn cookies with backend to preserve authenticated login
+async function syncLinkedInCookies() {
+  if (!chrome.cookies) return;
+  try {
+    const cookies = await chrome.cookies.getAll({ domain: "linkedin.com" });
+    if (cookies && cookies.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "SYNC_COOKIES",
+        domain: "linkedin.com",
+        cookies: cookies.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          expires: c.expirationDate || -1,
+          httpOnly: Boolean(c.httpOnly),
+          secure: Boolean(c.secure),
+          sameSite: c.sameSite === "no_restriction" ? "None" : (c.sameSite === "lax" ? "Lax" : "Strict")
+        }))
+      }));
+      console.log(`[Mavon Extension] Synced ${cookies.length} LinkedIn session cookies to backend!`);
+    }
+  } catch (err) {
+    console.warn("[Mavon Extension] Cookie sync catch:", err);
+  }
+}
+
 // Connect to Dashboard WebSocket
 async function connect() {
   if (isConnecting) return;
@@ -66,6 +93,7 @@ async function connect() {
         type: "HELLO",
         payload: { client: "chrome_extension", version: "2.2.0" }
       }));
+      syncLinkedInCookies().catch(() => {});
     };
 
     ws.onmessage = async (event) => {
@@ -116,6 +144,7 @@ try {
       connect();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "PING" }));
+        syncLinkedInCookies().catch(() => {});
       }
     });
   }
@@ -147,6 +176,9 @@ async function ensureScreencastForTab(tabId, workerTag = "maps") {
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
     attachedDebuggerTabs.add(tabId);
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Page.enable");
+    } catch (e) {}
     await chrome.debugger.sendCommand({ tabId }, "Page.startScreencast", {
       format: "jpeg",
       quality: 60,
@@ -236,12 +268,17 @@ async function handleCommand(msg) {
   let targetWinId = msg.senderWindowId || null;
   if (!targetWinId) {
     try {
-      const lastFocused = await chrome.windows.getLastFocused();
-      if (lastFocused) targetWinId = lastFocused.id;
+      const lastFocused = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
+      if (lastFocused && lastFocused.id) {
+        targetWinId = lastFocused.id;
+      } else {
+        const wins = await chrome.windows.getAll({ windowTypes: ['normal'] }).catch(() => []);
+        if (wins && wins.length > 0) targetWinId = wins[0].id;
+      }
     } catch (e) {}
   }
 
-  // 1. START HARVESTER: Opens by default 2 tabs: Tab 1 (Maps) and Tab 2 (LinkedIn) - No duplicate tabs
+  // 1. START HARVESTER: Opens by default 2 tabs: Tab 1 (Maps) and Tab 2 (LinkedIn) in user's active Chrome
   if (action === "START_HARVESTER") {
     const now = Date.now();
     if (now - lastStartHarvesterTime < 1500 && mapsTabId) {
@@ -249,6 +286,9 @@ async function handleCommand(msg) {
       return { success: true, debounced: true };
     }
     lastStartHarvesterTime = now;
+
+    // Proactively sync live LinkedIn session cookies so scraper never asks for login
+    syncLinkedInCookies().catch(() => {});
 
     const mapsUrl = payload.maps_url || payload.url || "https://www.google.com/maps/search/shops?hl=en";
     const linkedinUrl = payload.linkedin_url || "https://www.linkedin.com/";
@@ -263,7 +303,6 @@ async function handleCommand(msg) {
       if (allMaps.length > 0) {
         mapsTab = allMaps[0];
         mapsTabId = mapsTab.id;
-        // Close any redundant duplicate maps tabs
         for (let i = 1; i < allMaps.length; i++) {
           chrome.tabs.remove(allMaps[i].id).catch(() => {});
         }
@@ -279,7 +318,7 @@ async function handleCommand(msg) {
       mapsTabId = t.id;
     }
 
-    // Tab 2: LinkedIn (Strictly 1 tab - reuse existing or open single tab)
+    // Tab 2: LinkedIn (Strictly 1 tab in user's current window - reuse existing or open single tab)
     let liTab = null;
     if (linkedinTabId) {
       liTab = await chrome.tabs.get(linkedinTabId).catch(() => null);
@@ -289,7 +328,6 @@ async function handleCommand(msg) {
       if (allLi.length > 0) {
         liTab = allLi[0];
         linkedinTabId = liTab.id;
-        // Close any redundant duplicate linkedin tabs
         for (let i = 1; i < allLi.length; i++) {
           chrome.tabs.remove(allLi[i].id).catch(() => {});
         }
@@ -323,7 +361,36 @@ async function handleCommand(msg) {
     };
   }
 
-  // 2. OPEN SHOP TAB: Opens dynamically when shop website is processed, reuse single tab in background
+  // 2. NAVIGATE LINKEDIN: Updates the LinkedIn tab in the user's active Chrome live
+  if (action === "NAVIGATE_LINKEDIN") {
+    const targetUrl = payload.url;
+    if (targetUrl) {
+      let liTab = null;
+      if (linkedinTabId) {
+        liTab = await chrome.tabs.get(linkedinTabId).catch(() => null);
+      }
+      if (!liTab) {
+        const allLi = await chrome.tabs.query({ url: "*://*.linkedin.com/*" });
+        if (allLi.length > 0) {
+          liTab = allLi[0];
+          linkedinTabId = liTab.id;
+        }
+      }
+
+      if (liTab) {
+        await chrome.tabs.update(liTab.id, { url: targetUrl });
+        linkedinTabId = liTab.id;
+      } else {
+        const createOpts = targetWinId ? { windowId: targetWinId, url: targetUrl, active: false } : { url: targetUrl, active: false };
+        const t2 = await chrome.tabs.create(createOpts);
+        linkedinTabId = t2.id;
+      }
+      ensureScreencastForTab(linkedinTabId, "linkedin").catch(() => {});
+    }
+    return { success: true, linkedin_tab_id: linkedinTabId };
+  }
+
+  // 3. OPEN SHOP TAB: Opens dynamically when shop website is processed, reuse single tab in background
   if (action === "OPEN_SHOP_TAB") {
     const shopUrl = payload.url || payload.website;
     if (!shopUrl || !shopUrl.startsWith("http")) {
@@ -343,12 +410,11 @@ async function handleCommand(msg) {
       shopTabId = t.id;
     }
 
-    // Do NOT steal tab focus or bring window to front - load and harvest quietly in background
     ensureScreencastForTab(shopTabId, "website").catch(() => {});
     return { success: true, shop_tab_id: shopTabId };
   }
 
-  // 3. ACTIVATE TAB: Switch active tab to view live agent actions
+  // 4. ACTIVATE TAB: Switch active tab to view live agent actions
   if (action === "ACTIVATE_TAB") {
     const tabName = payload.tab || payload.agent;
     let targetId = null;
@@ -368,7 +434,7 @@ async function handleCommand(msg) {
     return { success: true };
   }
 
-  // 4. CLOSE SHOP TAB
+  // 5. CLOSE SHOP TAB
   if (action === "CLOSE_SHOP_TAB") {
     if (shopTabId) {
       try {
@@ -379,9 +445,37 @@ async function handleCommand(msg) {
     return { success: true };
   }
 
-  // 5. FOCUS WINDOW
+  // 6. FOCUS WINDOW
   if (action === "FOCUS_WINDOW") {
     await bringWindowToFront(payload.window_id || targetWinId);
+    return { success: true };
+  }
+
+  // 7. POPUP & CONTENT SCRIPT COMPATIBILITY ACTIONS
+  if (action === "LAUNCH_LIVE_TAB") {
+    const targetUrl = payload.url || msg.url || "https://www.google.com/maps/search/shops?hl=en";
+    const createOpts = targetWinId ? { windowId: targetWinId, url: targetUrl, active: true } : { url: targetUrl, active: true };
+    const newTab = await chrome.tabs.create(createOpts);
+    mapsTabId = newTab.id;
+    ensureScreencastForTab(newTab.id, "maps").catch(() => {});
+    return { success: true, tabId: newTab.id };
+  }
+
+  if (action === "OPEN_BACKGROUND_TAB") {
+    const targetUrl = payload.url || msg.url;
+    if (!targetUrl || !targetUrl.startsWith("http")) return { success: false, reason: "Invalid URL" };
+    const createOpts = targetWinId ? { windowId: targetWinId, url: targetUrl, active: false } : { url: targetUrl, active: false };
+    const newTab = await chrome.tabs.create(createOpts);
+    shopTabId = newTab.id;
+    ensureScreencastForTab(newTab.id, "website").catch(() => {});
+    return { success: true, tabId: newTab.id };
+  }
+
+  if (action === "CLOSE_TAB") {
+    const tabIdToClose = payload.tabId || msg.tabId;
+    if (tabIdToClose) {
+      await chrome.tabs.remove(tabIdToClose).catch(() => {});
+    }
     return { success: true };
   }
 
@@ -402,42 +496,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#10b981" });
     } else {
       chrome.action.setBadgeText({ tabId: tabId, text: "" });
-    }
-  }
-});
-
-// Support existing popup / content script messages
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  const action = request.action;
-
-  if (action === "LAUNCH_LIVE_TAB") {
-    const targetUrl = request.url || "https://www.google.com/maps/search/shops?hl=en";
-    chrome.tabs.create({ url: targetUrl, active: true }, (newTab) => {
-      mapsTabId = newTab.id;
-      ensureScreencastForTab(newTab.id, "maps").catch(() => {});
-      sendResponse({ success: true, tabId: newTab.id });
-    });
-    return true;
-  }
-
-  if (action === "OPEN_BACKGROUND_TAB") {
-    const targetUrl = request.url;
-    if (!targetUrl || !targetUrl.startsWith("http")) {
-      sendResponse({ success: false, reason: "Invalid URL" });
-      return true;
-    }
-    chrome.tabs.create({ url: targetUrl, active: false }, (newTab) => {
-      shopTabId = newTab.id;
-      ensureScreencastForTab(newTab.id, "website").catch(() => {});
-      sendResponse({ success: true, tabId: newTab.id });
-    });
-    return true;
-  }
-
-  if (action === "CLOSE_TAB") {
-    if (request.tabId) {
-      chrome.tabs.remove(request.tabId, () => sendResponse({ success: true }));
-      return true;
     }
   }
 });
