@@ -464,6 +464,22 @@ let placesData = [];
           </button>
         `;
 
+        function formatDateTime(dateStr) {
+          if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
+          try {
+            const d = new Date(dateStr.replace(' ', 'T'));
+            if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+            const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+            const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.75rem; white-space:nowrap;">
+              <span style="color:#e2e8f0; font-weight:500;">📅 ${datePart}</span>
+              <span style="color:#94a3b8; font-size:0.7rem;">⏰ ${timePart}</span>
+            </div>`;
+          } catch (e) {
+            return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+          }
+        }
+
         tr.innerHTML = `
           <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
           <td class="shop-title">${escapeHtml(place.name)}</td>
@@ -479,6 +495,7 @@ let placesData = [];
           <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
           <td>${ratingHtml}</td>
           <td>${linksHtml}</td>
+          <td>${formatDateTime(place.created_at)}</td>
         `;
         tbody.appendChild(tr);
       });

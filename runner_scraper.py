@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import base64
+import datetime
 import json
 import logging
 import os
@@ -223,11 +224,80 @@ def clean_social_url(url: str) -> str:
     base = url.split("?")[0].split("#")[0].rstrip("/")
     return base
 
+def extract_core_brand_name(name: str, city: str = "") -> str:
+    """
+    Extracts the clean parent brand/business name by stripping mall, branch,
+    retail descriptor, and legal entity suffixes (e.g., 'Nike Factory Store Viviana Mall' -> 'Nike').
+    """
+    if not name:
+        return ""
+    # 1. Take part before explicit separators like ' - ', ' | ', ' @ ', '(', '['
+    base = re.split(r'\s*[-–—|@]\s*|[(\[]', name)[0].strip()
+    if not base or len(base) < 2:
+        base = name.strip()
+
+    # 2. Strip trailing punctuation
+    base = re.sub(r'[\.,\-_;:\'\"]+$', '', base).strip()
+
+    # 3. Strip legal entity suffixes from end
+    legal_pat = r'\s+\b(?:pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|llc|inc\.?|corp\.?|co\.?|corporation)\b\.?$'
+    base = re.sub(legal_pat, '', base, flags=re.I).strip()
+
+    # 4. Strip mall phrases with mall name, e.g. 'Viviana Mall', 'Inorbit Mall'
+    mall_pat = r'\s+\b[A-Za-z0-9]+\s+(?:mall|plaza|centre|center|galleria|arcade)\b'
+    base = re.sub(mall_pat, '', base, flags=re.I).strip()
+
+    # 5. Strip retail phrases in middle/end
+    retail_pat = r'\s+\b(?:factory\s+store|factory\s+outlet|flagship\s+store|retail\s+store)\b'
+    base = re.sub(retail_pat, '', base, flags=re.I).strip()
+
+    # 6. If city is provided, strip trailing city from end
+    if city and len(city) >= 3:
+        city_esc = re.escape(city.strip())
+        base = re.sub(rf'\s+\b{city_esc}\b.*$', '', base, flags=re.I).strip()
+
+    # 7. Standalone end suffixes
+    end_suffix_pat = r'\s+\b(?:outlet|showroom|branch|mall|bazaar|supermarket|hypermarket)\b$'
+    base = re.sub(end_suffix_pat, '', base, flags=re.I).strip()
+
+    return base if len(base) >= 2 else name
+
+clean_brand_tokens = extract_core_brand_name
+
+def extract_brand_from_domain(url: str) -> str:
+    """Extracts the brand name directly from the domain (e.g., 'https://superkicks.in' -> 'superkicks')."""
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        netloc = urllib.parse.urlparse(url).netloc.lower()
+        netloc = re.sub(r'^(?:www\d?|m|shop|store)\.', '', netloc)
+        parts = netloc.split('.')
+        if len(parts) >= 2 and len(parts[0]) >= 3:
+            return parts[0]
+    except Exception:
+        pass
+    return ""
+
+def extract_city_from_address(address: str) -> str:
+    """Extracts city or locality from standard Google Maps address strings."""
+    if not address or address == "N/A":
+        return ""
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    if not parts:
+        return ""
+    candidates = [p for p in parts if not re.search(r'^\d+$', p)]
+    if len(candidates) >= 2:
+        for part in reversed(candidates[:-1]):
+            clean_part = re.sub(r'\b[A-Z0-9]{2,4}\s+[A-Z0-9]{3}\b|\b\d{3,7}\b', '', part, flags=re.I).strip()
+            tokens = clean_part.split()
+            if 1 <= len(tokens) <= 2 and not any(t.lower() in ["india", "uk", "usa", "state", "road", "street", "st", "ave", "highway"] for t in tokens):
+                return tokens[0]
+    return ""
+
 def verify_company_name_match(searched_name: str, result_title: str) -> bool:
     """
     Strictly verifies whether a candidate search result title or card text
-    actually corresponds to the searched business, preventing unrelated companies
-    (like 'Bella Baby Nursery Store' for 'Bella Shopping Centre') from being matched.
+    corresponds to the searched business brand, preventing unrelated companies from being matched.
     """
     if not searched_name or not result_title:
         return False
@@ -235,16 +305,15 @@ def verify_company_name_match(searched_name: str, result_title: str) -> bool:
     clean_search = re.sub(r'[^a-zA-Z0-9\s]', ' ', searched_name).lower()
     clean_title = re.sub(r'[^a-zA-Z0-9\s]', ' ', result_title).lower()
 
-    # Exact containment check
-    if clean_search in clean_title:
+    if clean_search in clean_title or clean_title in clean_search:
         return True
 
-    # Token-based distinctive matching (filter out generic stop-words)
     stop_words = {
         "ltd", "limited", "uk", "inc", "llc", "the", "and", "&", "co", "company",
-        "shop", "store", "london", "official", "group", "holdings", "linkedin"
+        "shop", "store", "stores", "london", "official", "group", "holdings", "linkedin",
+        "india", "international", "retail", "outlet"
     }
-    search_tokens = [w for w in clean_search.split() if w]
+    search_tokens = [w for w in clean_search.split() if len(w) > 1]
     distinctive_tokens = [w for w in search_tokens if w not in stop_words]
 
     tokens_to_match = distinctive_tokens if distinctive_tokens else search_tokens
@@ -253,10 +322,24 @@ def verify_company_name_match(searched_name: str, result_title: str) -> bool:
 
     title_words = set(clean_title.split())
 
-    # At least 70% of distinctive tokens MUST be present in the title
-    matched_count = sum(1 for tok in tokens_to_match if tok in title_words)
+    matched_count = 0
+    for tok in tokens_to_match:
+        if any(tok in tw or tw.startswith(tok) or (len(tok) > 3 and tok[:4] == tw[:4]) for tw in title_words):
+            matched_count += 1
+
     ratio = matched_count / len(tokens_to_match)
-    return ratio >= 0.7
+    return ratio >= 0.5
+
+def is_person_relevant_to_brand(brand: str, title: str, subtitle: str = "") -> bool:
+    """Verifies that an extracted individual is affiliated with the target brand or role."""
+    if not brand:
+        return True
+    combined = f"{title} {subtitle}".lower()
+    clean_brand = re.sub(r'[^a-zA-Z0-9\s]', ' ', brand).lower().strip()
+    brand_tokens = [t for t in clean_brand.split() if len(t) > 2 and t not in {"the", "and", "co", "ltd", "inc", "shop", "store"}]
+    if not brand_tokens:
+        return True
+    return any(tok in combined for tok in brand_tokens)
 
 def extract_socials_from_text(html: str) -> Dict[str, str]:
     """
@@ -686,6 +769,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 linkedin_queue.put_nowait({
                     "index": idx,
                     "name": name,
+                    "address": item.get("address", ""),
                     "website": website_url,
                     "linkedin_url": socials.get("linkedin", ""),
                     "website_emails": email_list
@@ -712,6 +796,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
 
         idx = item.get("index", 1)
         name = item.get("name", "").strip()
+        address = item.get("address", "")
         website_url = item.get("website", "")
         known_linkedin = item.get("linkedin_url", "")
         website_emails = item.get("website_emails", [])
@@ -720,187 +805,234 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
             queue.task_done()
             continue
 
-        emit_event("log", f"💼 [LinkedIn Step 1/5 - Company Resolution] Resolving verified LinkedIn profile for #{idx} {name}...")
-        emit_event("status", f"Resolving LinkedIn profile for: {name}")
+        city = extract_city_from_address(address)
+        core_brand = clean_brand_tokens(name, city=city)
+        domain_brand = extract_brand_from_domain(website_url)
+
+        emit_event("log", f"💼 [LinkedIn Step 1/5 - Company Resolution] Resolving verified LinkedIn profile for #{idx} '{name}' (Brand: '{core_brand}')...")
+        emit_event("status", f"Resolving LinkedIn profile: {core_brand}")
 
         try:
-
-            # Step 1: Determine target verified company URL
+            # Step 1: Determine target verified company URL via cascading directory search
             verified_company_url = None
             if known_linkedin and "linkedin.com/company/" in known_linkedin:
                 clean_base = known_linkedin.split("?")[0].rstrip("/")
                 verified_company_url = clean_base
                 emit_event("log", f"🔗 [LinkedIn Step 1/5] Using verified LinkedIn company URL from website: {verified_company_url}")
             else:
-                # Query LinkedIn company directory directly
-                encoded_name = urllib.parse.quote(name)
-                search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_name}"
-                emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn: {name}")
-                emit_event("linkedin_navigated", {"url": search_co_url, "name": name})
-                try:
-                    await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
-                    await tab_page.wait_for_timeout(1500)
-                    li_result = await tab_page.evaluate(r"""() => {
-                        const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
-                        for (const card of cards) {
-                            const link = card.querySelector('a[href*="/company/"]:not([href*="ads"])');
-                            const titleEl = card.querySelector('.entity-result__title-text, .app-aware-link');
-                            if (link && titleEl) {
-                                const href = link.href.split('?')[0].replace(/\/+$/, '');
-                                const title = titleEl.innerText.trim();
-                                if (!href.includes('/search') && !href.includes('/help') && !href.includes('/feed')) {
-                                    return { href, title };
+                # Build prioritized search candidate queries: Core Brand -> Exact Maps Name -> Domain Brand
+                search_candidates = []
+                if core_brand and core_brand.lower() != name.lower():
+                    search_candidates.append(core_brand)
+                search_candidates.append(name)
+                if domain_brand and len(domain_brand) >= 3 and domain_brand.lower() not in [c.lower() for c in search_candidates]:
+                    search_candidates.append(domain_brand)
+
+                for cand_query in search_candidates:
+                    encoded_cand = urllib.parse.quote(cand_query)
+                    search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_cand}"
+                    emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn for '{cand_query}'...")
+                    emit_event("linkedin_navigated", {"url": search_co_url, "name": cand_query})
+                    try:
+                        await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
+                        await tab_page.wait_for_timeout(1500)
+                        li_result = await tab_page.evaluate(r"""() => {
+                            const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
+                            for (const card of cards) {
+                                const link = card.querySelector('a[href*="/company/"]:not([href*="ads"])');
+                                const titleEl = card.querySelector('.entity-result__title-text, .app-aware-link, .artdeco-entity-lockup__title');
+                                if (link && titleEl) {
+                                    const href = link.href.split('?')[0].replace(/\/+$/, '');
+                                    const title = titleEl.innerText.trim();
+                                    if (!href.includes('/search') && !href.includes('/help') && !href.includes('/feed')) {
+                                        return { href, title };
+                                    }
                                 }
                             }
-                        }
-                        return null;
-                    }""")
-                    if li_result and isinstance(li_result, dict):
-                        cand_href = li_result.get("href", "")
-                        cand_title = li_result.get("title", "")
-                        if verify_company_name_match(name, cand_title):
-                            verified_company_url = cand_href
-                            emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified company via LinkedIn directory: {verified_company_url}")
-                        else:
-                            emit_event("log", f"⚠️ [LinkedIn Step 1/5] Discarded non-matching LinkedIn directory result '{cand_title}' for '{name}'")
+                            return null;
+                        }""")
+                        if li_result and isinstance(li_result, dict):
+                            cand_href = li_result.get("href", "")
+                            cand_title = li_result.get("title", "")
+                            if verify_company_name_match(cand_query, cand_title) or verify_company_name_match(core_brand, cand_title):
+                                verified_company_url = cand_href
+                                emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified company via LinkedIn directory: '{cand_title}' ({verified_company_url})")
+                                break
+                            else:
+                                emit_event("log", f"⚠️ [LinkedIn Step 1/5] Skipped non-matching company candidate '{cand_title}' for '{cand_query}'")
+                    except Exception as e:
+                        emit_event("log", f"⚠️ Company search note for '{cand_query}': {str(e)[:40]}")
+
+            if not verified_company_url:
+                emit_event("log", f"ℹ️ [LinkedIn Step 1/5] No official corporate page for '{name}'. Using targeted Boolean role search in People directory...")
+
+            employees = []
+
+            # Step 2: Open company's /people/ directory if verified corporate page exists
+            if verified_company_url:
+                people_target = f"{verified_company_url}/people/"
+                emit_event("log", f"👥 [LinkedIn Step 2/5 - Directory Navigation] Opening people directory: {people_target}")
+                emit_event("linkedin_navigated", {"url": people_target, "name": core_brand})
+                try:
+                    await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
+                    await tab_page.wait_for_timeout(2000)
+                except Exception as e:
+                    emit_event("log", f"⚠️ Navigation note: {str(e)[:50]}")
+
+                try:
+                    safe_name = re.sub(r'[\'"]', '', core_brand)[:22]
+                    await tab_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('LinkedIn: {safe_name}', 'Harvesting employees & leadership...', '#0a66c2')")
                 except Exception:
                     pass
 
-                if not verified_company_url:
-                    emit_event("log", f"ℹ️ [LinkedIn Step 1/5] No official corporate page for '{name}'. Searching verified personnel directly on LinkedIn...")
-
-            # Step 2: Open company's /people/ directory
-            people_target = f"{verified_company_url}/people/" if verified_company_url else f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
-            emit_event("log", f"👥 [LinkedIn Step 2/5 - Directory Navigation] Opening people directory: {people_target}")
-            emit_event("linkedin_navigated", {"url": people_target, "name": name})
-            try:
-                await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
-                await tab_page.wait_for_timeout(2000)
-            except Exception as e:
-                emit_event("log", f"⚠️ Navigation note: {str(e)[:50]}")
-
-            # Check if active page shows HUD
-            try:
-                safe_name = re.sub(r'[\'"]', '', name)[:22]
-                await tab_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('LinkedIn: {safe_name}', 'Harvesting employees & leadership...', '#0a66c2')")
-            except Exception:
-                pass
-
-            # Step 3: Progressive DOM scrolling for infinite list loading
-            emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery...")
-            for s_i in range(3):
-                try:
-                    await tab_page.evaluate("window.scrollBy({top: 650, behavior: 'smooth'})")
-                    await tab_page.wait_for_timeout(900)
-                except Exception:
-                    break
-
-            # Step 4: Extract and sanitize employee records
-            emit_event("log", f"🔍 [LinkedIn Step 4/5 - Card Parsing] Extracting employee cards, roles & profile links...")
-            employees = []
-
-            # 4A: Direct Extraction from company /people/ tab or People Search results
-            try:
-                raw_extracted = await tab_page.evaluate(r"""() => {
-                    const list = [];
-                    const seenNames = new Set();
-                    const cards = document.querySelectorAll('div.org-people-profile-card, li.org-people-profile-card__profile-card-spacing, div[data-view-name="org-people-profile-card"], .entity-result, li.reusable-search__result-container');
-
-                    cards.forEach(card => {
-                        let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
-                        let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
-                        let linkEl = card.querySelector('a[href*="/in/"]');
-                        let imgEl = card.querySelector('img[src*="licdn.com"]');
-                        let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
-
-                        let rawName = nameEl ? nameEl.innerText.trim() : "";
-                        let rawTitle = titleEl ? titleEl.innerText.trim() : "";
-                        let profile = linkEl ? linkEl.href.split('?')[0] : "";
-                        let avatar = imgEl ? imgEl.src : "";
-                        let loc = locEl ? locEl.innerText.trim() : "";
-
-                        // Robust sanitization
-                        let cleanName = rawName
-                            .replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '')
-                            .replace(/\(He\/Him\)|\(She\/Her\)|\(They\/Them\)/gi, '')
-                            .replace(/View.*profile/gi, '')
-                            .replace(/\b(connection|connections)\b/gi, '')
-                            .replace(/[\r\n]+/g, ' ')
-                            .replace(/\s+/g, ' ')
-                            .trim();
-
-                        let cleanTitle = rawTitle
-                            .replace(/[\r\n]+/g, ' ')
-                            .replace(/\s+/g, ' ')
-                            .trim();
-
-                        if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
-                            seenNames.add(cleanName);
-                            list.push({
-                                full_name: cleanName,
-                                title: cleanTitle || "Employee",
-                                linkedin_profile_url: profile,
-                                avatar_url: avatar,
-                                location: loc
-                            });
-                        }
-                    });
-
-                    return list;
-                }""")
-                if raw_extracted and isinstance(raw_extracted, list):
-                    employees = raw_extracted
-            except Exception as e:
-                emit_event("log", f"⚠️ Employee DOM parse note: {str(e)[:50]}")
-
-            # 4B: If 0 cards extracted, search LinkedIn personnel directory directly (never navigate away to Google)
-            if len(employees) == 0 and verified_company_url:
-                try:
-                    search_people_url = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
-                    emit_event("log", f"👥 [LinkedIn Directory Search] Searching verified personnel directly on LinkedIn for {name}...")
-                    emit_event("linkedin_navigated", {"url": search_people_url, "name": name})
-                    await tab_page.goto(search_people_url, wait_until="domcontentloaded", timeout=12000)
-                    await tab_page.wait_for_timeout(1800)
-                    for s_i in range(2):
+                # Step 3: Progressive DOM scrolling
+                emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery...")
+                for s_i in range(3):
+                    try:
                         await tab_page.evaluate("window.scrollBy({top: 650, behavior: 'smooth'})")
-                        await tab_page.wait_for_timeout(700)
-                    li_peop_extracted = await tab_page.evaluate(r"""() => {
+                        await tab_page.wait_for_timeout(900)
+                    except Exception:
+                        break
+
+                # Step 4: Extract from company /people/ tab
+                emit_event("log", f"🔍 [LinkedIn Step 4/5 - Card Parsing] Extracting employee cards from company directory...")
+                try:
+                    raw_extracted = await tab_page.evaluate(r"""() => {
                         const list = [];
                         const seenNames = new Set();
-                        const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container, div.org-people-profile-card');
+                        const cards = document.querySelectorAll('div.org-people-profile-card, li.org-people-profile-card__profile-card-spacing, div[data-view-name="org-people-profile-card"], .entity-result, li.reusable-search__result-container');
+
                         cards.forEach(card => {
                             let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
                             let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
                             let linkEl = card.querySelector('a[href*="/in/"]');
+                            let imgEl = card.querySelector('img[src*="licdn.com"]');
                             let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
-                            let rawName = nameEl ? (nameEl.innerText || nameEl.textContent) : "";
-                            let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent) : "";
+
+                            let rawName = nameEl ? nameEl.innerText.trim() : "";
+                            let rawTitle = titleEl ? titleEl.innerText.trim() : "";
                             let profile = linkEl ? linkEl.href.split('?')[0] : "";
+                            let avatar = imgEl ? imgEl.src : "";
                             let loc = locEl ? locEl.innerText.trim() : "";
-                            let cleanName = rawName.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
-                            let cleanTitle = rawTitle.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+                            let cleanName = rawName
+                                .replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '')
+                                .replace(/\(He\/Him\)|\(She\/Her\)|\(They\/Them\)/gi, '')
+                                .replace(/View.*profile/gi, '')
+                                .replace(/\b(connection|connections)\b/gi, '')
+                                .replace(/[\r\n]+/g, ' ')
+                                .replace(/\s+/g, ' ')
+                                .trim();
+
+                            let cleanTitle = rawTitle
+                                .replace(/[\r\n]+/g, ' ')
+                                .replace(/\s+/g, ' ')
+                                .trim();
+
                             if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
                                 seenNames.add(cleanName);
                                 list.push({
                                     full_name: cleanName,
                                     title: cleanTitle || "Employee",
                                     linkedin_profile_url: profile,
-                                    avatar_url: "",
-                                    location: loc
+                                    avatar_url: avatar,
+                                    location: loc,
+                                    snippet: ""
                                 });
                             }
                         });
                         return list;
                     }""")
-                    if li_peop_extracted and isinstance(li_peop_extracted, list) and len(li_peop_extracted) > 0:
-                        employees = li_peop_extracted
-                        emit_event("log", f"✅ [LinkedIn Step 4/5] Discovered {len(employees)} verified LinkedIn employee profiles for {name}")
-                except Exception:
-                    pass
+                    if raw_extracted and isinstance(raw_extracted, list):
+                        employees = raw_extracted
+                except Exception as e:
+                    emit_event("log", f"⚠️ Employee DOM parse note: {str(e)[:50]}")
+
+            # Fallback: If 0 cards extracted from /people/ OR if no company page existed,
+            # execute targeted Boolean People Search directly on LinkedIn!
+            if len(employees) == 0:
+                role_bool = '("Founder" OR "Co-Founder" OR "Owner" OR "Director" OR "CEO" OR "Manager" OR "Head")'
+                people_queries = [
+                    f'"{core_brand}" {role_bool}',
+                    f'"{core_brand}"'
+                ]
+                if core_brand.lower() != name.lower():
+                    people_queries.append(f'"{name}"')
+
+                for p_query in people_queries:
+                    search_people_url = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(p_query)}"
+                    emit_event("log", f"👥 [LinkedIn People Search] Searching personnel using query: {p_query}...")
+                    emit_event("linkedin_navigated", {"url": search_people_url, "name": core_brand})
+                    try:
+                        await tab_page.goto(search_people_url, wait_until="domcontentloaded", timeout=14000)
+                        await tab_page.wait_for_timeout(1800)
+                        for s_i in range(2):
+                            await tab_page.evaluate("window.scrollBy({top: 650, behavior: 'smooth'})")
+                            await tab_page.wait_for_timeout(700)
+
+                        li_peop_extracted = await tab_page.evaluate(r"""() => {
+                            const list = [];
+                            const seenNames = new Set();
+                            const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container, div.org-people-profile-card');
+                            cards.forEach(card => {
+                                let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
+                                let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
+                                let linkEl = card.querySelector('a[href*="/in/"]');
+                                let imgEl = card.querySelector('img[src*="licdn.com"]');
+                                let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
+                                let snippetEl = card.querySelector('.entity-result__summary, .reusable-search__card-summary');
+
+                                let rawName = nameEl ? (nameEl.innerText || nameEl.textContent) : "";
+                                let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent) : "";
+                                let profile = linkEl ? linkEl.href.split('?')[0] : "";
+                                let avatar = imgEl ? imgEl.src : "";
+                                let loc = locEl ? locEl.innerText.trim() : "";
+                                let snippet = snippetEl ? snippetEl.innerText.trim() : "";
+
+                                let cleanName = rawName
+                                    .replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '')
+                                    .replace(/\(He\/Him\)|\(She\/Her\)|\(They\/Them\)/gi, '')
+                                    .replace(/View.*profile/gi, '')
+                                    .replace(/\b(connection|connections)\b/gi, '')
+                                    .replace(/[\r\n]+/g, ' ')
+                                    .replace(/\s+/g, ' ')
+                                    .trim();
+
+                                let cleanTitle = rawTitle.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+                                if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
+                                    seenNames.add(cleanName);
+                                    list.push({
+                                        full_name: cleanName,
+                                        title: cleanTitle || "Employee",
+                                        linkedin_profile_url: profile,
+                                        avatar_url: avatar,
+                                        location: loc,
+                                        snippet: snippet
+                                    });
+                                }
+                            });
+                            return list;
+                        }""")
+
+                        if li_peop_extracted and isinstance(li_peop_extracted, list) and len(li_peop_extracted) > 0:
+                            verified_candidates = []
+                            for cand in li_peop_extracted:
+                                c_title = cand.get("title", "")
+                                c_snip = f"{cand.get('snippet', '')} {cand.get('location', '')}"
+                                if is_person_relevant_to_brand(core_brand, c_title, c_snip):
+                                    verified_candidates.append(cand)
+
+                            if verified_candidates:
+                                employees = verified_candidates
+                                emit_event("log", f"✅ [LinkedIn Step 4/5] Discovered {len(employees)} verified personnel profiles for '{core_brand}' via targeted keyword search")
+                                break
+                    except Exception as pe_err:
+                        emit_event("log", f"⚠️ People search note for query '{p_query}': {str(pe_err)[:40]}")
 
             # Enrich employee emails from snippet text or matched business website emails
             for emp in employees:
-                loc_text = emp.get("location", "")
+                loc_text = f"{emp.get('location', '')} {emp.get('snippet', '')}"
                 if not emp.get("email") and "@" in loc_text:
                     snip_matches = EMAIL_REGEX.findall(loc_text)
                     if snip_matches and not any(snip_matches[0].lower().endswith(ext) for ext in JUNK_EXTENSIONS):
@@ -1521,6 +1653,7 @@ async def run_scraper(
                         "maps_url": maps_page.url,
                         "lat": lat_val,
                         "lon": lon_val,
+                        "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
 
                     scraped_places.append(place_info)
@@ -1542,6 +1675,7 @@ async def run_scraper(
                         linkedin_queue.put_nowait({
                             "index": idx,
                             "name": place_title,
+                            "address": address or "N/A",
                             "website": website if (website and website != "N/A") else "",
                             "linkedin_url": "",
                         })
