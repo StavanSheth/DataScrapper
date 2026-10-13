@@ -332,21 +332,6 @@
     window.__MAVON_EXTENSION_ACTIVE__ = true;
     document.documentElement.setAttribute("data-mavon-extension", "true");
     window.dispatchEvent(new CustomEvent("mavon_extension_ready"));
-
-    window.addEventListener("message", (event) => {
-      if (event.data && event.data.source === "mavon_dashboard") {
-        if (event.data.action === "START_LIVE_BROWSER_SCRAPING") {
-          chrome.runtime.sendMessage({
-            action: "LAUNCH_LIVE_TAB",
-            url: event.data.url,
-            query: event.data.query,
-            max: event.data.max,
-            scrapeWebsites: event.data.scrapeWebsites,
-            radiusKm: event.data.radiusKm
-          });
-        }
-      }
-    });
   }
 
   // 5. Auto-Pilot Harvester on Google Maps

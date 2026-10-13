@@ -16,6 +16,7 @@ let isConnecting = false;
 let mapsTabId = null;
 let linkedinTabId = null;
 let shopTabId = null;
+let lastStartHarvesterTime = 0;
 const attachedDebuggerTabs = new Set();
 
 // Check if backend is reachable before opening WebSocket
@@ -239,35 +240,64 @@ async function handleCommand(msg) {
     } catch (e) {}
   }
 
-  // 1. START HARVESTER: Opens by default 2 tabs: Tab 1 (Maps) and Tab 2 (LinkedIn)
+  // 1. START HARVESTER: Opens by default 2 tabs: Tab 1 (Maps) and Tab 2 (LinkedIn) - No duplicate tabs
   if (action === "START_HARVESTER") {
+    const now = Date.now();
+    if (now - lastStartHarvesterTime < 1500 && mapsTabId) {
+      console.log("[Mavon Extension] START_HARVESTER debounced (preventing duplicate tabs)");
+      return { success: true, debounced: true };
+    }
+    lastStartHarvesterTime = now;
+
     const mapsUrl = payload.maps_url || payload.url || "https://www.google.com/maps/search/shops?hl=en";
     const linkedinUrl = payload.linkedin_url || "https://www.linkedin.com/";
 
-    // Tab 1: Google Maps (active, foreground)
+    // Tab 1: Google Maps (Strictly 1 tab - reuse existing or open single tab)
+    let mapsTab = null;
     if (mapsTabId) {
-      try {
-        await chrome.tabs.update(mapsTabId, { url: mapsUrl, active: true });
-      } catch (e) {
-        const createOpts = targetWinId ? { windowId: targetWinId, url: mapsUrl, active: true } : { url: mapsUrl, active: true };
-        const t = await chrome.tabs.create(createOpts);
-        mapsTabId = t.id;
+      mapsTab = await chrome.tabs.get(mapsTabId).catch(() => null);
+    }
+    if (!mapsTab) {
+      const allMaps = await chrome.tabs.query({ url: "*://*.google.com/maps/*" });
+      if (allMaps.length > 0) {
+        mapsTab = allMaps[0];
+        mapsTabId = mapsTab.id;
+        // Close any redundant duplicate maps tabs
+        for (let i = 1; i < allMaps.length; i++) {
+          chrome.tabs.remove(allMaps[i].id).catch(() => {});
+        }
       }
+    }
+
+    if (mapsTab) {
+      await chrome.tabs.update(mapsTab.id, { url: mapsUrl, active: true });
+      mapsTabId = mapsTab.id;
     } else {
       const createOpts = targetWinId ? { windowId: targetWinId, url: mapsUrl, active: true } : { url: mapsUrl, active: true };
       const t = await chrome.tabs.create(createOpts);
       mapsTabId = t.id;
     }
 
-    // Tab 2: LinkedIn (opened by default alongside Maps)
+    // Tab 2: LinkedIn (Strictly 1 tab - reuse existing or open single tab)
+    let liTab = null;
     if (linkedinTabId) {
-      try {
-        await chrome.tabs.update(linkedinTabId, { url: linkedinUrl, active: false });
-      } catch (e) {
-        const createOpts = targetWinId ? { windowId: targetWinId, url: linkedinUrl, active: false } : { url: linkedinUrl, active: false };
-        const t2 = await chrome.tabs.create(createOpts);
-        linkedinTabId = t2.id;
+      liTab = await chrome.tabs.get(linkedinTabId).catch(() => null);
+    }
+    if (!liTab) {
+      const allLi = await chrome.tabs.query({ url: "*://*.linkedin.com/*" });
+      if (allLi.length > 0) {
+        liTab = allLi[0];
+        linkedinTabId = liTab.id;
+        // Close any redundant duplicate linkedin tabs
+        for (let i = 1; i < allLi.length; i++) {
+          chrome.tabs.remove(allLi[i].id).catch(() => {});
+        }
       }
+    }
+
+    if (liTab) {
+      await chrome.tabs.update(liTab.id, { url: linkedinUrl, active: false });
+      linkedinTabId = liTab.id;
     } else {
       const createOpts = targetWinId ? { windowId: targetWinId, url: linkedinUrl, active: false } : { url: linkedinUrl, active: false };
       const t2 = await chrome.tabs.create(createOpts);
@@ -292,21 +322,20 @@ async function handleCommand(msg) {
     };
   }
 
-  // 2. OPEN SHOP TAB: Opens dynamically when shop website is processed, live in front of user
+  // 2. OPEN SHOP TAB: Opens dynamically when shop website is processed, reuse single tab
   if (action === "OPEN_SHOP_TAB") {
     const shopUrl = payload.url || payload.website;
     if (!shopUrl || !shopUrl.startsWith("http")) {
       return { success: false, reason: "Invalid shop URL" };
     }
 
+    let existingShopTab = null;
     if (shopTabId) {
-      try {
-        await chrome.tabs.update(shopTabId, { url: shopUrl, active: true });
-      } catch (e) {
-        const createOpts = targetWinId ? { windowId: targetWinId, url: shopUrl, active: true } : { url: shopUrl, active: true };
-        const t = await chrome.tabs.create(createOpts);
-        shopTabId = t.id;
-      }
+      existingShopTab = await chrome.tabs.get(shopTabId).catch(() => null);
+    }
+
+    if (existingShopTab) {
+      await chrome.tabs.update(shopTabId, { url: shopUrl, active: true });
     } else {
       const createOpts = targetWinId ? { windowId: targetWinId, url: shopUrl, active: true } : { url: shopUrl, active: true };
       const t = await chrome.tabs.create(createOpts);

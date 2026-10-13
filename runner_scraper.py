@@ -1035,8 +1035,6 @@ async def run_scraper(
             "--no-sandbox",
             "--disable-infobars",
             "--start-maximized",
-            "--window-position=0,0",
-            f"--window-size={screen_w},{screen_h}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
@@ -1213,12 +1211,20 @@ async def run_scraper(
         # Tab 3 (Shop Website) opens dynamically based on shop website
         pages_dict = {"website": None}
         if cdp_connected:
-            maps_page = await context.new_page() if enable_maps else None
-            linkedin_page = await context.new_page() if enable_linkedin else None
+            existing_maps = [p for p in context.pages if "google.com/maps" in p.url]
+            existing_li = [p for p in context.pages if "linkedin.com" in p.url]
+            maps_page = existing_maps[0] if (existing_maps and enable_maps) else (await context.new_page() if enable_maps else None)
+            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else (await context.new_page() if enable_linkedin else None)
         else:
             pages_avail = list(context.pages)
             maps_page = pages_avail.pop(0) if (enable_maps and pages_avail) else (await context.new_page() if enable_maps else None)
             linkedin_page = pages_avail.pop(0) if (enable_linkedin and pages_avail) else (await context.new_page() if enable_linkedin else None)
+            # Close any leftover stray tabs so exactly 2 tabs exist at startup
+            for stray in pages_avail:
+                try:
+                    await stray.close()
+                except Exception:
+                    pass
 
         if maps_page:
             await clear_fixed_viewport(maps_page)
