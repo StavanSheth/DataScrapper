@@ -19,6 +19,9 @@ chrome_live_profile/
 *.db-shm
 *.db-wal
 
+# Credentials & Session cookies
+linkedin_cookies.json
+
 # Editor and OS files
 .vscode/
 .idea/
