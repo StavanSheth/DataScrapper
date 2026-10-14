@@ -247,6 +247,19 @@ def init_db():
 
         conn.commit()
 
+        # Create census cache table to avoid redundant count probing for same location/query
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS census_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                query TEXT NOT NULL,
+                location TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(platform, query, location)
+            )
+        """)
+
 def clean_domain(url: str) -> str:
     """Extract clean domain name without protocol, www, or query parameters."""
     if not url or url.upper() in ("N/A", "NONE"):
@@ -317,9 +330,11 @@ def is_lead_in_db(name: str, address: str = "") -> bool:
 def load_proximity_dedup_cache(location_name: str = "") -> Dict[str, Any]:
     """
     Pre-caches existing leads and directory listings in memory for O(1) microsecond
-    deduplication during live proximity search. Prevents redundant clicks and crawls.
+    deduplication during live proximity search. Scoped by location to prevent false skips
+    when a new location/city is searched.
     """
     cache = {
+        "location": location_name.strip().lower(),
         "leads_names": set(),
         "leads_name_addr": set(),
         "leads_phones": set(),
@@ -385,6 +400,12 @@ def is_place_already_scraped(name: str, address_snippet: str = "", dedup_cache: 
         # 2. Unique Business Name match ONLY when address snippet is missing/N/A
         if clean_n in dedup_cache.get("leads_names", set()):
             if not has_addr:
+                # If target location is specified and differs from existing addresses, do NOT falsely skip!
+                target_loc = dedup_cache.get("location", "")
+                if target_loc:
+                    has_same_loc = any(target_loc in ex_a for ex_n, ex_a in dedup_cache.get("leads_name_addr", set()) if ex_n == clean_n)
+                    if not has_same_loc and len(dedup_cache.get("leads_name_addr", set())) > 0:
+                        return False  # Location has changed! Allow scraping this new branch
                 return True
         return False
 
@@ -896,6 +917,28 @@ def get_all_leads() -> List[Dict[str, Any]]:
         """)
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+def get_cached_census_total(platform: str, query: str, location: str) -> Optional[int]:
+    """Retrieve verified census total for a given platform, query, and location to bypass redundant network requests."""
+    if not platform or not location:
+        return None
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT total FROM census_cache WHERE LOWER(platform) = ? AND LOWER(query) = ? AND LOWER(location) = ?",
+            (platform.strip().lower(), query.strip().lower(), location.strip().lower())
+        ).fetchone()
+        return row[0] if row else None
+
+def set_cached_census_total(platform: str, query: str, location: str, total: int):
+    """Store or update verified census total for a given platform, query, and location."""
+    if total <= 0 or not platform or not location:
+        return
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO census_cache (platform, query, location, total, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(platform, query, location) DO UPDATE SET total = excluded.total, updated_at = CURRENT_TIMESTAMP
+        """, (platform.strip().lower(), query.strip().lower(), location.strip().lower(), total))
 
 def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """

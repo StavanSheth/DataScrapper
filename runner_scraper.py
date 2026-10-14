@@ -13,7 +13,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads, get_cached_census_total, set_cached_census_total
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -1317,20 +1317,28 @@ async def platform_area_search_worker(
             emit_event("log", f"🎯 [Proximity Census] Probing {p_name} total available businesses in '{location_name}'...")
             emit_event("platform_navigated", {"url": target_url, "title": f"{p_name} Proximity Census", "platform": p_name})
 
-            detected_total = 0
-            try:
-                await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                await platform_page.wait_for_timeout(1000)
+            # Check if verified total was already discovered for this platform & location
+            cached_tot = get_cached_census_total(p_name, category, location_name)
+            if cached_tot and cached_tot > 0:
+                final_plat_total = cached_tot
+                emit_event("log", f"⚡ [Census Cache] Reusing verified count for {p_name} in '{location_name}': ~{final_plat_total} businesses (Bypassing redundant probe).")
+            else:
+                detected_total = 0
+                try:
+                    await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    await platform_page.wait_for_timeout(1000)
 
-                detected_total = await extract_platform_total_count(platform_page, p_name)
-                if detected_total <= 0:
-                    detected_total = await platform_page.evaluate("""() => {
-                        return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], li.border-color--default__09f24__Nrmcg, div.listing_details, article, [role="article"]').length;
-                    }""")
-            except Exception as ce:
-                emit_event("log", f"⚠️ [Proximity Census] {p_name} network response slow. Defaulting to progressive count.")
+                    detected_total = await extract_platform_total_count(platform_page, p_name)
+                    if detected_total <= 0:
+                        detected_total = await platform_page.evaluate("""() => {
+                            return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], li.border-color--default__09f24__Nrmcg, div.listing_details, article, [role="article"]').length;
+                        }""")
+                except Exception as ce:
+                    emit_event("log", f"⚠️ [Proximity Census] {p_name} network response slow. Defaulting to progressive count.")
 
-            final_plat_total = max(detected_total, max_results if max_results > 0 else 15)
+                final_plat_total = max(detected_total, max_results if max_results > 0 else 15)
+                set_cached_census_total(p_name, category, location_name, final_plat_total)
+
             platform_totals[p_name] = final_plat_total
             emit_event("proximity_total", {
                 "platform": p_name,
