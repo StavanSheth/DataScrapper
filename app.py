@@ -350,22 +350,6 @@ async def start_scraping(payload: Dict[str, Any]):
     if not query:
         query = "shops"
 
-    init_plats = {}
-    if enable_maps:
-        init_plats["Google Maps"] = {"total": max_results if not scrape_all else 120, "scraped": 0, "skipped": 0, "percent": 0}
-    if enable_platform:
-        for p in platforms_list:
-            init_plats[p] = {"total": 0, "scraped": 0, "skipped": 0, "percent": 0}
-
-    proximity_metrics["location"] = payload.get("location", "") or query
-    proximity_metrics["query"] = query
-    proximity_metrics["platforms"] = init_plats
-    proximity_metrics["total_estimated"] = sum(x["total"] for x in init_plats.values()) if init_plats else (max_results if not scrape_all else 120)
-    proximity_metrics["scraped_count"] = 0
-    proximity_metrics["skipped_count"] = 0
-    proximity_metrics["time_saved_sec"] = 0.0
-    proximity_metrics["percent"] = 0
-
     max_results = int(payload.get("max_results", 20))
     visible_browser = bool(payload.get("visible_browser", True))
     extract_emails = bool(payload.get("extract_emails", True))
@@ -387,6 +371,22 @@ async def start_scraping(payload: Dict[str, Any]):
     platform_custom_url = str(payload.get("platform_custom_url", "")).strip()
     dedup_area = bool(payload.get("dedup_area", True))
     skip_existing_db = bool(payload.get("skip_existing_db", False))
+
+    init_plats = {}
+    if enable_maps:
+        init_plats["Google Maps"] = {"total": max_results if not scrape_all else 120, "scraped": 0, "skipped": 0, "percent": 0}
+    if enable_platform:
+        for p in platforms_list:
+            init_plats[p] = {"total": 0, "scraped": 0, "skipped": 0, "percent": 0}
+
+    proximity_metrics["location"] = payload.get("location", "") or query
+    proximity_metrics["query"] = query
+    proximity_metrics["platforms"] = init_plats
+    proximity_metrics["total_estimated"] = sum(x["total"] for x in init_plats.values()) if init_plats else (max_results if not scrape_all else 120)
+    proximity_metrics["scraped_count"] = 0
+    proximity_metrics["skipped_count"] = 0
+    proximity_metrics["time_saved_sec"] = 0.0
+    proximity_metrics["percent"] = 0
 
     recent_logs = []
     last_live_frame_maps = None

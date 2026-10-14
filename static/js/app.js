@@ -1189,7 +1189,9 @@ let placesData = [];
               visible_browser: visibleBrowser
             })
           });
-          const res = await resp.json();
+          let res = {};
+          const text = await resp.text();
+          try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
           if (!resp.ok) {
             alert(res.detail || "Error starting company harvester");
             setScrapingState(false, "Ready");
@@ -1281,7 +1283,9 @@ let placesData = [];
             skip_existing_db: skipExisting
           })
         });
-        const res = await resp.json();
+        let res = {};
+        const text = await resp.text();
+        try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
         if (!resp.ok) {
           alert(res.detail || "Error starting scraper");
           setScrapingState(false, "Ready");
