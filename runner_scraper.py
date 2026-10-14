@@ -1372,7 +1372,11 @@ async def platform_area_search_worker(
             # Re-navigate if needed
             if platform_page.url != target_url:
                 await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=18000)
-                await platform_page.wait_for_timeout(1800)
+                try:
+                    await platform_page.wait_for_load_state("load", timeout=3000)
+                except Exception:
+                    pass
+                await platform_page.wait_for_timeout(1000)
         except Exception as nav_e:
             emit_event("log", f"⚠️ [Tab 4 - {p_name}] Navigation notice: {str(nav_e)[:60]}")
 
@@ -1383,225 +1387,278 @@ async def platform_area_search_worker(
         except Exception:
             pass
 
+        # 1. Accept cookies & handle anti-bot on directory page
+        try:
+            await detect_and_handle_cookies(platform_page)
+        except Exception:
+            pass
+        try:
+            await attempt_turnstile_solve(platform_page)
+        except Exception:
+            pass
+
+        # 2. Dismiss any blocking dialogs, currency selectors, sign-in banners, or location modals
+        try:
+            await platform_page.evaluate("""() => {
+                const dismiss = [
+                    'button[aria-label="Close"]', 'button[aria-label*="close" i]',
+                    'button[data-testid*="modal-close"]', 'button[data-testid="modal-container-close"]',
+                    'div[aria-label="Close"]', '.modal-close', 'button.close',
+                    '[data-qa*="close"]', 'button[aria-label="Dismiss"]',
+                    'button:has-text("Accept")', 'button:has-text("Continue without supporting")'
+                ];
+                for (const sel of dismiss) {
+                    document.querySelectorAll(sel).forEach(el => { try { el.click(); } catch(e){} });
+                }
+            }""")
+        except Exception:
+            pass
+
         # Abort heavy video playback (e.g. Airbnb background videos) to optimize RAM and speed
         try:
             await platform_page.route("**/*.{mp4,avi,mkv,webm,mp3,wav,ogg}", lambda r: r.abort())
         except Exception:
             pass
 
-        # Scroll dynamically down page to trigger proximity listings to render
-        for sc in range(3):
-            try:
-                await platform_page.evaluate("window.scrollBy({top: 850})")
-                await platform_page.wait_for_timeout(450)
-            except Exception:
-                pass
+        # =====================================================================
+        # PROGRESSIVE MULTI-PASS SCROLLING & DISCOVERY
+        # Continuously scrolls down, triggers lazy cards to load, extracts in batch,
+        # and loops until target max_results is reached or bottom of feed is reached!
+        # =====================================================================
+        max_scroll_passes = max(10, min(50, (max_results // 2) + 8))
+        consecutive_stagnant = 0
+        extracted_listings = []
+        seen_listing_urls = set()
 
-        # Extract cards across platforms with high-precision platform selectors, junk blacklisting, and validation
-        extracted_listings = await platform_page.evaluate(r"""() => {
-            const results = [];
-            const seenUrls = new Set();
-            const currUrl = window.location.href;
-            const isAirbnb = currUrl.includes('airbnb');
-            const isFresha = currUrl.includes('fresha');
-            const isYelp = currUrl.includes('yelp');
-            const isTripAdvisor = currUrl.includes('tripadvisor');
+        emit_event("log", f"📜 [Tab 4 - {p_name}] Beginning progressive scrolling discovery (Target: {max_results} listings)...")
 
-            // Blacklist of UI controls, filter toolbars, headers, and navigation chrome
-            const junkRegex = /^(?:filters?|filter\s*\(?\d*\)?|show\s+map|map|search|clear\s+all|explore|instant\s+book|rooms\s+and\s+beds|property\s+type|amenities|sort\s+by|guest\s+favorites?|menu|view\s+in\s+map|sign\s+in|log\s+in|navigation|next|previous|page\s+\d+|categories|ratings?|prices?|display\s+total|share|save)$/i;
+        for scroll_pass in range(1, max_scroll_passes + 1):
+            # Extract cards currently in DOM
+            current_batch = await platform_page.evaluate(r"""() => {
+                const results = [];
+                const currUrl = window.location.href;
+                const isAirbnb = currUrl.includes('airbnb');
+                const isFresha = currUrl.includes('fresha');
+                const isYelp = currUrl.includes('yelp');
+                const isTripAdvisor = currUrl.includes('tripadvisor');
 
-            let cardSelectors = [];
-            if (isAirbnb) {
-                cardSelectors = ['div[data-testid="card-container"]', 'div[itemprop="itemListElement"]', 'div[aria-labelledby*="title_"]', 'a[href*="/rooms/"]'];
-            } else if (isFresha) {
-                cardSelectors = ['div[data-qa="venue-card"]', 'div.venue-card', 'a[href*="/a/"]'];
-            } else if (isYelp) {
-                cardSelectors = ['div[data-testid="serp-ia-card"]', 'li.border-color--default__09f24__Nrmcg', 'div.container__09f24__FeTO7'];
-            } else if (isTripAdvisor) {
-                cardSelectors = ['div.listing_details', 'div.listItem', 'div[data-automation="hotel-card-title"]', 'div.result-card'];
-            } else {
-                // Universal directory card selectors across any modern web platform
-                cardSelectors = [
-                    'article', '[role="article"]',
-                    'div[data-testid*="property-card"]', 'div[data-testid*="listing"]', 'div[data-testid*="card"]', 'div[data-testid*="result"]',
-                    'div[itemprop="itemListElement"]', 'li[itemprop="itemListElement"]',
-                    'div.search-result', 'li.search-result', 'div.search-result-card', 'div.search-item',
-                    'div.venue-card', 'div.place-card', 'div.businessCard', 'div.listing-card', 'div.result-card',
-                    'div.directory-card', 'div.directory-item', 'div.store-card', 'div.vendor-card',
-                    'div.property-card', 'a.property-card'
-                ];
-            }
+                // Blacklist of UI controls, filter toolbars, headers, and navigation chrome
+                const junkRegex = /^(?:filters?|filter\s*\(?\d*\)?|show\s+map|map|search|clear\s+all|explore|instant\s+book|rooms\s+and\s+beds|property\s+type|amenities|sort\s+by|guest\s+favorites?|menu|view\s+in\s+map|sign\s+in|log\s+in|navigation|next|previous|page\s+\d+|categories|ratings?|prices?|display\s+total|share|save)$/i;
 
-            let cards = Array.from(document.querySelectorAll(cardSelectors.join(', ')));
-
-            // Dynamic fallback: If no cards matched on an unusual custom site, find repeating containers enclosing heading links
-            if (cards.length === 0) {
-                const headingLinks = document.querySelectorAll('main h2 a, main h3 a, main h4 a, #root h2 a, #root h3 a, body h2 a, body h3 a');
-                const seenContainers = new Set();
-                headingLinks.forEach(hl => {
-                    const cont = hl.closest('article, [class*="card"], [class*="item"], [class*="listing"], [class*="result"], li, div');
-                    if (cont && !seenContainers.has(cont) && cont !== document.body && cont !== document.documentElement) {
-                        seenContainers.add(cont);
-                        cards.push(cont);
-                    }
-                });
-            }
-
-            cards.forEach((card, c_idx) => {
-                card.setAttribute('data-mavon-card', c_idx.toString());
-                // Determine direct listing URL
-                let linkEl = null;
-                if (card.matches('a')) {
-                    linkEl = card;
+                let cardSelectors = [];
+                if (isAirbnb) {
+                    cardSelectors = ['div[data-testid="card-container"]', 'div[itemprop="itemListElement"]', 'div[aria-labelledby*="title_"]', 'div[class*="c4mnd7m"]', 'a[href*="/rooms/"]'];
+                } else if (isFresha) {
+                    cardSelectors = ['div[data-qa="venue-card"]', 'div.venue-card', 'a[href*="/a/"]', 'a[href*="/v/"]', 'a[href*="/b/"]', '[class*="venueCard"]', 'article'];
+                } else if (isYelp) {
+                    cardSelectors = ['div[data-testid="serp-ia-card"]', 'li.border-color--default__09f24__Nrmcg', 'div.container__09f24__FeTO7', 'div[class*="container__"]'];
+                } else if (isTripAdvisor) {
+                    cardSelectors = ['div.listing_details', 'div.listItem', 'div[data-automation="hotel-card-title"]', 'div.result-card', 'div[data-block-id]', 'div[class*="listItem"]'];
                 } else {
-                    if (isAirbnb) {
-                        linkEl = card.querySelector('a[href*="/rooms/"]');
-                    } else if (isFresha) {
-                        linkEl = card.querySelector('a[href*="/a/"], a[data-qa="venue-name-link"]');
-                    } else if (isYelp) {
-                        linkEl = card.querySelector('a[href*="/biz/"]');
-                    } else if (isTripAdvisor) {
-                        linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"]');
+                    cardSelectors = [
+                        'article', '[role="article"]',
+                        'div[data-testid*="property-card"]', 'div[data-testid*="listing"]', 'div[data-testid*="card"]', 'div[data-testid*="result"]',
+                        'div[itemprop="itemListElement"]', 'li[itemprop="itemListElement"]',
+                        'div.search-result', 'li.search-result', 'div.search-result-card', 'div.search-item',
+                        'div.venue-card', 'div.place-card', 'div.businessCard', 'div.listing-card', 'div.result-card',
+                        'div.directory-card', 'div.directory-item', 'div.store-card', 'div.vendor-card',
+                        'div.property-card', 'a.property-card'
+                    ];
+                }
+
+                let cards = Array.from(document.querySelectorAll(cardSelectors.join(', ')));
+
+                if (cards.length === 0) {
+                    const headingLinks = document.querySelectorAll('main h2 a, main h3 a, main h4 a, #root h2 a, #root h3 a, body h2 a, body h3 a');
+                    const seenContainers = new Set();
+                    headingLinks.forEach(hl => {
+                        const cont = hl.closest('article, [class*="card"], [class*="item"], [class*="listing"], [class*="result"], li, div');
+                        if (cont && !seenContainers.has(cont) && cont !== document.body && cont !== document.documentElement) {
+                            seenContainers.add(cont);
+                            cards.push(cont);
+                        }
+                    });
+                }
+
+                const seenUrlsOnPage = new Set();
+
+                cards.forEach((card, c_idx) => {
+                    let linkEl = null;
+                    if (card.matches('a')) {
+                        linkEl = card;
+                    } else {
+                        if (isAirbnb) {
+                            linkEl = card.querySelector('a[href*="/rooms/"]');
+                        } else if (isFresha) {
+                            linkEl = card.querySelector('a[href*="/a/"], a[href*="/v/"], a[href*="/b/"], a[href*="/salon/"], a[href*="/venue/"], a[data-qa="venue-name-link"]');
+                        } else if (isYelp) {
+                            linkEl = card.querySelector('a[href*="/biz/"]');
+                        } else if (isTripAdvisor) {
+                            linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"], a[href*="/Attraction_Review"], a[href*="/VacationRentalReview"]');
+                        }
+                        if (!linkEl) {
+                            linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
+                        }
+                        if (!linkEl) {
+                            linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
+                        }
                     }
-                    if (!linkEl) {
-                        // Prioritize heading or dedicated entity links so we don't accidentally grab category or share links
-                        linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
+
+                    if (!linkEl || !linkEl.href) return;
+                    let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
+
+                    if (isAirbnb && !href.includes('/rooms/')) return;
+                    if (isFresha && !href.match(/\/(?:a|v|b|salon|venue|providers)\//i) && !card.querySelector('[data-qa="venue-card"]')) return;
+                    if (isYelp && !href.includes('/biz/')) return;
+                    if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review') && !href.includes('/Attraction_Review')) return;
+
+                    if (href === currUrl.split('?')[0] || href.match(/\/search(?:results)?\b/i) || href.match(/\/find\b/i)) return;
+                    if (isAirbnb && (href.includes('/s/') || href.includes('/homes'))) return;
+                    if (href.match(/\/(?:login|signin|signup|register|auth|terms|privacy|cookie|about|contact|help|faq)\b/i)) return;
+                    if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+                    if (seenUrlsOnPage.has(href)) return;
+                    seenUrlsOnPage.add(href);
+
+                    card.setAttribute('data-mavon-card', href);
+
+                    // Title extraction
+                    let title = '';
+                    let titleEl = card.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4, .title, a.booking-link, [class*="t1jqs7"]');
+                    if (titleEl) {
+                        title = (titleEl.innerText || titleEl.textContent || '').trim();
                     }
-                    if (!linkEl) {
-                        linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
+
+                    const aria = (linkEl.getAttribute('aria-label') || card.getAttribute('aria-label') || '').trim();
+                    if ((!title || junkRegex.test(title)) && aria) {
+                        title = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
                     }
-                }
 
-                if (!linkEl || !linkEl.href) return;
-                let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
-
-                // Strict platform-specific listing URL validation
-                if (isAirbnb && !href.includes('/rooms/')) return;
-                if (isFresha && !href.includes('/a/') && !card.querySelector('[data-qa="venue-card"]')) return;
-                if (isYelp && !href.includes('/biz/')) return;
-                if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review')) return;
-
-                // Universal rejection of non-listing URLs, search pages, utility & auth pages
-                if (href === currUrl.split('?')[0] || href.match(/\/search(?:results)?\b/i) || href.match(/\/find\b/i)) return;
-                if (isAirbnb && (href.includes('/s/') || href.includes('/homes'))) return;
-                if (href.match(/\/(?:login|signin|signup|register|auth|terms|privacy|cookie|about|contact|help|faq)\b/i)) return;
-                if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
-
-                if (seenUrls.has(href)) return;
-
-                // Title extraction
-                let title = '';
-                let titleEl = card.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4, .title, a.booking-link, [class*="t1jqs7"]');
-                if (titleEl) {
-                    title = (titleEl.innerText || titleEl.textContent || '').trim();
-                }
-
-                const aria = (linkEl.getAttribute('aria-label') || card.getAttribute('aria-label') || '').trim();
-                if ((!title || junkRegex.test(title)) && aria) {
-                    title = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
-                }
-
-                if (!title || junkRegex.test(title)) {
-                    const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(s => s.length >= 3 && !junkRegex.test(s));
-                    if (lines.length > 0) title = lines[0];
-                }
-
-                if (!title || title.length < 3 || junkRegex.test(title)) return;
-
-                // 1. High-Precision Subtitle & Neighborhood Address extraction
-                let address = '';
-                const subEls = Array.from(card.querySelectorAll('[data-testid="listing-card-subtitle"], [data-qa="venue-address"], .subtitle, [class*="subtitle"], address, [class*="address"], [class*="locality"], [class*="location"]'));
-                for (const el of subEls) {
-                    const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-                    // Exclude non-location clutter (distance: '15 km away', dates: '9-14 Nov', host tags)
-                    if (txt && !txt.match(/\b\d+\s*(?:km|kilometres?|miles?)\s*away\b/i) &&
-                        !txt.match(/\b\d+[-–]\d+\s+[A-Za-z]+\b/) &&
-                        !txt.match(/^(?:individual host|superhost|entire\s+|private\s+room)/i) &&
-                        txt.length >= 3) {
-                        address = txt;
-                        break;
+                    if (!title || junkRegex.test(title)) {
+                        const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(s => s.length >= 3 && !junkRegex.test(s));
+                        if (lines.length > 0) title = lines[0];
                     }
-                }
-                // If address is still blank, extract neighborhood from title pattern 'in <Neighborhood>'
-                if (!address && title) {
-                    const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
-                    if (inMatch && inMatch[1].trim().length >= 3) {
-                        address = inMatch[1].trim();
+
+                    if (!title || title.length < 3 || junkRegex.test(title)) return;
+
+                    // Address / Subtitle
+                    let address = '';
+                    const subEls = Array.from(card.querySelectorAll('[data-testid="listing-card-subtitle"], [data-qa="venue-address"], .subtitle, [class*="subtitle"], address, [class*="address"], [class*="locality"], [class*="location"]'));
+                    for (const el of subEls) {
+                        const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (txt && !txt.match(/\b\d+\s*(?:km|kilometres?|miles?)\s*away\b/i) &&
+                            !txt.match(/\b\d+[-–]\d+\s+[A-Za-z]+\b/) &&
+                            !txt.match(/^(?:individual host|superhost|entire\s+|private\s+room)/i) &&
+                            txt.length >= 3) {
+                            address = txt;
+                            break;
+                        }
                     }
-                }
-
-                // 2. High-Precision Rating & Reviews Count extraction (Avoids false matching '4 BHK' or '2 bedrooms')
-                let ratingVal = 0.0;
-                let revCount = 0;
-                const rBadge = card.querySelector('[data-qa="rating-badge"], [aria-label*="rating"], [aria-label*="star"], [class*="rating"], span.r1dxllyb, span.ceNzKf');
-                const rBadgeText = rBadge ? (rBadge.getAttribute('aria-label') || rBadge.innerText || '') : '';
-                const textToScan = (rBadgeText + ' ' + aria + ' ' + (card.innerText || '')).replace(/\s+/g, ' ');
-
-                // A. Explicit keyword or symbol prefix: 'Rated 4.92', '★ 4.9', 'Score 8.5'
-                let mRate = textToScan.match(/(?:rated\s+|rating:?\s*|score:?\s*|★\s*)([0-5](?:\.\d+)?)/i);
-                if (!mRate) {
-                    // B. Suffix with star, /5, or out of 5: '4.92 stars', '5/5', '4.8 out of 5'
-                    mRate = textToScan.match(/\b([0-5](?:\.\d+)?)\s*(?:★|\/5\b|out of 5\b|\bstar(?:s)?\b)/i);
-                }
-                if (!mRate) {
-                    // C. Floating point number between 1.0 and 5.0 (NEVER bare integer to avoid '4 BHK')
-                    mRate = textToScan.match(/\b([1-5]\.\d{1,2})\b/);
-                }
-                if (mRate) {
-                    ratingVal = parseFloat(mRate[1]);
-                }
-
-                // Reviews count parsing
-                const revEl = card.querySelector('[data-qa="reviews-count"], .review-count, [class*="review"], [class*="count"]');
-                const revText = revEl ? (revEl.innerText || revEl.getAttribute('aria-label') || '') : '';
-                const revScan = (revText + ' ' + textToScan);
-
-                const mk = revScan.match(/\(?\s*(\d+(?:\.\d+)?)\s*k\s*(?:reviews?|ratings?|votes?)?\s*\)?/i);
-                if (mk && (revScan.toLowerCase().includes('k review') || revScan.toLowerCase().includes('k rating') || mk[0].includes('('))) {
-                    revCount = Math.round(parseFloat(mk[1]) * 1000);
-                } else {
-                    const mRev = revScan.match(/(?:from\s*|\(|\b)(\d[\d,]*)\s*(?:reviews?|ratings?|votes?)\b/i) ||
-                                 revScan.match(/[0-5](?:\.\d+)?\s*\(\s*(\d[\d,]*)\s*\)/) ||
-                                 revScan.match(/(?:average\s*rating,?\s*|from\s*)(\d[\d,]*)/i);
-                    if (mRev) {
-                        revCount = parseInt(mRev[1].replace(/,/g, ''), 10);
+                    if (!address && title) {
+                        const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
+                        if (inMatch && inMatch[1].trim().length >= 3) {
+                            address = inMatch[1].trim();
+                        }
                     }
-                }
 
-                // 3. High-Precision Price extraction
-                let priceText = '';
-                const priceEl = card.querySelector('[data-testid*="price"], [data-qa="price"], .price, [class*="_11jcbg2"], [class*="price"]');
-                if (priceEl) {
-                    priceText = (priceEl.innerText || '').replace(/[\r\n]+/g, ' ').trim();
-                }
-                if (!priceText) {
-                    const pMatch = textToScan.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+(?:\s*(?:\/|\s+per\s+)?(?:night|total|person|stay))?/i);
-                    if (pMatch) priceText = pMatch[0];
-                }
-                if (priceText && !priceText.toLowerCase().includes('night') && !priceText.toLowerCase().includes('total')) {
-                    if (textToScan.toLowerCase().includes('night')) {
-                        priceText = priceText + ' / night';
+                    // Rating & Reviews
+                    let ratingVal = 0.0;
+                    let revCount = 0;
+                    const rBadge = card.querySelector('[data-qa="rating-badge"], [aria-label*="rating"], [aria-label*="star"], [class*="rating"], span.r1dxllyb, span.ceNzKf');
+                    const rBadgeText = rBadge ? (rBadge.getAttribute('aria-label') || rBadge.innerText || '') : '';
+                    const textToScan = (rBadgeText + ' ' + aria + ' ' + (card.innerText || '')).replace(/\s+/g, ' ');
+
+                    let mRate = textToScan.match(/(?:rated\s+|rating:?\s*|score:?\s*|★\s*)([0-5](?:\.\d+)?)/i);
+                    if (!mRate) mRate = textToScan.match(/\b([0-5](?:\.\d+)?)\s*(?:★|\/5\b|out of 5\b|\bstar(?:s)?\b)/i);
+                    if (!mRate) mRate = textToScan.match(/\b([1-5]\.\d{1,2})\b/);
+                    if (mRate) ratingVal = parseFloat(mRate[1]);
+
+                    const revEl = card.querySelector('[data-qa="reviews-count"], .review-count, [class*="review"], [class*="count"]');
+                    const revText = revEl ? (revEl.innerText || revEl.getAttribute('aria-label') || '') : '';
+                    const revScan = (revText + ' ' + textToScan);
+                    const mk = revScan.match(/\(?\s*(\d+(?:\.\d+)?)\s*k\s*(?:reviews?|ratings?|votes?)?\s*\)?/i);
+                    if (mk && (revScan.toLowerCase().includes('k review') || revScan.toLowerCase().includes('k rating') || mk[0].includes('('))) {
+                        revCount = Math.round(parseFloat(mk[1]) * 1000);
+                    } else {
+                        const mRev = revScan.match(/(?:from\s*|\(|\b)(\d[\d,]*)\s*(?:reviews?|ratings?|votes?)\b/i) ||
+                                     revScan.match(/[0-5](?:\.\d+)?\s*\(\s*(\d[\d,]*)\s*\)/) ||
+                                     revScan.match(/(?:average\s*rating,?\s*|from\s*)(\d[\d,]*)/i);
+                        if (mRev) revCount = parseInt(mRev[1].replace(/,/g, ''), 10);
                     }
-                }
 
-                // Do NOT take photo images of property/venue; we capture platform details
-                seenUrls.add(href);
-                results.push({
-                    card_index: c_idx,
-                    title: title.replace(/[\r\n]+/g, ' ').trim(),
-                    url: href,
-                    address: address,
-                    rating: ratingVal,
-                    reviews_count: revCount,
-                    price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
-                    screenshot: ""
+                    // Price
+                    let priceText = '';
+                    const priceEl = card.querySelector('[data-testid*="price"], [data-qa="price"], .price, [class*="_11jcbg2"], [class*="price"]');
+                    if (priceEl) priceText = (priceEl.innerText || '').replace(/[\r\n]+/g, ' ').trim();
+                    if (!priceText) {
+                        const pMatch = textToScan.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+(?:\s*(?:\/|\s+per\s+)?(?:night|total|person|stay))?/i);
+                        if (pMatch) priceText = pMatch[0];
+                    }
+                    if (priceText && !priceText.toLowerCase().includes('night') && !priceText.toLowerCase().includes('total')) {
+                        if (textToScan.toLowerCase().includes('night')) priceText = priceText + ' / night';
+                    }
+
+                    results.push({
+                        title: title.replace(/[\r\n]+/g, ' ').trim(),
+                        url: href,
+                        address: address,
+                        rating: ratingVal,
+                        reviews_count: revCount,
+                        price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
+                        screenshot: ""
+                    });
                 });
-            });
 
-            return results;
-        }""")
+                return results;
+            }""")
 
-        emit_event("log", f"🟣 [Tab 4 - {p_name}] Harvested {len(extracted_listings)} area listings for '{category}' in '{location_name}'.")
+            new_in_pass = 0
+            for item in current_batch:
+                u = item.get("url")
+                if u and u not in seen_listing_urls:
+                    seen_listing_urls.add(u)
+                    item["card_index"] = len(extracted_listings)
+                    extracted_listings.append(item)
+                    new_in_pass += 1
+
+            emit_event("log", f"📜 [Tab 4 - {p_name}] Scroll pass {scroll_pass}: Found {len(extracted_listings)}/{max_results} listings ({new_in_pass} new in this view).")
+            emit_event("platform_progress", {
+                "platform": p_name,
+                "scraped": len(extracted_listings),
+                "skipped": plat_skipped,
+                "total": plat_total,
+                "percent": min(100, round((len(extracted_listings) / max(1, plat_total)) * 100))
+            })
+
+            if len(extracted_listings) >= max_results:
+                emit_event("log", f"🎯 [Tab 4 - {p_name}] Reached target quota of {max_results} listings!")
+                break
+
+            if new_in_pass == 0:
+                consecutive_stagnant += 1
+                if consecutive_stagnant >= 4:
+                    # Check for pagination Next button
+                    has_next = await platform_page.evaluate("""() => {
+                        const nextBtn = document.querySelector('a[aria-label="Next"], a[data-qa="pagination-next"], a[rel="next"], [class*="pagination-next"]');
+                        if (nextBtn) { nextBtn.click(); return true; }
+                        return false;
+                    }""")
+                    if has_next:
+                        emit_event("log", f"➡️ [Tab 4 - {p_name}] Triggered next pagination page...")
+                        await platform_page.wait_for_timeout(1500)
+                        consecutive_stagnant = 0
+                        continue
+                    else:
+                        emit_event("log", f"🏁 [Tab 4 - {p_name}] Reached end of directory results ({len(extracted_listings)} listings discovered).")
+                        break
+            else:
+                consecutive_stagnant = 0
+
+            # Scroll dynamically down page to trigger next proximity listings to render
+            await platform_page.evaluate("window.scrollBy({top: 1100, behavior: 'smooth'})")
+            await platform_page.wait_for_timeout(600)
+
+        emit_event("log", f"🟣 [Tab 4 - {p_name}] Total harvested listings from {p_name}: {len(extracted_listings)}.")
 
         # Capture crisp screenshot of platform details for discovered listing cards (NOT room/venue photos)
         ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
@@ -1609,16 +1666,20 @@ async def platform_area_search_worker(
         for cand in extracted_listings[:max_results]:
             c_idx = cand.get("card_index", 0)
             c_title = cand.get("title", "")
+            c_url = cand.get("url", "")
             clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', c_title or p_name)[:25]
             ss_file = f"{p_name}_{clean_fn}_{c_idx}_{int(time.time())}.jpg"
             ss_full = os.path.join(ss_dir, ss_file)
             try:
-                card_loc = platform_page.locator(f'[data-mavon-card="{c_idx}"]').first
+                card_loc = platform_page.locator(f'[data-mavon-card="{c_url}"]').first
                 if await card_loc.count() > 0:
+                    await card_loc.scroll_into_view_if_needed(timeout=1000)
+                    await platform_page.wait_for_timeout(150)
                     # Hide photo carousel/images within card so the screenshot captures ONLY details and things on the platform
                     await card_loc.evaluate("""el => {
-                        const mediaBox = el.querySelector('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img');
-                        if (mediaBox) mediaBox.style.display = 'none';
+                        el.querySelectorAll('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img').forEach(img => {
+                            img.style.display = 'none';
+                        });
                     }""")
                     await card_loc.screenshot(path=ss_full, quality=80, type="jpeg")
                     if os.path.exists(ss_full):
