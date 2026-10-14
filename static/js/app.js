@@ -1572,8 +1572,8 @@ let placesData = [];
 
         if (!isCdpReady) {
           const wantAttach = confirm(
-            "Notice: Scraper is not yet attached to your active Chrome browser (Port 9222).\\n\\n" +
-            "• Click OK to attach your active Chrome browser (restores all tabs & logins and runs the scraper inside your existing window).\\n" +
+            "Notice: Scraper is not yet attached to your active Chrome browser (Port 9222).\n\n" +
+            "• Click OK to attach your active Chrome browser (restores all tabs & logins and runs the scraper live inside your existing window).\n" +
             "• Click Cancel to run in a separate dedicated Chrome window."
           );
           if (wantAttach) {
@@ -1692,10 +1692,10 @@ let placesData = [];
     }
 
     async function promptOrLaunchChromeDebug() {
-      const promptMsg = "To attach the scraper directly to your active Chrome browser (with your logins & tabs):\\n\\n" +
-        "1. Chrome needs remote debugging on port 9222.\\n" +
-        "2. Click OK to attempt launching Chrome on port 9222 now, or run start_chrome_debug.bat in the project folder.\\n\\n" +
-        "Would you like to launch Chrome on port 9222 now?";
+      const promptMsg = "To attach the scraper directly to your active Chrome browser (with your logins & tabs):\n\n" +
+        "1. Chrome will enable remote debugging on Port 9222.\n" +
+        "2. All your open tabs, extensions, and logins will be restored automatically.\n\n" +
+        "Would you like to attach Chrome on Port 9222 now?";
       const confirmLaunch = confirm(promptMsg);
       if (confirmLaunch) {
         try {
