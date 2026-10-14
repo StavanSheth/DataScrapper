@@ -571,7 +571,7 @@ async def frame_streamer_loop(maps_page=None, linkedin_page=None, pages_dict=Non
         except Exception:
             pass
 
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.8)
 
 async def clear_fixed_viewport(page):
     if not page:
@@ -622,10 +622,14 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 if pages_dict is not None:
                     pages_dict["website"] = tab_page
 
-            # Navigate Tab 3 to shop website quietly in background
+            # Navigate dedicated tab to shop website with complete DOM & load state wait
             try:
-                await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=12000)
-                await tab_page.wait_for_timeout(1500)
+                await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=15000)
+                try:
+                    await tab_page.wait_for_load_state("load", timeout=3500)
+                except Exception:
+                    pass
+                await tab_page.wait_for_timeout(800)
             except Exception as e:
                 emit_event("log", f"⚠️ Website note on #{idx}: {str(e)[:50]}")
 
@@ -856,8 +860,11 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                     emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn for '{cand_query}'...")
                     emit_event("linkedin_navigated", {"url": search_co_url, "name": cand_query})
                     try:
-                        await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=12000)
-                        await tab_page.wait_for_timeout(1500)
+                        await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=15000)
+                        try:
+                            await tab_page.wait_for_selector('.entity-result, li.reusable-search__result-container, .search-results-container, div[data-view-name]', timeout=4000)
+                        except Exception:
+                            await tab_page.wait_for_timeout(1000)
                         li_result = await tab_page.evaluate(r"""() => {
                             const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
                             for (const card of cards) {
@@ -897,7 +904,10 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 emit_event("linkedin_navigated", {"url": people_target, "name": core_brand})
                 try:
                     await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
-                    await tab_page.wait_for_timeout(2000)
+                    try:
+                        await tab_page.wait_for_selector('div.org-people-profile-card, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"], .org-people-profiles-module', timeout=5000)
+                    except Exception:
+                        await tab_page.wait_for_timeout(1500)
                 except Exception as e:
                     emit_event("log", f"⚠️ Navigation note: {str(e)[:50]}")
 
@@ -2275,202 +2285,146 @@ async def run_scraper(
                     except Exception:
                         pass
 
-                    # Click place card in Tab 1 and wait for detail panel
+                    # FAST CLICK & BATCH IN-PAGE EXTRACTION (Zero-CDP lag)
                     await elem.click()
                     try:
-                        await maps_page.wait_for_selector('h1.DUwDvf', timeout=3000)
+                        await maps_page.wait_for_selector('h1.DUwDvf', timeout=1000)
                     except Exception:
                         pass
-                    await maps_page.wait_for_timeout(350)
 
-                    # Scroll detail panel down to trigger lazy loading of address/phone/website
+                    # Single ultra-fast evaluation in browser V8 (Extracts all details in <10ms)
+                    detail_data = {}
                     try:
-                        await maps_page.evaluate("""() => {
-                            const main = document.querySelector('div[role="main"]') || document.querySelector('div.m6QErb.DxyBCb');
-                            if (main) {
-                                main.scrollBy(0, 500);
+                        detail_data = await maps_page.evaluate(r'''() => {
+                            const d = {
+                                title: '',
+                                category: '',
+                                rating: '',
+                                reviews: '',
+                                address: '',
+                                phone: '',
+                                website: '',
+                                hours: '',
+                                price: '',
+                                plus_code: '',
+                                ig: '',
+                                fb: '',
+                                li: '',
+                                tw: '',
+                                lat: null,
+                                lon: null
+                            };
+
+                            // Title
+                            const h1 = document.querySelector('h1.DUwDvf');
+                            if (h1) d.title = h1.innerText.trim();
+
+                            // Category
+                            const catBtn = document.querySelector('button.DkEaL, button[jsaction*="category"], div.fontBodyMedium button, span.YhemCb');
+                            if (catBtn) {
+                                const cText = catBtn.innerText.trim();
+                                const ignore = ["learn more", "see more", "read more", "claim this business", "suggest an edit", "save", "nearby", "send to phone", "share", "reviews", "photos", "overview", "about", "directions", "copy"];
+                                if (cText && !ignore.some(x => cText.toLowerCase().includes(x))) {
+                                    d.category = cText;
+                                }
                             }
-                        }""")
-                        await maps_page.wait_for_timeout(250)
-                    except Exception:
-                        pass
 
-                    # Extract Business Name
-                    place_title = title
-                    try:
-                        h1 = maps_page.locator("h1.DUwDvf").first
-                        if await h1.count() > 0:
-                            t_val = clean_text(await h1.inner_text())
-                            if t_val:
-                                place_title = t_val
-                    except Exception:
-                        pass
+                            // Rating
+                            const ratingEl = document.querySelector('div.F7nice span[aria-hidden="true"], span.ceNzKf, div.fontDisplayLarge, span[aria-label*="stars"], span.MW4etd');
+                            if (ratingEl) {
+                                const text = ratingEl.innerText || ratingEl.getAttribute('aria-label') || '';
+                                const m = text.match(/\b([0-5]\.\d+)\b/);
+                                if (m) d.rating = m[1];
+                            }
 
-                    # Extract Category
-                    category = ""
-                    try:
-                        cat_candidates = maps_page.locator('button.DkEaL, button[jsaction*="category"], div.fontBodyMedium button, span.YhemCb')
-                        for c_i in range(await cat_candidates.count()):
-                            candidate = cat_candidates.nth(c_i)
-                            if await candidate.is_visible(timeout=300):
-                                c_text = clean_text(await candidate.inner_text())
-                                ignore_categories = [
-                                    "learn more", "see more", "read more", "claim this business",
-                                    "suggest an edit", "save", "nearby", "send to phone", "share",
-                                    "reviews", "photos", "overview", "about",
-                                    "update results when map moves", "search this area",
-                                    "search", "directions", "copy"
-                                ]
-                                if c_text and not any(ign in c_text.lower() for ign in ignore_categories):
-                                    category = c_text
-                                    break
-                    except Exception:
-                        pass
+                            // Reviews
+                            const revEl = document.querySelector('div.F7nice span[aria-label*="reviews"], span.mgr77e, button[aria-label*="reviews"], span[aria-label*="reviews"], span.UY7F9, div.F7nice button');
+                            if (revEl) {
+                                const text = revEl.getAttribute('aria-label') || revEl.innerText || '';
+                                const digits = text.match(/[\d,]+/);
+                                if (digits && digits[0] !== '0') d.reviews = digits[0].replace(/,/g, '');
+                            }
 
-                    # Extract Rating and Reviews Count with multi-selector fallback
-                    rating = ""
-                    reviews = ""
-                    try:
-                        rating_selectors = [
-                            'div.F7nice span[aria-hidden="true"]',
-                            'span.ceNzKf',
-                            'div.fontDisplayLarge',
-                            'span[aria-label*="stars"]',
-                            'span.MW4etd'
-                        ]
-                        for r_sel in rating_selectors:
-                            r_el = maps_page.locator(r_sel).first
-                            if await r_el.count() > 0:
-                                val = clean_text(await r_el.inner_text() or await r_el.get_attribute("aria-label") or "")
-                                m_r = re.search(r'\b([0-5]\.\d+)\b', val)
-                                if m_r:
-                                    rating = m_r.group(1)
-                                    break
+                            // Address
+                            const addrEl = document.querySelector('button[data-item-id="address"], button[aria-label*="Address:"], div[data-item-id="address"], button[data-tooltip*="Copy address"], [data-item-id*="address"]');
+                            if (addrEl) {
+                                const text = addrEl.innerText || addrEl.getAttribute('aria-label') || '';
+                                d.address = text.replace(/^Address:\s*/i, '').trim();
+                            }
 
-                        reviews_selectors = [
-                            'div.F7nice span[aria-label*="reviews"]',
-                            'span.mgr77e',
-                            'button[aria-label*="reviews"]',
-                            'span[aria-label*="reviews"]',
-                            'span.UY7F9',
-                            'div.F7nice button'
-                        ]
-                        for rev_sel in reviews_selectors:
-                            rv_el = maps_page.locator(rev_sel).first
-                            if await rv_el.count() > 0:
-                                rv_text = await rv_el.get_attribute("aria-label") or await rv_el.inner_text() or ""
-                                r_digits = re.findall(r"[\d,]+", rv_text)
-                                if r_digits:
-                                    clean_digits = r_digits[0].replace(",", "")
-                                    if len(clean_digits) > 0 and clean_digits != "0":
-                                        reviews = clean_digits
-                                        break
-                    except Exception:
-                        pass
+                            // Phone
+                            const phoneEl = document.querySelector('button[data-item-id*="phone:"], button[aria-label*="Phone:"], button[data-tooltip*="Copy phone"], a[href^="tel:"]');
+                            if (phoneEl) {
+                                const text = phoneEl.innerText || phoneEl.getAttribute('aria-label') || '';
+                                d.phone = text.replace(/^Phone:\s*/i, '').trim();
+                            }
 
-                    # Extract Address with multi-selector fallback
-                    address = ""
-                    try:
-                        addr_selectors = [
-                            'button[data-item-id="address"]',
-                            'button[aria-label*="Address:"]',
-                            'div[data-item-id="address"]',
-                            'button[data-tooltip*="Copy address"]',
-                            '[data-item-id*="address"]'
-                        ]
-                        for a_sel in addr_selectors:
-                            a_el = maps_page.locator(a_sel).first
-                            if await a_el.count() > 0:
-                                a_val = clean_text(await a_el.inner_text() or await a_el.get_attribute("aria-label") or "")
-                                if a_val:
-                                    address = re.sub(r'^Address:\s*', '', a_val).strip()
-                                    break
-                    except Exception:
-                        pass
+                            // Website
+                            const webEl = document.querySelector('a[data-item-id="authority"], a[aria-label*="Website:"]');
+                            if (webEl && webEl.href) {
+                                d.website = webEl.href;
+                            }
 
-                    # Extract Phone Number with multi-selector fallback
-                    phone = ""
-                    try:
-                        phone_selectors = [
-                            'button[data-item-id*="phone:"]',
-                            'button[aria-label*="Phone:"]',
-                            'button[data-tooltip*="Copy phone"]',
-                            'a[href^="tel:"]'
-                        ]
-                        for ph_sel in phone_selectors:
-                            ph_el = maps_page.locator(ph_sel).first
-                            if await ph_el.count() > 0:
-                                ph_val = clean_text(await ph_el.inner_text() or await ph_el.get_attribute("aria-label") or "")
-                                if ph_val:
-                                    phone = re.sub(r'^Phone:\s*', '', ph_val).strip()
-                                    break
-                    except Exception:
-                        pass
+                            // Hours
+                            const hoursEl = document.querySelector('button[data-item-id*="oh"], div[data-item-id*="oh"], button[aria-label*="Hours"], div[aria-label*="Hours"]');
+                            if (hoursEl) {
+                                d.hours = (hoursEl.innerText || '').split('\n')[0].trim();
+                            }
 
-                    # Extract Website URL
-                    website = ""
-                    try:
-                        web_el = maps_page.locator('a[data-item-id="authority"], a[aria-label*="Website:"]').first
-                        if await web_el.is_visible(timeout=400):
-                            website = await web_el.get_attribute("href") or ""
-                    except Exception:
-                        pass
+                            // Price
+                            const priceEl = document.querySelector('span[aria-label*="per person"], span[aria-label*="Price"], button[data-item-id*="price"], div[aria-label*="£"], div[aria-label*="$"]');
+                            if (priceEl) {
+                                d.price = priceEl.innerText.trim();
+                            }
 
-                    # Extract Opening Hours
-                    hours = ""
-                    try:
-                        for h_sel in ['button[data-item-id*="oh"]', 'div[data-item-id*="oh"]', 'button[aria-label*="Hours"]', 'div[aria-label*="Hours"]']:
-                            h_el = maps_page.locator(h_sel).first
-                            if await h_el.is_visible(timeout=400):
-                                h_val = clean_text(await h_el.inner_text())
-                                if h_val:
-                                    hours = h_val.split("\n")[0]
-                                    break
-                    except Exception:
-                        pass
+                            // Plus code
+                            const pcEl = document.querySelector('button[data-item-id="oloc"], button[aria-label*="Plus code"]');
+                            if (pcEl) {
+                                d.plus_code = pcEl.innerText.trim();
+                            }
 
-                    # Extract Price Range
-                    price = ""
-                    try:
-                        p_el = maps_page.locator('span[aria-label*="per person"], span[aria-label*="Price"], button[data-item-id*="price"], div[aria-label*="£"], div[aria-label*="$"]').first
-                        if await p_el.is_visible(timeout=400):
-                            price = clean_text(await p_el.inner_text())
-                    except Exception:
-                        pass
-
-                    # Extract Plus Code
-                    plus_code = ""
-                    try:
-                        pc_el = maps_page.locator('button[data-item-id="oloc"], button[aria-label*="Plus code"]').first
-                        if await pc_el.is_visible(timeout=400):
-                            plus_code = clean_text(await pc_el.inner_text())
-                    except Exception:
-                        pass
-
-                    # Extract Direct Social Profiles from Google Maps Panel (Instagram, Facebook, LinkedIn, Twitter)
-                    maps_ig = ""
-                    maps_fb = ""
-                    maps_li = ""
-                    maps_tw = ""
-                    try:
-                        maps_soc = await maps_page.evaluate("""() => {
-                            const res = { ig: '', fb: '', li: '', tw: '' };
+                            // Socials
                             document.querySelectorAll('a[href*="instagram.com"], a[href*="facebook.com"], a[href*="linkedin.com"], a[href*="twitter.com"], a[href*="x.com"]').forEach(a => {
                                 const h = (a.href || '').split('?')[0];
-                                if (h.includes('instagram.com') && !res.ig && !h.includes('/p/')) res.ig = h;
-                                else if (h.includes('facebook.com') && !res.fb && !h.includes('sharer')) res.fb = h;
-                                else if (h.includes('linkedin.com') && !res.li) res.li = h;
-                                else if ((h.includes('twitter.com') || h.includes('x.com')) && !res.tw) res.tw = h;
+                                if (h.includes('instagram.com') && !d.ig && !h.includes('/p/')) d.ig = h;
+                                else if (h.includes('facebook.com') && !d.fb && !h.includes('sharer')) d.fb = h;
+                                else if (h.includes('linkedin.com') && !d.li) d.li = h;
+                                else if ((h.includes('twitter.com') || h.includes('x.com')) && !d.tw) d.tw = h;
                             });
-                            return res;
-                        }""")
-                        if maps_soc:
-                            maps_ig = maps_soc.get("ig", "")
-                            maps_fb = maps_soc.get("fb", "")
-                            maps_li = maps_soc.get("li", "")
-                            maps_tw = maps_soc.get("tw", "")
+
+                            // DOM Coordinates
+                            const dirLink = document.querySelector('a[href*="destination="], a[data-value="Directions"], a[href*="maps/dir/"]');
+                            if (dirLink && dirLink.href) {
+                                const m = dirLink.href.match(/destination=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
+                                if (m) { d.lat = parseFloat(m[1]); d.lon = parseFloat(m[2]); }
+                            }
+                            if (d.lat === null) {
+                                const anyCoord = document.querySelector('a[href*="!3d"]');
+                                if (anyCoord && anyCoord.href) {
+                                    const m = anyCoord.href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+                                    if (m) { d.lat = parseFloat(m[1]); d.lon = parseFloat(m[2]); }
+                                }
+                            }
+
+                            return d;
+                        }''')
                     except Exception:
                         pass
+
+                    place_title = clean_text(detail_data.get("title") or title)
+                    category = detail_data.get("category") or ""
+                    rating = detail_data.get("rating") or ""
+                    reviews = detail_data.get("reviews") or ""
+                    address = detail_data.get("address") or ""
+                    phone = detail_data.get("phone") or ""
+                    website = detail_data.get("website") or ""
+                    hours = detail_data.get("hours") or ""
+                    price = detail_data.get("price") or ""
+                    plus_code = detail_data.get("plus_code") or ""
+                    maps_ig = detail_data.get("ig") or ""
+                    maps_fb = detail_data.get("fb") or ""
+                    maps_li = detail_data.get("li") or ""
+                    maps_tw = detail_data.get("tw") or "" 
 
                     if website:
                         w_low = website.lower()
@@ -2480,42 +2434,15 @@ async def run_scraper(
                         elif ("twitter.com/" in w_low or "x.com/" in w_low) and not maps_tw: maps_tw = website
 
                     # Extract Exact GPS Coordinates (Lat, Lon) of the Place
-                    lat_val = None
-                    lon_val = None
+                    lat_val = detail_data.get("lat")
+                    lon_val = detail_data.get("lon")
                     cur_maps_url = maps_page.url or ""
                     
-                    # 1. Exact coordinates from URL !3d<lat>!4d<lon> (Google Maps place pinpoint)
-                    d_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", cur_maps_url)
-                    if d_match:
-                        lat_val = float(d_match.group(1))
-                        lon_val = float(d_match.group(2))
-
-                    # 2. Check Directions link / DOM elements if not found in URL yet
                     if lat_val is None or lon_val is None:
-                        try:
-                            dom_coords = await maps_page.evaluate(r"""() => {
-                                const dirLink = document.querySelector('a[href*="destination="], a[data-value="Directions"], a[href*="maps/dir/"]');
-                                if (dirLink && dirLink.href) {
-                                    const m = dirLink.href.match(/destination=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
-                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
-                                }
-                                const metaImg = document.querySelector('meta[itemprop="image"]');
-                                if (metaImg && metaImg.content) {
-                                    const m = metaImg.content.match(/center=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
-                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
-                                }
-                                const anyCoord = document.querySelector('a[href*="!3d"]');
-                                if (anyCoord && anyCoord.href) {
-                                    const m = anyCoord.href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
-                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
-                                }
-                                return null;
-                            }""")
-                            if dom_coords and len(dom_coords) == 2:
-                                lat_val = float(dom_coords[0])
-                                lon_val = float(dom_coords[1])
-                        except Exception:
-                            pass
+                        d_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", cur_maps_url)
+                        if d_match:
+                            lat_val = float(d_match.group(1))
+                            lon_val = float(d_match.group(2))
 
                     # 3. Fallback to /place/ URL @lat,lon (only if viewing a single place, not search view)
                     if (lat_val is None or lon_val is None) and "/place/" in cur_maps_url:
@@ -2662,11 +2589,11 @@ async def run_scraper(
             try:
                 feed = maps_page.locator('div[role="feed"]').first
                 if await feed.is_visible(timeout=1000):
-                    await feed.evaluate("el => el.scrollBy(0, 1600)")
-                    await maps_page.wait_for_timeout(1800)
+                    await feed.evaluate("el => el.scrollBy(0, 2000)")
+                    await maps_page.wait_for_timeout(450)
             except Exception:
-                await maps_page.mouse.wheel(0, 1200)
-                await maps_page.wait_for_timeout(1800)
+                await maps_page.mouse.wheel(0, 1500)
+                await maps_page.wait_for_timeout(450)
 
         if enable_maps and maps_page:
             emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
@@ -2677,7 +2604,8 @@ async def run_scraper(
         website_done_event.set()
         if worker_task and website_queue:
             try:
-                await asyncio.wait_for(website_queue.join(), timeout=45.0)
+                web_timeout = max(180.0, len(scraped_places) * 20.0)
+                await asyncio.wait_for(website_queue.join(), timeout=web_timeout)
             except Exception:
                 pass
             worker_task.cancel()
@@ -2686,7 +2614,8 @@ async def run_scraper(
         linkedin_done_event.set()
         if linkedin_task and linkedin_queue:
             try:
-                await asyncio.wait_for(linkedin_queue.join(), timeout=60.0)
+                li_timeout = max(240.0, len(scraped_places) * 25.0)
+                await asyncio.wait_for(linkedin_queue.join(), timeout=li_timeout)
             except Exception:
                 pass
             linkedin_task.cancel()
