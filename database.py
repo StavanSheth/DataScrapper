@@ -73,15 +73,16 @@ def normalize_bot_protection_status(bot: str, email: str = "", website: str = ""
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leads.db")
 
 def get_connection():
-    """Returns a SQLite connection configured with WAL mode and generous busy timeout to prevent locking."""
+    """Returns a SQLite connection configured with WAL mode, optimized cache and mmap sizing to prevent high RAM usage."""
     conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA cache_size = -32000;")
+    conn.execute("PRAGMA cache_size = -2048;")
     conn.execute("PRAGMA temp_store = MEMORY;")
-    conn.execute("PRAGMA mmap_size = 268435456;")
+    conn.execute("PRAGMA mmap_size = 16777216;")
+    conn.execute("PRAGMA wal_autocheckpoint = 100;")
     return conn
 
 def init_db():
@@ -146,6 +147,10 @@ def init_db():
             ("booking_url", "TEXT DEFAULT ''"),
             ("platform_price", "TEXT DEFAULT ''"),
             ("platform_verified", "INTEGER DEFAULT 0"),
+            ("maps_status", "TEXT DEFAULT 'captured'"),
+            ("website_status", "TEXT DEFAULT 'pending'"),
+            ("linkedin_status", "TEXT DEFAULT 'pending'"),
+            ("linkedin_url", "TEXT DEFAULT ''"),
         ]
         for col_name, col_def in new_platform_cols:
             try:
@@ -215,6 +220,8 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_platform ON platform_listings(platform);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_name ON leads(name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_web_status ON leads(website_status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_li_status ON leads(linkedin_status);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_verified ON platform_listings(verified);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_title ON platform_listings(title);")
             conn.execute("ALTER TABLE platform_listings ADD COLUMN screenshot TEXT DEFAULT '';")
@@ -337,6 +344,7 @@ def load_proximity_dedup_cache(location_name: str = "") -> Dict[str, Any]:
         "location": location_name.strip().lower(),
         "leads_names": set(),
         "leads_name_addr": set(),
+        "leads_name_to_addrs": {},
         "leads_phones": set(),
         "listings_urls": set(),
         "listings_titles": set(),
@@ -351,8 +359,11 @@ def load_proximity_dedup_cache(location_name: str = "") -> Dict[str, Any]:
             p = re.sub(r'\D', '', l["phone"] or "")
             if n:
                 cache["leads_names"].add(n)
+                if n not in cache["leads_name_to_addrs"]:
+                    cache["leads_name_to_addrs"][n] = []
                 if a and a != 'n/a':
                     cache["leads_name_addr"].add((n, a))
+                    cache["leads_name_to_addrs"][n].append(a)
             if len(p) >= 8:
                 cache["leads_phones"].add(p)
         cache["total_existing_leads"] = len(leads)
@@ -381,30 +392,30 @@ def is_place_already_scraped(name: str, address_snippet: str = "", dedup_cache: 
     clean_a = address_snippet.strip().lower()
 
     if dedup_cache is not None:
-        matched_name = False
         has_addr = bool(clean_a and clean_a != 'n/a')
         
-        # 1. Check Name & Address in memory
-        for ex_n, ex_a in dedup_cache.get("leads_name_addr", set()):
-            if ex_n == clean_n:
-                matched_name = True
-                if has_addr and ex_a and ex_a != 'n/a':
-                    # Substring match on address snippet
-                    if ex_a in clean_a or clean_a in ex_a:
-                        return True
-        
-        # If address snippet was provided and did not match any existing branch, it's a distinct franchise branch!
-        if matched_name and has_addr:
-            return False
+        # O(1) dictionary lookup by business name
+        name_to_addrs = dedup_cache.get("leads_name_to_addrs")
+        if name_to_addrs is not None:
+            ex_addrs = name_to_addrs.get(clean_n)
+        else:
+            ex_addrs = [ex_a for ex_n, ex_a in dedup_cache.get("leads_name_addr", set()) if ex_n == clean_n]
+            if not ex_addrs and clean_n in dedup_cache.get("leads_names", set()):
+                ex_addrs = []
 
-        # 2. Unique Business Name match ONLY when address snippet is missing/N/A
-        if clean_n in dedup_cache.get("leads_names", set()):
-            if not has_addr:
-                # If target location is specified and differs from existing addresses, do NOT falsely skip!
+        if ex_addrs is not None:
+            if has_addr:
+                for ex_a in ex_addrs:
+                    if ex_a and ex_a != 'n/a' and (ex_a in clean_a or clean_a in ex_a):
+                        return True
+                # If address snippet was provided and did not match any existing branch, it's a distinct franchise branch!
+                return False
+            else:
+                # Name matched and no address snippet provided
                 target_loc = dedup_cache.get("location", "")
-                if target_loc:
-                    has_same_loc = any(target_loc in ex_a for ex_n, ex_a in dedup_cache.get("leads_name_addr", set()) if ex_n == clean_n)
-                    if not has_same_loc and len(dedup_cache.get("leads_name_addr", set())) > 0:
+                if target_loc and ex_addrs:
+                    has_same_loc = any(target_loc in ex_a for ex_a in ex_addrs)
+                    if not has_same_loc:
                         return False  # Location has changed! Allow scraping this new branch
                 return True
         return False
@@ -674,8 +685,19 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                 bot_protection TEXT,
                 cookie_status TEXT,
                 employee_count TEXT,
-                org_scraped INTEGER,
+                org_scraped INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                platform_name TEXT DEFAULT '',
+                platform_url TEXT DEFAULT '',
+                platform_rating TEXT DEFAULT '',
+                platform_reviews TEXT DEFAULT '0',
+                booking_url TEXT DEFAULT '',
+                platform_price TEXT DEFAULT '',
+                platform_verified INTEGER DEFAULT 0,
+                maps_status TEXT DEFAULT 'captured',
+                website_status TEXT DEFAULT 'pending',
+                linkedin_status TEXT DEFAULT 'pending',
+                linkedin_url TEXT DEFAULT '',
                 UNIQUE(name, address)
             );
         """)
@@ -704,8 +726,11 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                     id, name, category, email, phone, address, hours, price, plus_code,
                     rating, reviews, website, maps_url, lat, lon, instagram, facebook,
                     linkedin, twitter, screenshot, bot_protection, cookie_status,
-                    employee_count, org_scraped, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    employee_count, org_scraped, created_at,
+                    platform_name, platform_url, platform_rating, platform_reviews,
+                    booking_url, platform_price, platform_verified, maps_status,
+                    website_status, linkedin_status, linkedin_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 l["new_id"], l["name"], l.get("category", "Business"), l["email"], l.get("phone", "N/A"),
                 l.get("address", "N/A"), l.get("hours", "N/A"), l.get("price", "N/A"), l.get("plus_code", "N/A"),
@@ -713,7 +738,12 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                 l.get("lat"), l.get("lon"), l.get("instagram", ""), l.get("facebook", ""),
                 l.get("linkedin", ""), l.get("twitter", ""), l.get("screenshot", ""),
                 l["bot_protection"], l.get("cookie_status", "None"),
-                l.get("employee_count", "0"), l.get("org_scraped", 0), l.get("created_at")
+                l.get("employee_count", "0"), l.get("org_scraped", 0), l.get("created_at"),
+                l.get("platform_name", ""), l.get("platform_url", ""), l.get("platform_rating", ""),
+                l.get("platform_reviews", "0"), l.get("booking_url", ""), l.get("platform_price", ""),
+                l.get("platform_verified", 0), l.get("maps_status", "captured"),
+                l.get("website_status", "pending"), l.get("linkedin_status", "pending"),
+                l.get("linkedin_url", "")
             ))
 
         for e in cleaned_employees:
@@ -728,10 +758,19 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                 e.get("email", ""), e.get("location", ""), e.get("avatar_url", ""), e.get("created_at")
             ))
 
+        # Re-link platform_listings to renumbered leads
+        for old_id, new_id in id_map.items():
+            if old_id != new_id:
+                cursor.execute("UPDATE platform_listings SET lead_id = ? WHERE lead_id = ?", (new_id, old_id))
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_name_addr ON leads(name, address);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_website ON leads(website);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_emp_company ON employees(company_name);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_emp_seniority ON employees(seniority_level);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_name ON leads(name);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_web_status ON leads(website_status);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_leads_li_status ON leads(linkedin_status);")
 
         cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('leads', 'employees');")
         cursor.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('leads', ?);", (len(cleaned_leads),))
@@ -749,6 +788,52 @@ def renumber_and_clean_database() -> Dict[str, Any]:
             "max_lead_id": len(cleaned_leads),
         }
 
+
+def update_lead_linkedin_data(
+    name: str,
+    address: str = "",
+    linkedin_url: str = "",
+    employee_count: str = "",
+    linkedin_status: str = "found",
+    org_scraped: int = 1
+) -> bool:
+    """Updates LinkedIn status and employee hierarchy info for an existing lead."""
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        return False
+
+    with get_connection() as conn:
+        try:
+            matching_id = find_matching_lead_id(conn, name=clean_name, address=address)
+            if not matching_id:
+                # Try finding by name only
+                row = conn.execute("SELECT id FROM leads WHERE name = ? ORDER BY id DESC LIMIT 1;", (clean_name,)).fetchone()
+                if row:
+                    matching_id = row["id"]
+
+            if matching_id:
+                conn.execute("""
+                    UPDATE leads SET
+                        linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
+                        linkedin_url = CASE WHEN ? != '' THEN ? ELSE linkedin_url END,
+                        employee_count = CASE WHEN ? != '' THEN ? ELSE employee_count END,
+                        linkedin_status = ?,
+                        org_scraped = CASE WHEN ? > 0 THEN ? ELSE org_scraped END
+                    WHERE id = ?;
+                """, (
+                    linkedin_url, linkedin_url,
+                    linkedin_url, linkedin_url,
+                    employee_count, employee_count,
+                    linkedin_status,
+                    org_scraped, org_scraped,
+                    matching_id
+                ))
+                conn.commit()
+                return True
+        except Exception:
+            pass
+    return False
+
 def update_lead_website_data(
     name: str,
     address: str = "",
@@ -760,7 +845,8 @@ def update_lead_website_data(
     twitter: str = "",
     screenshot: str = "",
     bot_protection: str = "",
-    cookie_status: str = ""
+    cookie_status: str = "",
+    website_status: str = "found"
 ) -> bool:
     """
     Updates website-extracted metadata for an existing lead using robust multi-tier matching:
@@ -954,7 +1040,7 @@ def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
             WHERE website IS NOT NULL AND website != 'N/A' AND website LIKE 'http%'
               AND (bot_protection = 'Inspecting...' OR (email = 'N/A' AND (bot_protection IS NULL OR bot_protection = 'None')))
             ORDER BY id ASC
-            LIMIT 50
+            LIMIT 500
         """).fetchall()
         for r in rows_web:
             pending_web.append({"index": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]})
@@ -966,7 +1052,7 @@ def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
             WHERE (org_scraped = 0 OR org_scraped IS NULL)
               AND id NOT IN (SELECT DISTINCT lead_id FROM employees WHERE lead_id IS NOT NULL)
             ORDER BY id ASC
-            LIMIT 50
+            LIMIT 500
         """).fetchall()
         for r in rows_li:
             pending_li.append({
@@ -986,12 +1072,187 @@ def get_lead_count() -> int:
         row = cursor.fetchone()
         return row[0] if row else 0
 
+def cleanup_orphan_screenshots() -> int:
+    """Scans static/screenshots directory and removes any screenshot files not referenced in leads or platform_listings."""
+    screenshots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "screenshots")
+    if not os.path.exists(screenshots_dir):
+        return 0
+
+    with get_connection() as conn:
+        leads_screens = {os.path.basename(r[0]) for r in conn.execute("SELECT screenshot FROM leads WHERE screenshot IS NOT NULL AND screenshot != '' AND screenshot != 'N/A'").fetchall() if r[0]}
+        plat_screens = {os.path.basename(r[0]) for r in conn.execute("SELECT screenshot FROM platform_listings WHERE screenshot IS NOT NULL AND screenshot != '' AND screenshot != 'N/A'").fetchall() if r[0]}
+        active_screens = leads_screens | plat_screens
+
+    removed = 0
+    try:
+        for f in os.listdir(screenshots_dir):
+            if f.endswith((".jpg", ".jpeg", ".png", ".webp")) and f not in active_screens:
+                fp = os.path.join(screenshots_dir, f)
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return removed
+
 def clear_leads():
-    """Clear all leads and employees from the database."""
+    """Clear all leads, listings, and employees from the database and reclaim disk space by purging orphaned screenshots."""
     with get_connection() as conn:
         conn.execute("DELETE FROM employees")
         conn.execute("DELETE FROM leads")
+        conn.execute("DELETE FROM platform_listings")
         conn.commit()
+    cleanup_orphan_screenshots()
+
+# ==============================================================================
+# Individual and Batch Mutation Operations (Leads & Platform Listings)
+# ==============================================================================
+
+ALLOWED_LEAD_UPDATE_FIELDS = {
+    "name", "category", "email", "phone", "address", "hours", "price",
+    "plus_code", "rating", "reviews", "website", "maps_url", "lat", "lon",
+    "instagram", "facebook", "linkedin", "twitter", "screenshot",
+    "bot_protection", "cookie_status", "employee_count", "platform_name",
+    "platform_url", "platform_rating", "platform_reviews", "booking_url",
+    "platform_price", "platform_verified"
+}
+
+ALLOWED_PLATFORM_UPDATE_FIELDS = {
+    "title", "clean_brand", "category", "url", "booking_url", "rating",
+    "reviews_count", "price_info", "address", "latitude", "longitude",
+    "verified", "screenshot", "platform", "phone"
+}
+
+def get_lead_by_id(lead_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieve a single lead by its primary key ID."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        return dict(row) if row else None
+
+def update_lead(lead_id: int, updates: Dict[str, Any]) -> bool:
+    """Updates one or more fields for a single lead."""
+    valid_updates = {k: v for k, v in updates.items() if k in ALLOWED_LEAD_UPDATE_FIELDS}
+    if not valid_updates:
+        return False
+    
+    set_clauses = [f"{k} = ?" for k in valid_updates.keys()]
+    values = list(valid_updates.values()) + [lead_id]
+    
+    with get_connection() as conn:
+        cursor = conn.execute(f"UPDATE leads SET {', '.join(set_clauses)} WHERE id = ?", values)
+        conn.commit()
+        return cursor.rowcount > 0
+
+def delete_lead(lead_id: int) -> bool:
+    """Deletes a single lead and cascades employee deletion."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM employees WHERE lead_id = ?", (lead_id,))
+        conn.execute("UPDATE platform_listings SET lead_id = NULL, verified = 0 WHERE lead_id = ?", (lead_id,))
+        cursor = conn.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+    if deleted:
+        cleanup_orphan_screenshots()
+    return deleted
+
+def delete_leads_batch(lead_ids: List[int]) -> int:
+    """Deletes multiple leads in a single transaction."""
+    if not lead_ids:
+        return 0
+    clean_ids = [int(i) for i in lead_ids if isinstance(i, (int, str)) and str(i).isdigit()]
+    if not clean_ids:
+        return 0
+    placeholders = ",".join("?" for _ in clean_ids)
+    with get_connection() as conn:
+        conn.execute(f"DELETE FROM employees WHERE lead_id IN ({placeholders})", clean_ids)
+        conn.execute(f"UPDATE platform_listings SET lead_id = NULL, verified = 0 WHERE lead_id IN ({placeholders})", clean_ids)
+        cursor = conn.execute(f"DELETE FROM leads WHERE id IN ({placeholders})", clean_ids)
+        conn.commit()
+        deleted = cursor.rowcount
+    if deleted > 0:
+        cleanup_orphan_screenshots()
+    return deleted
+
+def batch_update_leads(lead_ids: List[int], updates: Dict[str, Any]) -> int:
+    """Updates common fields across multiple selected leads."""
+    valid_updates = {k: v for k, v in updates.items() if k in ALLOWED_LEAD_UPDATE_FIELDS}
+    clean_ids = [int(i) for i in lead_ids if isinstance(i, (int, str)) and str(i).isdigit()]
+    if not valid_updates or not clean_ids:
+        return 0
+    
+    set_clauses = [f"{k} = ?" for k in valid_updates.keys()]
+    placeholders = ",".join("?" for _ in clean_ids)
+    values = list(valid_updates.values()) + clean_ids
+    
+    with get_connection() as conn:
+        cursor = conn.execute(
+            f"UPDATE leads SET {', '.join(set_clauses)} WHERE id IN ({placeholders})",
+            values
+        )
+        conn.commit()
+        return cursor.rowcount
+
+def get_platform_listing_by_id(listing_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieve a single platform listing by ID."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM platform_listings WHERE id = ?", (listing_id,)).fetchone()
+        return dict(row) if row else None
+
+def update_platform_listing(listing_id: int, updates: Dict[str, Any]) -> bool:
+    """Updates one or more fields for a platform directory listing."""
+    valid_updates = {k: v for k, v in updates.items() if k in ALLOWED_PLATFORM_UPDATE_FIELDS}
+    if not valid_updates:
+        return False
+    
+    set_clauses = [f"{k} = ?" for k in valid_updates.keys()]
+    values = list(valid_updates.values()) + [listing_id]
+    
+    with get_connection() as conn:
+        cursor = conn.execute(f"UPDATE platform_listings SET {', '.join(set_clauses)} WHERE id = ?", values)
+        conn.commit()
+        return cursor.rowcount > 0
+
+def delete_platform_listing(listing_id: int) -> bool:
+    """Deletes a single platform directory listing."""
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM platform_listings WHERE id = ?", (listing_id,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+    if deleted:
+        cleanup_orphan_screenshots()
+    return deleted
+
+def delete_platform_listings_batch(listing_ids: List[int]) -> int:
+    """Deletes multiple platform directory listings in a single transaction."""
+    clean_ids = [int(i) for i in listing_ids if isinstance(i, (int, str)) and str(i).isdigit()]
+    if not clean_ids:
+        return 0
+    placeholders = ",".join("?" for _ in clean_ids)
+    with get_connection() as conn:
+        cursor = conn.execute(f"DELETE FROM platform_listings WHERE id IN ({placeholders})", clean_ids)
+        conn.commit()
+        return cursor.rowcount
+
+def batch_update_platform_listings(listing_ids: List[int], updates: Dict[str, Any]) -> int:
+    """Updates common fields across multiple platform listings."""
+    valid_updates = {k: v for k, v in updates.items() if k in ALLOWED_PLATFORM_UPDATE_FIELDS}
+    clean_ids = [int(i) for i in listing_ids if isinstance(i, (int, str)) and str(i).isdigit()]
+    if not valid_updates or not clean_ids:
+        return 0
+    
+    set_clauses = [f"{k} = ?" for k in valid_updates.keys()]
+    placeholders = ",".join("?" for _ in clean_ids)
+    values = list(valid_updates.values()) + clean_ids
+    
+    with get_connection() as conn:
+        cursor = conn.execute(
+            f"UPDATE platform_listings SET {', '.join(set_clauses)} WHERE id IN ({placeholders})",
+            values
+        )
+        conn.commit()
+        return cursor.rowcount
 
 # ==============================================================================
 # Employee Hierarchy & LinkedIn Intelligence Functions
@@ -1246,35 +1507,295 @@ def delete_platform_config(platform_id: int) -> bool:
 
 def get_tables_split_data() -> Dict[str, Any]:
     """
-    Returns 3 distinct datasets:
+    Returns segmented datasets and queue-level progress for all agents and platforms:
     1. master_leads: Leads with normalized data from both Google Maps and verified Platform Directory.
-    2. unmatched_maps: Google Maps leads (kept intact ditto as it is, retaining all leads).
-    3. unmatched_platform: Platform directory listings (kept intact ditto as it is, retaining all listings).
+    2. unmatched_maps: All Google Maps discovered places (raw base) with diagnostic status tags.
+    3. unmatched_platform: All Platform directory listings with diagnostic status tags.
+    4. website_leads: Dedicated Website Inspector view with status tags.
+    5. linkedin_leads: Dedicated LinkedIn Org Harvester view with status tags.
+    6. queue_progress: Live counts and completion percentages benchmarked to Google Maps total and per-platform metrics.
     """
     all_leads = get_all_leads()
     all_listings = get_platform_listings()
 
-    master_leads = [
-        lead for lead in all_leads
-        if (lead.get("platform_verified") == 1 or (lead.get("platform_name") and lead.get("platform_name") != "N/A"))
-    ]
+    master_leads = []
+    unmatched_maps = []
+    website_leads = []
+    linkedin_leads = []
 
-    # In accordance with requirement: when normalization occurs, keep the remaining 2 tables same ditto as they are
-    unmatched_maps = all_leads
-    unmatched_platform = all_listings
+    maps_with_web = 0
+    maps_no_web = 0
+    maps_with_phone = 0
+    maps_with_rating = 0
+
+    web_finished_count = 0
+    web_no_site_count = 0
+    web_emails_count = 0
+    web_socials_count = 0
+
+    li_finished_count = 0
+    li_found_count = 0
+    li_employees_count = 0
+    li_not_found_count = 0
+
+    for l in all_leads:
+        # 1. Master leads check
+        if l.get("platform_verified") == 1 or (l.get("platform_name") and l.get("platform_name") != "N/A"):
+            master_leads.append(l)
+
+        # 2. Format Google Maps Lead
+        m_row = dict(l)
+        has_w = bool(m_row.get("website") and str(m_row.get("website")).strip() != "N/A")
+        has_p = bool(m_row.get("phone") and str(m_row.get("phone")).strip() != "N/A")
+        has_r = bool(m_row.get("rating") and str(m_row.get("rating")).strip() != "N/A")
+
+        if has_w: maps_with_web += 1
+        else: maps_no_web += 1
+        if has_p: maps_with_phone += 1
+        if has_r: maps_with_rating += 1
+
+        if has_w and has_p:
+            m_tag = "Full Contact (Web & Phone)"
+        elif has_w:
+            m_tag = "Has Website"
+        elif has_p:
+            m_tag = "Phone Only"
+        else:
+            m_tag = "Location Only"
+
+        m_row["status_tag"] = m_tag
+        m_row["has_website"] = has_w
+        m_row["has_phone"] = has_p
+        unmatched_maps.append(m_row)
+
+        # 3. Format Website Inspector Lead
+        w_url = str(l.get("website", "") or "").strip()
+        email_str = str(l.get("email", "") or "").strip()
+        has_e = bool(email_str and email_str != "N/A")
+        ig = str(l.get("instagram", "") or "").strip()
+        fb = str(l.get("facebook", "") or "").strip()
+        has_s = bool(ig or fb)
+        bot = str(l.get("bot_protection", "") or "").strip()
+        w_status = str(l.get("website_status", "") or "pending").strip()
+
+        if not has_w:
+            w_tag = "No Website on Map"
+            web_no_site_count += 1
+            web_finished_count += 1
+        elif has_e:
+            w_tag = "Emails Extracted"
+            web_emails_count += 1
+            web_finished_count += 1
+        elif has_s:
+            w_tag = "Socials Found"
+            web_socials_count += 1
+            web_finished_count += 1
+        elif "Denied" in bot or "Captcha" in bot:
+            w_tag = "Bot Shielded"
+            web_finished_count += 1
+        elif w_status in ["found", "scraped", "clean"]:
+            w_tag = "Website Found"
+            web_finished_count += 1
+        elif w_status == "failed":
+            w_tag = "Website Unreachable"
+            web_finished_count += 1
+        else:
+            w_tag = "Pending in Queue"
+
+        w_row = dict(l)
+        w_row["status_tag"] = w_tag
+        w_row["has_website"] = has_w
+        w_row["has_email"] = has_e
+        w_row["has_socials"] = has_s
+        website_leads.append(w_row)
+
+        # 4. Format LinkedIn Harvester Lead
+        li_url = str(l.get("linkedin", "") or l.get("linkedin_url", "") or "").strip()
+        emp_cnt = str(l.get("employee_count", "") or "").strip()
+        org_scraped = int(l.get("org_scraped", 0) or 0)
+        li_status = str(l.get("linkedin_status", "") or "pending").strip()
+
+        if org_scraped > 0 or (emp_cnt and emp_cnt != "0"):
+            li_tag = "Employees Crawled"
+            li_employees_count += 1
+            li_found_count += 1
+            li_finished_count += 1
+        elif li_url and li_url != "N/A":
+            li_tag = "LinkedIn Found"
+            li_found_count += 1
+            li_finished_count += 1
+        elif li_status == "not_found":
+            li_tag = "Not Found on LinkedIn"
+            li_not_found_count += 1
+            li_finished_count += 1
+        elif li_status == "failed":
+            li_tag = "LinkedIn Blocked / Timeout"
+            li_finished_count += 1
+        elif li_status in ["found", "scraped"]:
+            li_tag = "LinkedIn Found"
+            li_found_count += 1
+            li_finished_count += 1
+        else:
+            li_tag = "Pending in Queue"
+
+        li_row = dict(l)
+        li_row["status_tag"] = li_tag
+        li_row["has_linkedin"] = bool(li_url and li_url != "N/A")
+        li_row["has_employees"] = bool(org_scraped > 0 or (emp_cnt and emp_cnt != "0"))
+        linkedin_leads.append(li_row)
+
+    # Format Platform Directory Listings with rich diagnostic status tags
+    unmatched_platform = []
+    plat_booking_count = 0
+    plat_rated_count = 0
+    plat_matched_count = 0
+
+    for item in all_listings:
+        p_row = dict(item)
+        is_ver = int(p_row.get("verified", 0) or 0)
+        has_lead = bool(p_row.get("lead_id"))
+        b_url = str(p_row.get("booking_url", "") or "").strip()
+        has_book = bool(b_url and len(b_url) > 10)
+        try:
+            r_val = float(p_row.get("rating", 0.0) or 0.0)
+        except Exception:
+            r_val = 0.0
+        has_rate = (r_val > 0.0)
+
+        if is_ver == 1 or has_lead:
+            tag = "Master Matched"
+            plat_matched_count += 1
+        elif has_book:
+            tag = "Direct Booking"
+            plat_booking_count += 1
+        elif r_val >= 4.0:
+            tag = "Top Rated"
+            plat_rated_count += 1
+        elif has_rate:
+            tag = "Verified Listing"
+            plat_rated_count += 1
+        else:
+            tag = "Directory Listing"
+
+        p_row["status_tag"] = tag
+        p_row["has_booking"] = has_book
+        p_row["has_rating"] = has_rate
+        p_row["is_matched"] = bool(is_ver == 1 or has_lead)
+        unmatched_platform.append(p_row)
+
+    total_maps = len(all_leads)
+    web_pending = max(0, total_maps - web_finished_count)
+    web_pct = min(100, round((web_finished_count / max(1, total_maps)) * 100))
+
+    li_pending = max(0, total_maps - li_finished_count)
+    li_pct = min(100, round((li_finished_count / max(1, total_maps)) * 100))
+
+    # Platform listings counts and tag metrics grouped by platform from database
+    plat_item_metrics = {}
+    for p_item in unmatched_platform:
+        p_name = p_item.get("platform", "Platform")
+        if p_name not in plat_item_metrics:
+            plat_item_metrics[p_name] = {"scraped": 0, "booking_links": 0, "rated_count": 0, "matched_count": 0}
+        plat_item_metrics[p_name]["scraped"] += 1
+        if p_item.get("has_booking"):
+            plat_item_metrics[p_name]["booking_links"] += 1
+        if p_item.get("has_rating"):
+            plat_item_metrics[p_name]["rated_count"] += 1
+        if p_item.get("is_matched"):
+            plat_item_metrics[p_name]["matched_count"] += 1
+
+    total_plat_scraped = len(unmatched_platform)
+    plat_breakdown = {}
+    default_platforms = ["Fresha", "Airbnb", "Yelp", "TripAdvisor"]
+    for p in default_platforms:
+        m = plat_item_metrics.get(p, {"scraped": 0, "booking_links": 0, "rated_count": 0, "matched_count": 0})
+        cnt = m["scraped"]
+        target = max(cnt, 20 if cnt > 0 else 0)
+        pct = min(100, round((cnt / max(1, target)) * 100)) if target > 0 else 0
+        plat_breakdown[p] = {
+            "name": p,
+            "scraped": cnt,
+            "skipped": 0,
+            "total": target,
+            "percent": pct,
+            "booking_links": m["booking_links"],
+            "rated_count": m["rated_count"],
+            "matched_count": m["matched_count"]
+        }
+    for p, m in plat_item_metrics.items():
+        if p not in plat_breakdown:
+            cnt = m["scraped"]
+            target = max(cnt, 20 if cnt > 0 else 0)
+            plat_breakdown[p] = {
+                "name": p,
+                "scraped": cnt,
+                "skipped": 0,
+                "total": target,
+                "percent": 100 if cnt > 0 else 0,
+                "booking_links": m["booking_links"],
+                "rated_count": m["rated_count"],
+                "matched_count": m["matched_count"]
+            }
+
+    total_plat_target = sum(x["total"] for x in plat_breakdown.values())
+    overall_plat_pct = min(100, round((total_plat_scraped / max(1, total_plat_target)) * 100)) if total_plat_target > 0 else (100 if total_plat_scraped > 0 else 0)
 
     return {
         "master_leads": master_leads,
         "unmatched_maps": unmatched_maps,
         "unmatched_platform": unmatched_platform,
+        "website_leads": website_leads,
+        "linkedin_leads": linkedin_leads,
         "counts": {
             "master": len(master_leads),
             "maps": len(unmatched_maps),
             "platform": len(unmatched_platform),
-            "total_leads": len(all_leads),
+            "website": len(website_leads),
+            "linkedin": len(linkedin_leads),
+            "total_leads": total_maps,
             "total_listings": len(all_listings)
+        },
+        "queue_progress": {
+            "total_maps": total_maps,
+            "maps": {
+                "total": total_maps,
+                "with_website": maps_with_web,
+                "no_website": maps_no_web,
+                "with_phone": maps_with_phone,
+                "with_rating": maps_with_rating
+            },
+            "website": {
+                "total": total_maps,
+                "inspected": web_finished_count,
+                "pending": web_pending,
+                "no_website": web_no_site_count,
+                "emails_found": web_emails_count,
+                "socials_found": web_socials_count,
+                "percent": web_pct
+            },
+            "linkedin": {
+                "total": total_maps,
+                "inspected": li_finished_count,
+                "pending": li_pending,
+                "found": li_found_count,
+                "not_found": li_not_found_count,
+                "employees_found": li_employees_count,
+                "percent": li_pct
+            },
+            "platform": {
+                "total": total_plat_target or total_plat_scraped,
+                "scraped": total_plat_scraped,
+                "skipped": 0,
+                "percent": overall_plat_pct,
+                "booking_links": plat_booking_count,
+                "rated_count": plat_rated_count,
+                "matched_count": plat_matched_count,
+                "pending": max(0, total_plat_target - total_plat_scraped)
+            },
+            "platforms_breakdown": plat_breakdown
         }
     }
+
 
 def extract_core_brand_name(name: str, city: str = "") -> str:
     """Extracts base brand name by stripping legal, retail, and location clutter."""
@@ -1318,13 +1839,50 @@ def normalize_all_platform_listings(city_context: str = "") -> Dict[str, Any]:
     and updates the 3-table split partition.
     """
     newly_matched = 0
+    GENERIC_STOP_WORDS = {
+        'flat', 'apartment', 'villa', 'hotel', 'salon', 'spa', 'house', 'home', 
+        'shop', 'room', 'rooms', 'suite', 'suites', 'stay', 'stays', 'resort',
+        'resorts', 'clinic', 'store', 'centre', 'center', 'bazaar', 'retail'
+    }
+
     with get_connection() as conn:
-        leads = [dict(r) for r in conn.execute("SELECT id, name, address, website, phone, platform_verified, lat, lon FROM leads").fetchall()]
+        raw_leads = conn.execute("SELECT id, name, address, website, phone, platform_verified, lat, lon FROM leads").fetchall()
         listings = [dict(r) for r in conn.execute("SELECT * FROM platform_listings WHERE lead_id IS NULL OR verified = 0").fetchall()]
+
+        # Precompute lead tokens and hash maps once to eliminate redundant regexes in nested loop
+        precomputed_leads = []
+        exact_lead_map = {}
+        brand_lead_map = {}
+        phone_lead_map = {}
+
+        for r in raw_leads:
+            lead = dict(r)
+            lead_name = (lead["name"] or "").strip()
+            name_low = lead_name.lower()
+            lead_brand = extract_core_brand_name(lead_name, city=city_context).lower()
+            lead_phone = re.sub(r'\D', '', lead.get("phone", "") or "")
+
+            info = {
+                "lead": lead,
+                "name": lead_name,
+                "name_lower": name_low,
+                "brand": lead_brand,
+                "address_lower": (lead["address"] or "").lower(),
+                "phone_digits": lead_phone
+            }
+            precomputed_leads.append(info)
+
+            if name_low and name_low not in exact_lead_map:
+                exact_lead_map[name_low] = lead
+            if lead_brand and lead_brand not in GENERIC_STOP_WORDS and lead_brand not in brand_lead_map:
+                brand_lead_map[lead_brand] = lead
+            if len(lead_phone) >= 8 and lead_phone not in phone_lead_map:
+                phone_lead_map[lead_phone] = lead
 
         for lst in listings:
             l_id = lst["id"]
             l_title = (lst["title"] or "").strip()
+            l_title_low = l_title.lower()
             l_brand = extract_core_brand_name(l_title, city=city_context).lower()
             l_addr = (lst["address"] or "").lower()
             l_phone = re.sub(r'\D', '', lst.get("address", "") or "")
@@ -1336,43 +1894,41 @@ def normalize_all_platform_listings(city_context: str = "") -> Dict[str, Any]:
             l_price = lst.get("price_info", "")
 
             best_lead = None
-            for lead in leads:
-                lead_name = (lead["name"] or "").strip()
-                lead_brand = extract_core_brand_name(lead_name, city=city_context).lower()
-                lead_addr = (lead["address"] or "").lower()
-                lead_phone = re.sub(r'\D', '', lead.get("phone", "") or "")
 
-                # 1. Exact match
-                if lead_name.lower() == l_title.lower():
-                    best_lead = lead
-                    break
+            # 1. Fast O(1) Exact name match
+            if l_title_low in exact_lead_map:
+                best_lead = exact_lead_map[l_title_low]
 
-                # 2. Clean brand match (with generic term stop-word protection)
-                GENERIC_STOP_WORDS = {
-                    'flat', 'apartment', 'villa', 'hotel', 'salon', 'spa', 'house', 'home', 
-                    'shop', 'room', 'rooms', 'suite', 'suites', 'stay', 'stays', 'resort',
-                    'resorts', 'clinic', 'store', 'centre', 'center', 'bazaar', 'retail'
-                }
-                if l_brand and lead_brand:
-                    if l_brand == lead_brand:
-                        best_lead = lead
+            # 2. Fast O(1) Clean Brand match (if not generic stop word)
+            elif l_brand and l_brand not in GENERIC_STOP_WORDS and l_brand in brand_lead_map:
+                best_lead = brand_lead_map[l_brand]
+
+            # 3. Fast O(1) Phone digit match
+            elif len(l_phone) >= 8 and l_phone in phone_lead_map:
+                best_lead = phone_lead_map[l_phone]
+
+            # 4. Fallback search across precomputed items (substring brand or Jaccard similarity)
+            if not best_lead:
+                for item in precomputed_leads:
+                    cand_lead = item["lead"]
+                    cand_brand = item["brand"]
+                    cand_phone = item["phone_digits"]
+                    cand_name = item["name"]
+
+                    if l_brand and cand_brand:
+                        if l_brand not in GENERIC_STOP_WORDS and cand_brand not in GENERIC_STOP_WORDS:
+                            if (len(l_brand) >= 5 and l_brand in cand_brand) or (len(cand_brand) >= 5 and cand_brand in l_brand):
+                                best_lead = cand_lead
+                                break
+
+                    if len(cand_phone) >= 8 and len(l_phone) >= 8 and (cand_phone in l_phone or l_phone in cand_phone):
+                        best_lead = cand_lead
                         break
-                    # Prevent generic accommodation/retail terms from matching indiscriminately via substring
-                    if l_brand not in GENERIC_STOP_WORDS and lead_brand not in GENERIC_STOP_WORDS:
-                        if (len(l_brand) >= 5 and l_brand in lead_brand) or (len(lead_brand) >= 5 and lead_brand in l_brand):
-                            best_lead = lead
-                            break
 
-                # 3. Phone digit match (>= 8 digits)
-                if len(lead_phone) >= 8 and len(l_phone) >= 8 and (lead_phone in l_phone or l_phone in lead_phone):
-                    best_lead = lead
-                    break
-
-                # 4. Token Jaccard similarity >= 0.55
-                sim = jaccard_similarity(lead_name, l_title)
-                if sim >= 0.55:
-                    best_lead = lead
-                    break
+                    sim = jaccard_similarity(cand_name, l_title)
+                    if sim >= 0.55:
+                        best_lead = cand_lead
+                        break
 
             if best_lead:
                 lead_id = best_lead["id"]

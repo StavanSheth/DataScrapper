@@ -25,12 +25,24 @@
     if (event.data && event.data.source === "mavon_dashboard") {
       if (event.data.action === "START_LIVE_BROWSER_SCRAPING") {
         try {
+          const payload = {
+            enable_maps: event.data.enable_maps !== false,
+            enable_website: event.data.enable_website !== false,
+            enable_linkedin: event.data.enable_linkedin === true,
+            enable_platform: event.data.enable_platform === true
+          };
+          if (payload.enable_maps && event.data.url) {
+            payload.maps_url = event.data.url;
+          }
+          if (payload.enable_linkedin) {
+            payload.linkedin_url = "https://www.linkedin.com/";
+          }
+          if (payload.enable_platform && event.data.platform_url) {
+            payload.platform_url = event.data.platform_url;
+          }
           chrome.runtime.sendMessage({
             action: "START_HARVESTER",
-            payload: {
-              maps_url: event.data.url,
-              linkedin_url: "https://www.linkedin.com/"
-            }
+            payload: payload
           });
         } catch (e) {}
       }

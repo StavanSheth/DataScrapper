@@ -353,7 +353,7 @@
       for (const raw of candidates.instagram) {
         const c = cleanUrl(raw);
         const l = c.toLowerCase();
-        if (!l.includes('/p/') && !l.includes('/explore') && !l.includes('/reels') && !l.includes('sharer') && !l.includes('/about')) {
+        if (!l.includes('/p/') && !l.includes('/explore') && !l.includes('/reels') && !l.includes('sharer') && !l.includes('/about') && !l.includes('help.instagram.com') && !l.includes('about.meta.com')) {
           const parts = c.split('/');
           if (parts.length >= 4 && parts[parts.length - 1].length > 1) {
             socials.instagram = c;
@@ -366,7 +366,7 @@
       for (const raw of candidates.facebook) {
         const c = cleanUrl(raw);
         const l = c.toLowerCase();
-        if (!l.includes('sharer') && !l.includes('/dialog') && !l.includes('/plugins') && !l.includes('/tr') && !l.includes('/policies')) {
+        if (!l.includes('sharer') && !l.includes('/dialog') && !l.includes('/plugins') && !l.includes('/tr') && !l.includes('/policies') && !l.includes('developers.facebook.com') && !l.includes('business.facebook.com')) {
           socials.facebook = c;
           break;
         }

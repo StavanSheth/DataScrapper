@@ -292,70 +292,78 @@ async function handleCommand(msg) {
     // Proactively sync live LinkedIn session cookies so scraper never asks for login
     syncLinkedInCookies().catch(() => {});
 
-    const mapsUrl = payload.maps_url || payload.url || "https://www.google.com/maps/search/shops?hl=en";
-    const linkedinUrl = payload.linkedin_url || "https://www.linkedin.com/";
+    const enableMaps = payload.enable_maps !== false && Boolean(payload.maps_url || payload.url);
+    const enableLinkedin = payload.enable_linkedin === true || (payload.enable_linkedin !== false && Boolean(payload.linkedin_url));
+    const enablePlatform = payload.enable_platform === true || (payload.enable_platform !== false && Boolean(payload.platform_url));
 
-    // Tab 1: Google Maps (Strictly 1 tab - reuse existing or open single tab)
-    let mapsTab = null;
-    if (mapsTabId) {
-      mapsTab = await chrome.tabs.get(mapsTabId).catch(() => null);
-    }
-    if (!mapsTab) {
-      const allMaps = await chrome.tabs.query({ url: "*://*.google.com/maps/*" });
-      if (allMaps.length > 0) {
-        mapsTab = allMaps[0];
+    const mapsUrl = enableMaps ? (payload.maps_url || payload.url) : null;
+    const linkedinUrl = enableLinkedin ? (payload.linkedin_url || "https://www.linkedin.com/") : null;
+    const platformUrl = enablePlatform ? payload.platform_url : null;
+
+    // Tab 1: Google Maps (Only if enabled)
+    if (enableMaps && mapsUrl) {
+      let mapsTab = null;
+      if (mapsTabId) {
+        mapsTab = await chrome.tabs.get(mapsTabId).catch(() => null);
+      }
+      if (!mapsTab) {
+        const allMaps = await chrome.tabs.query({ url: "*://*.google.com/maps/*" });
+        if (allMaps.length > 0) {
+          mapsTab = allMaps[0];
+          mapsTabId = mapsTab.id;
+          for (let i = 1; i < allMaps.length; i++) {
+            chrome.tabs.remove(allMaps[i].id).catch(() => {});
+          }
+        }
+      }
+      if (mapsTab) {
+        await chrome.tabs.update(mapsTab.id, { url: mapsUrl, active: true });
         mapsTabId = mapsTab.id;
-        for (let i = 1; i < allMaps.length; i++) {
-          chrome.tabs.remove(allMaps[i].id).catch(() => {});
+      } else {
+        const createOpts = targetWinId ? { windowId: targetWinId, url: mapsUrl, active: true } : { url: mapsUrl, active: true };
+        const t = await chrome.tabs.create(createOpts);
+        mapsTabId = t.id;
+      }
+      ensureScreencastForTab(mapsTabId, "maps").catch(() => {});
+    } else if (mapsTabId) {
+      // Close Maps tab if user explicitly disabled it
+      chrome.tabs.remove(mapsTabId).catch(() => {});
+      mapsTabId = null;
+    }
+
+    // Tab 2: LinkedIn (Only if enabled)
+    if (enableLinkedin && linkedinUrl) {
+      let liTab = null;
+      if (linkedinTabId) {
+        liTab = await chrome.tabs.get(linkedinTabId).catch(() => null);
+      }
+      if (!liTab) {
+        const allLi = await chrome.tabs.query({ url: "*://*.linkedin.com/*" });
+        if (allLi.length > 0) {
+          liTab = allLi[0];
+          linkedinTabId = liTab.id;
+          for (let i = 1; i < allLi.length; i++) {
+            chrome.tabs.remove(allLi[i].id).catch(() => {});
+          }
         }
       }
-    }
-
-    if (mapsTab) {
-      await chrome.tabs.update(mapsTab.id, { url: mapsUrl, active: true });
-      mapsTabId = mapsTab.id;
-    } else {
-      const createOpts = targetWinId ? { windowId: targetWinId, url: mapsUrl, active: true } : { url: mapsUrl, active: true };
-      const t = await chrome.tabs.create(createOpts);
-      mapsTabId = t.id;
-    }
-
-    // Tab 2: LinkedIn (Strictly 1 tab in user's current window - reuse existing or open single tab)
-    let liTab = null;
-    if (linkedinTabId) {
-      liTab = await chrome.tabs.get(linkedinTabId).catch(() => null);
-    }
-    if (!liTab) {
-      const allLi = await chrome.tabs.query({ url: "*://*.linkedin.com/*" });
-      if (allLi.length > 0) {
-        liTab = allLi[0];
+      if (liTab) {
+        await chrome.tabs.update(liTab.id, { url: linkedinUrl, active: false });
         linkedinTabId = liTab.id;
-        for (let i = 1; i < allLi.length; i++) {
-          chrome.tabs.remove(allLi[i].id).catch(() => {});
-        }
+      } else {
+        const createOpts = targetWinId ? { windowId: targetWinId, url: linkedinUrl, active: false } : { url: linkedinUrl, active: false };
+        const t2 = await chrome.tabs.create(createOpts);
+        linkedinTabId = t2.id;
       }
+      ensureScreencastForTab(linkedinTabId, "linkedin").catch(() => {});
+    } else if (linkedinTabId) {
+      // Close LinkedIn tab if user explicitly disabled it
+      chrome.tabs.remove(linkedinTabId).catch(() => {});
+      linkedinTabId = null;
     }
 
-    if (liTab) {
-      await chrome.tabs.update(liTab.id, { url: linkedinUrl, active: false });
-      linkedinTabId = liTab.id;
-    } else {
-      const createOpts = targetWinId ? { windowId: targetWinId, url: linkedinUrl, active: false } : { url: linkedinUrl, active: false };
-      const t2 = await chrome.tabs.create(createOpts);
-      linkedinTabId = t2.id;
-    }
-
-    // Bring Chrome window to front so user sees live what agent is doing
-    const curTab = await chrome.tabs.get(mapsTabId).catch(() => null);
-    const winToFocus = (curTab && curTab.windowId) ? curTab.windowId : targetWinId;
-    if (winToFocus) {
-      await bringWindowToFront(winToFocus);
-    }
-
-    // Attach screencast
-    // Tab 4: Platform Directory Scout (Strictly 1 tab in user's current window)
-    if (payload.platform_url) {
-      const platformUrl = payload.platform_url;
+    // Tab 4: Platform Directory Scout (Only if enabled)
+    if (enablePlatform && platformUrl) {
       let platTab = null;
       if (platformTabId) {
         platTab = await chrome.tabs.get(platformTabId).catch(() => null);
@@ -369,12 +377,19 @@ async function handleCommand(msg) {
         platformTabId = t3.id;
       }
       ensureScreencastForTab(platformTabId, "platform").catch(() => {});
+    } else if (platformTabId) {
+      chrome.tabs.remove(platformTabId).catch(() => {});
+      platformTabId = null;
     }
 
-    ensureScreencastForTab(mapsTabId, "maps").catch(() => {});
-    ensureScreencastForTab(linkedinTabId, "linkedin").catch(() => {});
-    if (platformTabId) {
-      ensureScreencastForTab(platformTabId, "platform").catch(() => {});
+    // Bring Chrome window to front so user sees live what agent is doing
+    const focusTabId = mapsTabId || platformTabId || linkedinTabId;
+    if (focusTabId) {
+      const curTab = await chrome.tabs.get(focusTabId).catch(() => null);
+      const winToFocus = (curTab && curTab.windowId) ? curTab.windowId : targetWinId;
+      if (winToFocus) {
+        await bringWindowToFront(winToFocus);
+      }
     }
 
     return {

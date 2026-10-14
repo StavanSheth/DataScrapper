@@ -13,7 +13,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads, get_cached_census_total, set_cached_census_total
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads, get_cached_census_total, set_cached_census_total, update_lead_website_data
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -442,7 +442,7 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
     for raw in candidates["instagram"]:
         cleaned = clean_social_url(raw)
         lower = cleaned.lower()
-        if not any(bad in lower for bad in ["/p/", "/explore", "/reels", "/stories", "sharer", "/about", "instagram.com/direct", "/legal", "instagram.com/?"]):
+        if not any(bad in lower for bad in ["/p/", "/explore", "/reels", "/stories", "sharer", "/about", "instagram.com/direct", "/legal", "instagram.com/?", "help.instagram.com", "about.meta.com"]):
             path = urllib.parse.urlparse(cleaned).path.strip("/")
             if path and "/" not in path and len(path) > 1:
                 socials["instagram"] = cleaned
@@ -452,7 +452,7 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
     for raw in candidates["facebook"]:
         cleaned = clean_social_url(raw)
         lower = cleaned.lower()
-        if not any(bad in lower for bad in ["sharer", "/share", "/dialog", "/login", "/plugins", "facebook.com/tr", "/policies", "/help"]):
+        if not any(bad in lower for bad in ["sharer", "/share", "/dialog", "/login", "/plugins", "facebook.com/tr", "/policies", "/help", "developers.facebook.com", "business.facebook.com"]):
             path = urllib.parse.urlparse(cleaned).path.strip("/")
             if path and len(path) > 1:
                 socials["facebook"] = cleaned
@@ -579,6 +579,7 @@ async def clear_fixed_viewport(page):
     try:
         cdp_sess = await page.context.new_cdp_session(page)
         await cdp_sess.send("Emulation.clearDeviceMetricsOverride")
+        await cdp_sess.detach()
     except Exception:
         pass
 
@@ -603,6 +604,30 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         website_url = item.get("website")
 
         if not website_url or not website_url.startswith("http"):
+            queue.task_done()
+            continue
+
+        # Prevent opening Meta platforms (Instagram, Facebook, Threads, Meta) in Tab 2
+        w_low = website_url.lower()
+        meta_domains = ["facebook.com", "instagram.com", "fb.com", "meta.com", "fb.me", "threads.net", "m.facebook.com"]
+        if any(m in w_low for m in meta_domains):
+            is_ig = "instagram.com" in w_low
+            plat_name = "Instagram" if is_ig else "Facebook"
+            emit_event("log", f"ℹ️ [Meta Platform Bypassed] #{idx} '{name}' uses {plat_name} as primary web link. Recorded under socials without opening Meta platform.")
+            try:
+                with get_connection() as conn:
+                    if is_ig:
+                        conn.execute("UPDATE leads SET instagram = ?, bot_protection = 'Social Profile (Instagram)', website_status = 'social' WHERE id = ? OR (name = ? AND address = ?)", (website_url, idx, name, address))
+                    else:
+                        conn.execute("UPDATE leads SET facebook = ?, bot_protection = 'Social Profile (Facebook)', website_status = 'social' WHERE id = ? OR (name = ? AND address = ?)", (website_url, idx, name, address))
+                emit_event("place_updated", {
+                    "id": idx, "name": name, "address": address, "website": website_url,
+                    "instagram": website_url if is_ig else "",
+                    "facebook": website_url if not is_ig else "",
+                    "bot_protection": f"Social Profile ({plat_name})"
+                })
+            except Exception:
+                pass
             queue.task_done()
             continue
 
@@ -737,12 +762,17 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             except Exception:
                 pass
 
-            # 5. Check Contact / About links if emails or socials are missing
+            # 5. Check Contact / About links if emails or socials are missing (Strictly internal only - NEVER click Meta or external socials)
             if not emails or not any(socials.values()):
                 try:
                     contact_links = tab_page.locator('a[href*="contact" i], a[href*="about" i], a:has-text("Contact"), a:has-text("About")')
-                    if await contact_links.count() > 0:
-                        c_link = contact_links.first
+                    count = await contact_links.count()
+                    for ci in range(min(count, 4)):
+                        c_link = contact_links.nth(ci)
+                        href_attr = (await c_link.get_attribute("href") or "").lower()
+                        # Strictly skip external social and Meta links
+                        if any(bad in href_attr for bad in ["facebook.com", "instagram.com", "meta.com", "fb.me", "threads.net", "twitter.com", "x.com", "linkedin.com", "youtube.com", "tiktok.com", "pinterest.com"]):
+                            continue
                         if await c_link.is_visible(timeout=800):
                             await c_link.click(timeout=3000)
                             await tab_page.wait_for_timeout(1800)
@@ -752,6 +782,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                             for k, v in sub_socials.items():
                                 if not socials.get(k) and v:
                                     socials[k] = v
+                            break
                 except Exception:
                     pass
 
@@ -762,6 +793,31 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             if primary_email and "Access Denied" in bot_status:
                 bot_status = bot_status.replace("Access Denied", "Access Granted")
                 emit_event("log", f"🎉 [Access Granted] Contact emails extracted from #{idx} {name}!")
+
+            # Immediately update lead record in SQLite database!
+            w_status = "found"
+            if email_list:
+                w_status = "emails_found"
+            elif socials.get("instagram") or socials.get("facebook") or socials.get("twitter"):
+                w_status = "socials_found"
+
+            try:
+                update_lead_website_data(
+                    name=name,
+                    address=address,
+                    website=website_url,
+                    email=primary_email,
+                    instagram=socials.get("instagram", ""),
+                    facebook=socials.get("facebook", ""),
+                    linkedin=socials.get("linkedin", ""),
+                    twitter=socials.get("twitter", ""),
+                    screenshot=rel_screenshot_path,
+                    bot_protection=bot_status,
+                    cookie_status=cookie_status,
+                    website_status=w_status
+                )
+            except Exception as dbe:
+                pass
 
             # Emit update event for this place!
             emit_event("place_updated", {
@@ -777,6 +833,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 "screenshot": rel_screenshot_path,
                 "bot_protection": bot_status,
                 "cookie_status": cookie_status,
+                "website_status": w_status
             })
 
             log_parts = []
@@ -866,14 +923,16 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                         except Exception:
                             await tab_page.wait_for_timeout(1000)
                         li_result = await tab_page.evaluate(r"""() => {
-                            const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container');
-                            for (const card of cards) {
-                                const link = card.querySelector('a[href*="/company/"]:not([href*="ads"])');
-                                const titleEl = card.querySelector('.entity-result__title-text, .app-aware-link, .artdeco-entity-lockup__title');
-                                if (link && titleEl) {
-                                    const href = link.href.split('?')[0].replace(/\/+$/, '');
-                                    const title = titleEl.innerText.trim();
-                                    if (!href.includes('/search') && !href.includes('/help') && !href.includes('/feed')) {
+                            // Find all company profile links in search results (works with modern LinkedIn div[data-view-name] and legacy .entity-result)
+                            const companyLinks = document.querySelectorAll('a[href*="/company/"]:not([href*="ads"]):not([href*="linkedin.com/help"])');
+                            for (const link of companyLinks) {
+                                const href = link.href.split('?')[0].replace(/\/+$/, '');
+                                if (href.includes('/company/') && !href.includes('/company/setup') && !href.includes('/search') && !href.includes('/feed')) {
+                                    const container = link.closest('.entity-result, li, div[data-view-name], .artdeco-entity-lockup, div.search-results-container') || link;
+                                    const titleEl = container.querySelector('.entity-result__title-text, .app-aware-link, .artdeco-entity-lockup__title, span[aria-hidden="true"], h2, h3, a') || link;
+                                    const rawTitle = titleEl.innerText || titleEl.textContent || "";
+                                    const title = rawTitle.split('\n')[0].replace(/•.*/, '').trim();
+                                    if (title && href.split('/company/')[1]) {
                                         return { href, title };
                                     }
                                 }
@@ -1422,16 +1481,29 @@ async def platform_area_search_worker(
                 except Exception:
                     pass
 
-                # Abort heavy video playback (e.g. Airbnb background videos) to optimize RAM and speed
+                # 5X PLATFORM SPEEDUP: Abort heavy images, videos, webfonts, and third-party trackers
+                async def handle_plat_routes(route):
+                    req_type = route.request.resource_type
+                    r_url = route.request.url.lower()
+                    if req_type in ["image", "media", "font"]:
+                        await route.abort()
+                    elif any(ext in r_url for ext in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".mp4", ".woff", ".woff2"]):
+                        await route.abort()
+                    elif any(trk in r_url for trk in ["google-analytics", "doubleclick", "segment.io", "datadoghq", "sentry", "facebook.net"]):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
                 try:
-                    await platform_page.route("**/*.{mp4,avi,mkv,webm,mp3,wav,ogg}", lambda r: r.abort())
+                    await platform_page.route("**/*", handle_plat_routes)
                 except Exception:
                     pass
 
                 # =====================================================================
                 # PROGRESSIVE MULTI-PASS SCROLLING & DISCOVERY
                 # =====================================================================
-                max_scroll_passes = max(8, min(40, (max_results // 2) + 6))
+                is_infinite = (scrape_all or max_results >= 9999)
+                max_scroll_passes = 9999 if is_infinite else max(8, min(60, (max_results // 2) + 6))
                 consecutive_stagnant = 0
                 extracted_listings = []
                 seen_listing_urls = set()
@@ -1672,7 +1744,8 @@ async def platform_area_search_worker(
                 os.makedirs(ss_dir, exist_ok=True)
 
                 saved_count = 0
-                for cand in extracted_listings[:max_results]:
+                items_to_process = extracted_listings if is_infinite else extracted_listings[:max_results]
+                for cand in items_to_process:
                     c_title = cand.get("title", "")
                     if not c_title:
                         continue
@@ -1720,17 +1793,11 @@ async def platform_area_search_worker(
                             except Exception:
                                 pass
 
-                            # Hide photo carousel/images within card so the screenshot captures ONLY details and things on the platform
-                            await card_loc.evaluate("""el => {
-                                el.querySelectorAll('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img').forEach(img => {
-                                    img.style.display = 'none';
-                                });
-                            }""")
-
-                            # Screenshot listing card details
-                            await card_loc.screenshot(path=ss_full, quality=80, type="jpeg")
-                            if os.path.exists(ss_full):
-                                cand["screenshot"] = f"/screenshots/{ss_file}"
+                            # Fast visual highlight and snapshot (first 5 cards or sample to maintain 5x velocity)
+                            if c_idx < 5 or c_idx % 4 == 0:
+                                await card_loc.screenshot(path=ss_full, quality=70, type="jpeg")
+                                if os.path.exists(ss_full):
+                                    cand["screenshot"] = f"/screenshots/{ss_file}"
                     except Exception as card_e:
                         pass
 
@@ -1835,6 +1902,9 @@ async def run_scraper(
             "--hide-crash-restore-bubble",
             "--disk-cache-size=33554432",
             "--media-cache-size=16777216",
+            "--disable-dev-shm-usage",
+            "--js-flags=--max-old-space-size=512",
+            "--disable-gpu-shader-disk-cache",
         ]
 
         # Load Custom Mavon Scraper Chrome Extension
@@ -2061,6 +2131,23 @@ async def run_scraper(
                     pass
             existing_plat = [p for p in context.pages if any(d in p.url.lower() for d in known_plat_domains)]
             
+            # Close any existing tabs for agents that the user explicitly disabled
+            if not enable_maps:
+                for p in existing_maps:
+                    try: await p.close()
+                    except Exception: pass
+                existing_maps = []
+            if not enable_linkedin:
+                for p in existing_li:
+                    try: await p.close()
+                    except Exception: pass
+                existing_li = []
+            if not enable_platform:
+                for p in existing_plat:
+                    try: await p.close()
+                    except Exception: pass
+                existing_plat = []
+
             maps_page = existing_maps[0] if (existing_maps and enable_maps) else (await context.new_page() if enable_maps else None)
             linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else (await context.new_page() if enable_linkedin else None)
             platform_page = existing_plat[0] if (existing_plat and enable_platform) else (await context.new_page() if enable_platform else None)
@@ -2153,7 +2240,7 @@ async def run_scraper(
             emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_web)} website inspections left incomplete from previous session...")
             for pw in pending_web:
                 website_queue.put_nowait(pw)
-        if pending_li and linkedin_queue and not enable_website:
+        if pending_li and linkedin_queue:
             emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_li)} LinkedIn org inspections left incomplete from previous session...")
             for pl in pending_li:
                 linkedin_queue.put_nowait(pl)
@@ -2234,8 +2321,9 @@ async def run_scraper(
         seen_phones = set()
         seen_domains = set()
         scroll_attempts = 0
-        target_max = 9999 if scrape_all else max_results
-        max_scroll_attempts = 300 if scrape_all else max(15, (max_results // 3) + 10)
+        is_infinite = (scrape_all or max_results >= 9999)
+        target_max = 999999 if is_infinite else max_results
+        max_scroll_attempts = 99999 if is_infinite else max(15, (max_results // 3) + 10)
         consecutive_no_new = 0
 
         emit_event("status", "Extracting places from feed...")
@@ -2262,6 +2350,7 @@ async def run_scraper(
                         continue
 
                     seen_titles.add(title)
+                    new_found_this_scroll += 1
 
                     # PRE-CLICK FAST DEDUPLICATION CHECK (Bypasses click & crawl if in DB)
                     preview_text = ""
@@ -2296,7 +2385,6 @@ async def run_scraper(
                             pass
                         continue
 
-                    new_found_this_scroll += 1
                     idx = len(scraped_places) + 1
 
                     emit_event("log", f"👉 [{idx}] Inspecting: {title}")
@@ -2604,8 +2692,22 @@ async def run_scraper(
             else:
                 consecutive_no_new = 0
 
-            if consecutive_no_new >= 8 and scrape_all:
-                emit_event("log", "No new places loaded after 8 scrolls. All area shops captured.")
+            # Check if Google Maps has a "Search this area" button to expand boundaries
+            if consecutive_no_new in [3, 6, 10]:
+                try:
+                    search_area_btn = maps_page.locator('button:has-text("Search this area"), button[aria-label*="Search this area"], button.DgHppc').first
+                    if await search_area_btn.is_visible(timeout=600):
+                        emit_event("log", "🗺️ Clicking 'Search this area' to reload surrounding area shops...")
+                        await search_area_btn.click()
+                        await maps_page.wait_for_timeout(2000)
+                        consecutive_no_new = 0
+                except Exception:
+                    pass
+
+            is_continuous = (scrape_all or max_results >= 9999)
+            stagnant_limit = 16 if is_continuous else 8
+            if consecutive_no_new >= stagnant_limit:
+                emit_event("log", f"No new places loaded after {stagnant_limit} scrolls. All area shops captured.")
                 break
 
             emit_event("log", f"📜 Scrolling Tab 1 feed down to load more shops (Pass {scroll_attempts})...")
@@ -2627,7 +2729,10 @@ async def run_scraper(
         website_done_event.set()
         if worker_task and website_queue:
             try:
-                web_timeout = max(180.0, len(scraped_places) * 20.0)
+                remaining_web = website_queue.qsize()
+                if remaining_web > 0:
+                    emit_event("status", f"Processing {remaining_web} website email & anti-bot inspections...")
+                web_timeout = max(300.0, max(len(scraped_places), remaining_web) * 20.0)
                 await asyncio.wait_for(website_queue.join(), timeout=web_timeout)
             except Exception:
                 pass
@@ -2637,7 +2742,10 @@ async def run_scraper(
         linkedin_done_event.set()
         if linkedin_task and linkedin_queue:
             try:
-                li_timeout = max(240.0, len(scraped_places) * 25.0)
+                remaining_li = linkedin_queue.qsize()
+                if remaining_li > 0:
+                    emit_event("status", f"Processing {remaining_li} LinkedIn org intelligence inspections...")
+                li_timeout = max(600.0, max(len(scraped_places), remaining_li) * 35.0)
                 await asyncio.wait_for(linkedin_queue.join(), timeout=li_timeout)
             except Exception:
                 pass
@@ -2646,9 +2754,10 @@ async def run_scraper(
         # Wait for Platform Scout Area & Proximity Harvester to finish
         if platform_task:
             try:
-                await asyncio.wait_for(platform_task, timeout=120.0)
-            except Exception:
-                pass
+                plat_timeout = max(600.0, len(selected_platforms_list) * 240.0) if is_infinite else max(240.0, len(selected_platforms_list) * 90.0)
+                await asyncio.wait_for(platform_task, timeout=plat_timeout)
+            except Exception as e:
+                emit_event("log", f"⚠️ Platform Harvester finished/timed out: {e}")
 
         # -------------------------------------------------------------
         # STEP 5: CROSS-PLATFORM ENTITY NORMALIZATION

@@ -135,9 +135,21 @@
           </div>
         </div>
 
-        <div class="form-group" id="max-results-group" style="opacity: 0.4; pointer-events: none;">
-          <label>Max Places Limit: <span id="max-label" style="color:var(--accent);">20</span></label>
-          <input type="range" id="max-slider" min="5" max="100" step="5" value="20" style="width:100%;" oninput="document.getElementById('max-label').innerText = this.value">
+        <div class="form-group" id="max-results-group" style="opacity: 0.7; pointer-events: none;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label style="margin:0;">Max Places Limit: <span id="max-label" style="color:var(--accent); font-weight:700;">∞ (Continuous - Scraping ALL Area Shops)</span></label>
+            <button type="button" id="infinity-badge-btn" class="btn" style="padding:2px 8px; font-size:0.7rem; background:rgba(99,102,241,0.2); border:1px solid #6366f1; color:#c7d2fe; border-radius:4px; cursor:pointer;" onclick="toggleInfinityMode()">
+              ♾️ Unlimited
+            </button>
+          </div>
+          <input type="range" id="max-slider" min="5" max="500" step="5" value="500" style="width:100%;" oninput="handleMaxSliderInput(this.value)">
+          <div class="radius-chips" style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">
+            <div class="chip" onclick="setMaxLimit(20)">20</div>
+            <div class="chip" onclick="setMaxLimit(50)">50</div>
+            <div class="chip" onclick="setMaxLimit(100)">100</div>
+            <div class="chip" onclick="setMaxLimit(250)">250</div>
+            <div class="chip" onclick="setMaxLimit('infinity')">♾️ Unlimited</div>
+          </div>
         </div>
 
         <!-- Tri-Agent Selector Toggles -->
@@ -467,6 +479,82 @@
       </div>
 
       <div class="table-container">
+        <!-- Live Tri-Agent Queue Synchronization & Progress Header -->
+        <div class="agent-sync-progress-panel" id="agent-sync-progress-panel">
+          <!-- Maps Harvester Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>🗺️ Google Maps Harvester (Base)</span>
+              <span class="sync-stat" id="sync-stat-maps">0 leads captured</span>
+            </div>
+            <div class="sync-bar-wrap">
+              <div class="sync-bar" id="sync-bar-maps" style="width: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa);"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-blue" id="sync-chip-maps-live">⚡ Stream Active</span>
+              <span class="chip-sm chip-green" id="sync-chip-maps-web">🌐 With Web: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-maps-noweb">⚠️ No Web: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-maps-phone">📞 Phone: 0</span>
+            </div>
+          </div>
+
+          <!-- Website Inspector Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>🌐 Website Inspector</span>
+              <span class="sync-stat" id="sync-stat-web">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap">
+              <div class="sync-bar" id="sync-bar-web" style="width: 0%; background: linear-gradient(90deg, #10b981, #34d399);"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-green" id="sync-chip-web-found">✅ Found: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-web-emails">✉️ Emails: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-web-noweb">⚠️ No Web: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-web-pending">⏳ In Queue: 0</span>
+            </div>
+          </div>
+
+          <!-- LinkedIn Harvester Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>💼 LinkedIn Org Harvester</span>
+              <span class="sync-stat" id="sync-stat-li">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap">
+              <div class="sync-bar" id="sync-bar-li" style="width: 0%; background: linear-gradient(90deg, #0ea5e9, #38bdf8);"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-blue" id="sync-chip-li-found">✅ Found: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-li-emp">👥 Hierarchy: 0</span>
+              <span class="chip-sm chip-red" id="sync-chip-li-notfound">⚠️ Not Found: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-li-pending">⏳ In Queue: 0</span>
+            </div>
+          </div>
+
+          <!-- Platform Directory Scout Sync & Multi-Platform Breakdown -->
+          <div class="sync-card" id="sync-card-platform">
+            <div class="sync-header">
+              <span>🟣 Platform Directory Scout</span>
+              <span class="sync-stat" id="sync-stat-plat">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap">
+              <div class="sync-bar" id="sync-bar-plat" style="width: 0%; background: linear-gradient(90deg, #a855f7, #d946ef);"></div>
+            </div>
+            <div class="sync-chips" id="sync-chips-plat-summary">
+              <span class="chip-sm chip-green" id="sync-chip-plat-scraped">✅ Scraped: 0</span>
+              <span class="chip-sm chip-blue" id="sync-chip-plat-booking">🔗 Booking: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-plat-rated">⭐ Rated: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-plat-matched">🌟 Matched: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-plat-pending">⏳ In Queue: 0</span>
+            </div>
+            <!-- Individual Platform Breakdown Progress Bars -->
+            <div id="sync-platform-breakdown-list" style="display:flex; flex-direction:column; gap:4px; margin-top:4px; border-top:1px solid rgba(255,255,255,0.08); padding-top:4px;">
+              <!-- Dynamically populated for Fresha, Airbnb, Yelp, TripAdvisor, Custom -->
+            </div>
+          </div>
+        </div>
+
         <div class="table-switcher-bar">
           <div class="table-tab-group">
             <button class="table-tab-btn active" id="btn-tab-master" onclick="switchTableTab('master')">
@@ -477,6 +565,8 @@
               <span>🗺️ Google Maps Leads</span>
               <span class="tab-badge" id="badge-count-maps">0</span>
             </button>
+            <button class="table-tab-btn" id="btn-tab-website" onclick="switchTableTab('website')"><span>🌐 Website Inspector</span><span class="tab-badge" id="badge-count-website">0</span></button>
+            <button class="table-tab-btn" id="btn-tab-linkedin" onclick="switchTableTab('linkedin')"><span>💼 LinkedIn Harvester</span><span class="tab-badge" id="badge-count-linkedin">0</span></button>
             <button class="table-tab-btn" id="btn-tab-platform" onclick="switchTableTab('platform')">
               <span>🟣 Platform Directory Listings</span>
               <span class="tab-badge" id="badge-count-platform">0</span>
@@ -496,6 +586,9 @@
             <span id="places-count-badge" class="badge" style="background:rgba(255,255,255,0.08); color:#cbd5e1;">0 places</span>
           </div>
           <div class="export-btns">
+            <button class="btn btn-secondary btn-select-all-btn" id="btn-select-all-toggle" onclick="toggleSelectAllButton()" title="Select or deselect all records with checkboxes for multi/single edit or delete">
+              <span id="select-btn-icon">☑️</span> <span id="select-btn-text">Select All</span>
+            </button>
             <button class="btn btn-secondary" onclick="renumberDatabase()" title="Clean and renumber database sequentially (1, 2, 3...)">🔢 Clean & Renumber</button>
             <button class="btn btn-secondary" onclick="exportCSV()">📥 Download CSV</button>
             <button class="btn btn-secondary" onclick="exportJSON()">📥 Download JSON</button>
@@ -586,6 +679,31 @@
             </div>
             <button class="btn btn-filter-reset" id="btn-filter-reset" onclick="resetTableFilters()" title="Reset all column filters">
               <span>↺</span> Reset
+            </button>
+          </div>
+        </div>
+
+                <!-- Floating / Sticky Batch Actions Toolbar for Multi-Selection -->
+        <div id="batch-actions-bar" class="batch-actions-bar" style="display:none;">
+          <div class="batch-left">
+            <span class="batch-check-icon">✓</span>
+            <span id="batch-selected-count">0 items selected</span>
+          </div>
+          <div class="batch-buttons">
+            <button class="btn-batch-single-edit" id="btn-edit-selected" onclick="handleEditSelectedClick()" title="Edit details of the selected item(s)">
+              <span id="btn-edit-selected-icon">✏️</span> <span id="btn-edit-selected-text">Edit Record</span>
+            </button>
+            <button class="btn-batch-category" onclick="openBatchEditCategoryModal()" title="Batch change category for selected items">
+              <span>🏷️ Change Category</span>
+            </button>
+            <button class="btn-batch-delete" id="btn-delete-selected" onclick="batchDeleteSelected()" title="Delete selected record(s)">
+              <span id="btn-delete-selected-text">🗑️ Delete Selected</span>
+            </button>
+            <button class="btn-batch-export" onclick="exportSelectedCSV()" title="Export only selected rows to CSV">
+              <span>📥 Export Selected CSV</span>
+            </button>
+            <button class="btn-batch-cancel" onclick="deselectAllRows()" title="Deselect all rows">
+              <span>✕ Deselect All</span>
             </button>
           </div>
         </div>
@@ -898,6 +1016,93 @@
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Individual Row Edit Modal -->
+  <div id="edit-row-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeEditRowModal()">
+    <div class="modal-content" style="max-width:600px; max-height:90vh; overflow-y:auto;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="edit-modal-title" style="font-weight:700; color:#38bdf8;">✏️ Edit Record Details</span>
+        <button class="modal-close" onclick="closeEditRowModal()">&times;</button>
+      </div>
+      <form id="edit-row-form" onsubmit="saveRowEdit(event)" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
+        <input type="hidden" id="edit-item-id" />
+        <input type="hidden" id="edit-item-type" />
+        
+        <div class="form-group">
+          <label for="edit-field-name" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Business Name / Title *</label>
+          <input type="text" id="edit-field-name" class="form-input-edit" required />
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="edit-field-category" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Category</label>
+            <input type="text" id="edit-field-category" class="form-input-edit" placeholder="e.g. Beauty Salon, Cafe" />
+          </div>
+          <div class="form-group">
+            <label for="edit-field-phone" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Phone Number</label>
+            <input type="text" id="edit-field-phone" class="form-input-edit" placeholder="e.g. +1 234 567 8900" />
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group" id="edit-group-email">
+            <label for="edit-field-email" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Email Address</label>
+            <input type="text" id="edit-field-email" class="form-input-edit" placeholder="info@example.com" />
+          </div>
+          <div class="form-group" id="edit-group-rating">
+            <label for="edit-field-rating" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Rating (0.0 - 5.0)</label>
+            <input type="text" id="edit-field-rating" class="form-input-edit" placeholder="e.g. 4.8" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="edit-field-address" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Address / Location</label>
+          <input type="text" id="edit-field-address" class="form-input-edit" placeholder="Street, City, Postcode" />
+        </div>
+
+        <div class="form-group" id="edit-group-website">
+          <label for="edit-field-website" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Website URL</label>
+          <input type="text" id="edit-field-website" class="form-input-edit" placeholder="https://www.example.com" />
+        </div>
+
+        <div class="form-group" id="edit-group-booking">
+          <label for="edit-field-booking" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Booking / Platform URL</label>
+          <input type="text" id="edit-field-booking" class="form-input-edit" placeholder="https://..." />
+        </div>
+
+        <div class="form-group" id="edit-group-price">
+          <label for="edit-field-price" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Pricing Tier / Range</label>
+          <input type="text" id="edit-field-price" class="form-input-edit" placeholder="e.g. $$, £30 - £50" />
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeEditRowModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-edit">💾 Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Batch Edit Category Modal -->
+  <div id="batch-cat-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeBatchCatModal()">
+    <div class="modal-content" style="max-width:440px;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span style="font-weight:700; color:#38bdf8;">🏷️ Batch Update Category</span>
+        <button class="modal-close" onclick="closeBatchCatModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
+        <p style="font-size:0.85rem; color:#94a3b8; margin:0;" id="batch-cat-desc">Update the category for selected records:</p>
+        <div class="form-group">
+          <label for="batch-cat-input" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">New Category Name</label>
+          <input type="text" id="batch-cat-input" class="form-input-edit" placeholder="e.g. Hair Salon, Cafe, Hotel" />
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeBatchCatModal()">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="submitBatchCategory()">Apply to All Selected</button>
         </div>
       </div>
     </div>

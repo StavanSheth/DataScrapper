@@ -1,8 +1,12 @@
 import asyncio
 import urllib.parse
 from playwright.async_api import async_playwright
+import pytest
 
-async def test_airbnb():
+def test_airbnb():
+    pytest.skip("Live Airbnb network test - run standalone via: python tests/test_airbnb_live.py")
+
+async def run_airbnb_live():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -77,4 +81,4 @@ async def test_airbnb():
             await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(test_airbnb())
+    asyncio.run(run_airbnb_live())

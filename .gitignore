@@ -13,6 +13,7 @@ ENV/
 
 # Browser profiles, sessions & caches (keep repo clean and light)
 chrome_live_profile/
+chrome_profile/
 .tempmediaStorage/
 
 # SQLite WAL and lock files

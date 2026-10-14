@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from collections import deque
 from database import (
     init_db,
     save_lead,
@@ -31,6 +32,17 @@ from database import (
     delete_platform_config,
     get_tables_split_data,
     normalize_all_platform_listings,
+    update_lead,
+    delete_lead,
+    delete_leads_batch,
+    batch_update_leads,
+    get_lead_by_id,
+    update_platform_listing,
+    delete_platform_listing,
+    delete_platform_listings_batch,
+    batch_update_platform_listings,
+    get_platform_listing_by_id,
+    cleanup_orphan_screenshots,
 )
 
 # Force UTF-8 encoding on Windows
@@ -68,7 +80,7 @@ app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screensh
 
 # Global state
 active_process: Optional[asyncio.subprocess.Process] = None
-recent_logs: List[Dict[str, str]] = []
+recent_logs: deque = deque(maxlen=300)
 current_status: str = "Ready"
 is_scraping: bool = False
 active_websockets: List[WebSocket] = []
@@ -90,10 +102,7 @@ proximity_metrics: Dict[str, Any] = {
 }
 
 def add_log(message: str):
-    global recent_logs
     recent_logs.append({"time": "", "message": message})
-    if len(recent_logs) > 300:
-        recent_logs = recent_logs[-300:]
 
 async def broadcast(event: Dict[str, Any]):
     for ws in list(active_websockets):
@@ -102,6 +111,30 @@ async def broadcast(event: Dict[str, Any]):
         except Exception:
             if ws in active_websockets:
                 active_websockets.remove(ws)
+
+tables_split_task: Optional[asyncio.Task] = None
+tables_split_pending: bool = False
+
+async def _debounced_tables_split():
+    global tables_split_task, tables_split_pending
+    try:
+        await asyncio.sleep(0.5)
+        if tables_split_pending:
+            tables_split_pending = False
+            tables_split_fresh = get_tables_split_data()
+            await broadcast({"type": "tables_split", "data": tables_split_fresh})
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Error in debounced tables_split broadcast: {e}")
+    finally:
+        tables_split_task = None
+
+def schedule_tables_split_broadcast():
+    global tables_split_task, tables_split_pending
+    tables_split_pending = True
+    if tables_split_task is None or tables_split_task.done():
+        tables_split_task = asyncio.create_task(_debounced_tables_split())
 
 @app.get("/api/health")
 async def health_check():
@@ -168,7 +201,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "status": current_status,
             "proximity_metrics": proximity_metrics,
             "places": all_leads,
-            "logs": recent_logs,
+            "logs": list(recent_logs),
             "frame_maps": last_live_frame_maps,
             "frame_website": last_live_frame_website,
             "frame_linkedin": last_live_frame_linkedin,
@@ -305,8 +338,7 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                             last_live_frame_maps = edata
                     await broadcast(event)
                     if etype in ["place_scraped", "place_updated", "org_updated", "platform_listing_found"]:
-                        tables_split_fresh = get_tables_split_data()
-                        await broadcast({"type": "tables_split", "data": tables_split_fresh})
+                        schedule_tables_split_broadcast()
                 except Exception:
                     add_log(line_str)
             else:
@@ -318,6 +350,10 @@ async def read_process_output(proc: asyncio.subprocess.Process):
         is_scraping = False
         current_status = "Finished"
         active_process = None
+        if tables_split_task and not tables_split_task.done():
+            tables_split_task.cancel()
+        tables_split_fresh = get_tables_split_data()
+        await broadcast({"type": "tables_split", "data": tables_split_fresh})
         add_log("🏁 Scraping session finished. All places and org hierarchies saved to database.")
         await broadcast({"type": "status", "data": "Finished"})
         await broadcast({"type": "job_finished", "data": {"total": get_lead_count()}})
@@ -388,7 +424,7 @@ async def start_scraping(payload: Dict[str, Any]):
     proximity_metrics["time_saved_sec"] = 0.0
     proximity_metrics["percent"] = 0
 
-    recent_logs = []
+    recent_logs.clear()
     last_live_frame_maps = None
     last_live_frame_website = None
     last_live_frame_linkedin = None
@@ -530,7 +566,7 @@ async def start_companies_scraping(payload: Dict[str, Any]):
 
     visible_browser = bool(payload.get("visible_browser", True))
 
-    recent_logs = []
+    recent_logs.clear()
     last_live_frame_maps = None
     last_live_frame_website = None
     last_live_frame_linkedin = None
@@ -590,7 +626,7 @@ async def get_status():
         "count": len(leads),
         "places": leads,
         "tables_split": tables_data,
-        "logs": recent_logs,
+        "logs": list(recent_logs),
         "frame_maps": last_live_frame_maps,
         "frame_website": last_live_frame_website,
         "frame_linkedin": last_live_frame_linkedin,
@@ -613,6 +649,13 @@ async def clear_database():
     add_log("🗑️ Leads database cleared.")
     await broadcast({"type": "db_cleared"})
     return {"status": "cleared"}
+
+@app.post("/api/cleanup-screenshots")
+async def cleanup_screenshots_endpoint():
+    deleted_count = cleanup_orphan_screenshots()
+    add_log(f"🧹 Cleanup: Removed {deleted_count} orphaned screenshot files from disk.")
+    await broadcast({"type": "log", "data": f"🧹 Cleanup: Removed {deleted_count} orphaned screenshot files from disk."})
+    return {"status": "ok", "deleted_count": deleted_count}
 
 @app.post("/api/save")
 async def save_lead_endpoint(lead_data: Dict[str, Any]):
@@ -734,69 +777,358 @@ async def launch_chrome_debug():
 async def get_all_platform_directory_listings(platform: Optional[str] = None, lead_id: Optional[int] = None):
     return get_platform_listings(platform=platform, lead_id=lead_id)
 
+# ------------------------------------------------------------------------------
+# Lead Mutations (Individual & Batch)
+# ------------------------------------------------------------------------------
+
+@app.delete("/api/leads/{lead_id}")
+async def delete_single_lead(lead_id: int):
+    lead = get_lead_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail=f"Lead ID {lead_id} not found")
+    name = lead.get("name", f"Lead #{lead_id}")
+    success = delete_lead(lead_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete lead")
+    
+    add_log(f"🗑️ Deleted lead: {name} (ID: {lead_id})")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    await broadcast({"type": "init", "places": get_all_leads(), "count": len(get_all_leads())})
+    return {"status": "success", "id": lead_id, "name": name}
+
+@app.post("/api/leads/batch-delete")
+async def batch_delete_leads_endpoint(payload: Dict[str, Any]):
+    ids = payload.get("ids", [])
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'ids' list")
+    
+    deleted = delete_leads_batch(ids)
+    add_log(f"🗑️ Batch Deleted {deleted} leads.")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    await broadcast({"type": "init", "places": get_all_leads(), "count": len(get_all_leads())})
+    return {"status": "success", "deleted_count": deleted}
+
+@app.patch("/api/leads/{lead_id}")
+@app.post("/api/leads/{lead_id}/edit")
+async def edit_single_lead(lead_id: int, payload: Dict[str, Any]):
+    lead = get_lead_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail=f"Lead ID {lead_id} not found")
+    
+    success = update_lead(lead_id, payload)
+    if not success:
+        raise HTTPException(status_code=400, detail="No valid fields to update or update failed")
+    
+    add_log(f"✏️ Updated lead #{lead_id} ({lead.get('name', '')})")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    await broadcast({"type": "init", "places": get_all_leads(), "count": len(get_all_leads())})
+    updated_lead = get_lead_by_id(lead_id)
+    return {"status": "success", "lead": updated_lead}
+
+@app.post("/api/leads/batch-update")
+async def batch_update_leads_endpoint(payload: Dict[str, Any]):
+    ids = payload.get("ids", [])
+    updates = payload.get("updates", {})
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'ids' list")
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'updates' dict")
+    
+    updated_count = batch_update_leads(ids, updates)
+    add_log(f"🏷️ Batch updated {updated_count} leads.")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    await broadcast({"type": "init", "places": get_all_leads(), "count": len(get_all_leads())})
+    return {"status": "success", "updated_count": updated_count}
+
+# ------------------------------------------------------------------------------
+# Platform Listing Mutations (Individual & Batch)
+# ------------------------------------------------------------------------------
+
+@app.delete("/api/platform-listings/{listing_id}")
+async def delete_single_platform_listing(listing_id: int):
+    listing = get_platform_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing ID {listing_id} not found")
+    title = listing.get("title", f"Listing #{listing_id}")
+    success = delete_platform_listing(listing_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete listing")
+    
+    add_log(f"🗑️ Deleted directory listing: {title} (ID: {listing_id})")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    return {"status": "success", "id": listing_id, "title": title}
+
+@app.post("/api/platform-listings/batch-delete")
+async def batch_delete_platform_listings_endpoint(payload: Dict[str, Any]):
+    ids = payload.get("ids", [])
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'ids' list")
+    
+    deleted = delete_platform_listings_batch(ids)
+    add_log(f"🗑️ Batch Deleted {deleted} platform listings.")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    return {"status": "success", "deleted_count": deleted}
+
+@app.patch("/api/platform-listings/{listing_id}")
+@app.post("/api/platform-listings/{listing_id}/edit")
+async def edit_single_platform_listing(listing_id: int, payload: Dict[str, Any]):
+    listing = get_platform_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing ID {listing_id} not found")
+    
+    success = update_platform_listing(listing_id, payload)
+    if not success:
+        raise HTTPException(status_code=400, detail="No valid fields to update or update failed")
+    
+    add_log(f"✏️ Updated platform listing #{listing_id} ({listing.get('title', '')})")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    updated_listing = get_platform_listing_by_id(listing_id)
+    return {"status": "success", "listing": updated_listing}
+
+@app.post("/api/platform-listings/batch-update")
+async def batch_update_platform_listings_endpoint(payload: Dict[str, Any]):
+    ids = payload.get("ids", [])
+    updates = payload.get("updates", {})
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'ids' list")
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'updates' dict")
+    
+    updated_count = batch_update_platform_listings(ids, updates)
+    add_log(f"🏷️ Batch updated {updated_count} platform listings.")
+    await broadcast({"type": "tables_split", "data": get_tables_split_data()})
+    return {"status": "success", "updated_count": updated_count}
+
+# ------------------------------------------------------------------------------
+# 3-Table Situated CSV and JSON Exports
+# ------------------------------------------------------------------------------
+
 @app.get("/api/export/csv")
-async def export_csv(request: Request):
-    leads = get_all_leads()
-    if not leads:
-        raise HTTPException(status_code=404, detail="No scraped data available to export.")
+async def export_csv(request: Request, table: str = "all", ids: Optional[str] = None):
+    split_data = get_tables_split_data()
+    master_leads = split_data.get("master_leads", [])
+    maps_leads = split_data.get("unmatched_maps", [])
+    platform_listings = split_data.get("unmatched_platform", [])
+    website_leads = split_data.get("website_leads", [])
+    linkedin_leads = split_data.get("linkedin_leads", [])
+
+    selected_ids = None
+    if ids:
+        selected_ids = set()
+        for i in ids.split(","):
+            i = i.strip()
+            if i.isdigit():
+                selected_ids.add(int(i))
+
+    if selected_ids is not None:
+        master_leads = [m for m in master_leads if m.get("id") in selected_ids]
+        maps_leads = [m for m in maps_leads if m.get("id") in selected_ids]
+        platform_listings = [p for p in platform_listings if p.get("id") in selected_ids]
+        website_leads = [w for w in website_leads if w.get("id") in selected_ids]
+        linkedin_leads = [l for l in linkedin_leads if l.get("id") in selected_ids]
+
+    table_mode = table.lower().strip()
+    export_master = (table_mode in ["all", "master"])
+    export_maps = (table_mode in ["all", "maps"])
+    export_website = (table_mode in ["all", "website"])
+    export_linkedin = (table_mode in ["all", "linkedin"])
+    export_platform = (table_mode in ["all", "platform"])
+
+    if table_mode == "master":
+        filename = "master_normalized_leads.csv"
+    elif table_mode == "maps":
+        filename = "google_maps_leads.csv"
+    elif table_mode == "website":
+        filename = "website_inspector_leads.csv"
+    elif table_mode == "linkedin":
+        filename = "linkedin_harvester_leads.csv"
+    elif table_mode == "platform":
+        filename = "platform_directory_listings.csv"
+    else:
+        filename = "all_5_tables_complete_export.csv"
+
+    total_rows = (len(master_leads) if export_master else 0) + \
+                 (len(maps_leads) if export_maps else 0) + \
+                 (len(website_leads) if export_website else 0) + \
+                 (len(linkedin_leads) if export_linkedin else 0) + \
+                 (len(platform_listings) if export_platform else 0)
+
+    if total_rows == 0:
+        raise HTTPException(status_code=404, detail="No scraped data available to export for requested selection.")
 
     base_url = str(request.base_url).rstrip("/")
     output = io.StringIO()
+
     fieldnames = [
-        "id", "name", "category", "phone", "email", "instagram", "facebook",
-        "linkedin", "twitter", "bot_protection", "cookie_status", "employee_count",
-        "platform_name", "platform_url", "platform_rating", "platform_reviews",
-        "booking_url", "platform_price", "platform_verified",
-        "screenshot", "screenshot_url", "screenshot_file_path",
-        "address", "hours", "price", "plus_code", "rating",
-        "reviews", "website", "maps_url", "lat", "lon", "created_at"
+        "table_partition", "id", "name_or_title", "status_tag", "platform_source", "category",
+        "phone", "email", "address", "rating", "reviews_count", "price_info",
+        "website_url", "booking_url", "listing_url", "bot_security", "cookie_status",
+        "employee_count", "instagram", "facebook", "linkedin", "twitter",
+        "screenshot_url", "screenshot_file_path", "created_at"
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
-    for row in leads:
-        filtered = {k: row.get(k, "") for k in fieldnames}
-        screen_val = (row.get("screenshot") or "").strip()
+
+    def format_lead_row(lead: Dict[str, Any], partition_name: str) -> Dict[str, Any]:
+        screen_val = (lead.get("screenshot") or "").strip()
+        screen_url = ""
+        screen_path = ""
         if screen_val and screen_val != "N/A":
             clean_rel = screen_val if screen_val.startswith("/") else f"/{screen_val}"
-            filtered["screenshot"] = clean_rel
-            filtered["screenshot_url"] = f"{base_url}{clean_rel}"
+            screen_url = f"{base_url}{clean_rel}"
             file_name = clean_rel.replace("/screenshots/", "")
-            filtered["screenshot_file_path"] = os.path.abspath(os.path.join(screenshots_dir, file_name))
-        else:
-            filtered["screenshot"] = ""
-            filtered["screenshot_url"] = ""
-            filtered["screenshot_file_path"] = ""
-        writer.writerow(filtered)
+            screen_path = os.path.abspath(os.path.join(screenshots_dir, file_name))
+
+        plat_source = "Google Maps"
+        if lead.get("platform_name") and lead.get("platform_name") != "N/A":
+            plat_source = f"Google Maps + {lead.get('platform_name')}"
+
+        tag = lead.get("status_tag") or lead.get("maps_status") or "Captured"
+
+        return {
+            "table_partition": partition_name,
+            "id": lead.get("id", ""),
+            "name_or_title": lead.get("name", ""),
+            "status_tag": tag,
+            "platform_source": plat_source,
+            "category": lead.get("category", ""),
+            "phone": lead.get("phone", ""),
+            "email": lead.get("email", ""),
+            "address": lead.get("address", ""),
+            "rating": lead.get("rating", ""),
+            "reviews_count": lead.get("reviews", ""),
+            "price_info": lead.get("price", ""),
+            "website_url": lead.get("website", ""),
+            "booking_url": lead.get("booking_url", ""),
+            "listing_url": lead.get("maps_url", ""),
+            "bot_security": lead.get("bot_protection", ""),
+            "cookie_status": lead.get("cookie_status", ""),
+            "employee_count": lead.get("employee_count", ""),
+            "instagram": lead.get("instagram", ""),
+            "facebook": lead.get("facebook", ""),
+            "linkedin": lead.get("linkedin", ""),
+            "twitter": lead.get("twitter", ""),
+            "screenshot_url": screen_url,
+            "screenshot_file_path": screen_path,
+            "created_at": lead.get("created_at", "")
+        }
+
+    def format_platform_row(item: Dict[str, Any], partition_name: str) -> Dict[str, Any]:
+        screen_val = (item.get("screenshot") or "").strip()
+        screen_url = ""
+        screen_path = ""
+        if screen_val and screen_val != "N/A":
+            clean_rel = screen_val if screen_val.startswith("/") else f"/{screen_val}"
+            screen_url = f"{base_url}{clean_rel}"
+            file_name = clean_rel.replace("/screenshots/", "")
+            screen_path = os.path.abspath(os.path.join(screenshots_dir, file_name))
+
+        return {
+            "table_partition": partition_name,
+            "id": item.get("id", ""),
+            "name_or_title": item.get("title", ""),
+            "status_tag": "Verified Listing",
+            "platform_source": item.get("platform", ""),
+            "category": item.get("category", ""),
+            "phone": item.get("phone", ""),
+            "email": "",
+            "address": item.get("address", ""),
+            "rating": item.get("rating", ""),
+            "reviews_count": item.get("reviews_count", ""),
+            "price_info": item.get("price_info", ""),
+            "website_url": item.get("url", ""),
+            "booking_url": item.get("booking_url", ""),
+            "listing_url": item.get("url", ""),
+            "bot_security": "N/A",
+            "cookie_status": "N/A",
+            "employee_count": "",
+            "instagram": "",
+            "facebook": "",
+            "linkedin": "",
+            "twitter": "",
+            "screenshot_url": screen_url,
+            "screenshot_file_path": screen_path,
+            "created_at": item.get("created_at", "")
+        }
+
+    # Partition 1: Master Normalized Leads
+    if export_master and master_leads:
+        for row in master_leads:
+            writer.writerow(format_lead_row(row, "Table 1: Master Normalized Leads"))
+
+    # Partition 2: Google Maps Leads
+    if export_maps and maps_leads:
+        for row in maps_leads:
+            writer.writerow(format_lead_row(row, "Table 2: Google Maps Leads"))
+
+    # Partition 3: Website Inspector Leads
+    if export_website and website_leads:
+        for row in website_leads:
+            writer.writerow(format_lead_row(row, "Table 3: Website Inspector Leads"))
+
+    # Partition 4: LinkedIn Harvester Leads
+    if export_linkedin and linkedin_leads:
+        for row in linkedin_leads:
+            writer.writerow(format_lead_row(row, "Table 4: LinkedIn Harvester Leads"))
+
+    # Partition 5: Platform Directory Listings
+    if export_platform and platform_listings:
+        for row in platform_listings:
+            writer.writerow(format_platform_row(row, "Table 5: Platform Directory Listings"))
 
     output.seek(0)
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=leads_with_hierarchy.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 @app.get("/api/export/json")
-async def export_json(request: Request):
-    leads = get_all_leads()
-    if not leads:
-        raise HTTPException(status_code=404, detail="No scraped data available to export.")
+async def export_json(request: Request, table: str = "all", ids: Optional[str] = None):
+    split_data = get_tables_split_data()
+    master_leads = split_data.get("master_leads", [])
+    maps_leads = split_data.get("unmatched_maps", [])
+    platform_listings = split_data.get("unmatched_platform", [])
 
-    base_url = str(request.base_url).rstrip("/")
-    for row in leads:
-        screen_val = (row.get("screenshot") or "").strip()
-        if screen_val and screen_val != "N/A":
-            clean_rel = screen_val if screen_val.startswith("/") else f"/{screen_val}"
-            row["screenshot"] = clean_rel
-            row["screenshot_url"] = f"{base_url}{clean_rel}"
-            file_name = clean_rel.replace("/screenshots/", "")
-            row["screenshot_file_path"] = os.path.abspath(os.path.join(screenshots_dir, file_name))
-        else:
-            row["screenshot_url"] = ""
-            row["screenshot_file_path"] = ""
+    selected_ids = None
+    if ids:
+        selected_ids = set()
+        for i in ids.split(","):
+            i = i.strip()
+            if i.isdigit():
+                selected_ids.add(int(i))
+
+    if selected_ids is not None:
+        master_leads = [m for m in master_leads if m.get("id") in selected_ids]
+        maps_leads = [m for m in maps_leads if m.get("id") in selected_ids]
+        platform_listings = [p for p in platform_listings if p.get("id") in selected_ids]
+
+    table_mode = table.lower().strip()
+    if table_mode == "master":
+        content = master_leads
+        filename = "master_normalized_leads.json"
+    elif table_mode == "maps":
+        content = maps_leads
+        filename = "google_maps_leads.json"
+    elif table_mode == "platform":
+        content = platform_listings
+        filename = "platform_directory_listings.json"
+    else:
+        content = {
+            "summary": {
+                "master_leads_count": len(master_leads),
+                "google_maps_leads_count": len(maps_leads),
+                "platform_directory_listings_count": len(platform_listings)
+            },
+            "master_normalized_leads": master_leads,
+            "google_maps_leads": maps_leads,
+            "platform_directory_listings": platform_listings
+        }
+        filename = "all_tables_complete_export.json"
 
     return JSONResponse(
-        content=leads,
-        headers={"Content-Disposition": "attachment; filename=leads_with_hierarchy.json"},
+        content=content,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
@@ -826,7 +1158,32 @@ async def delete_platform(platform_id: int):
 
 @app.get("/api/tables-split")
 async def get_tables_split_endpoint():
-    return get_tables_split_data()
+    data = get_tables_split_data()
+    # Merge active real-time proximity metrics if scraper is running
+    if "platforms" in proximity_metrics and proximity_metrics["platforms"]:
+        if "queue_progress" not in data:
+            data["queue_progress"] = {}
+        if "platforms_breakdown" not in data["queue_progress"]:
+            data["queue_progress"]["platforms_breakdown"] = {}
+        for p, metrics in proximity_metrics["platforms"].items():
+            tot = metrics.get("total", 0)
+            scraped = metrics.get("scraped", 0)
+            skipped = metrics.get("skipped", 0)
+            pct = metrics.get("percent", 0)
+            data["queue_progress"]["platforms_breakdown"][p] = {
+                "name": p,
+                "scraped": scraped,
+                "skipped": skipped,
+                "total": tot,
+                "percent": pct
+            }
+        data["queue_progress"]["platform"] = {
+            "total": proximity_metrics.get("total_estimated", 0),
+            "scraped": proximity_metrics.get("scraped_count", 0),
+            "skipped": proximity_metrics.get("skipped_count", 0),
+            "percent": proximity_metrics.get("percent", 0)
+        }
+    return data
 
 @app.get("/", response_class=FileResponse)
 async def serve_index():

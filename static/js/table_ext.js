@@ -27,25 +27,182 @@ window.tablesSplitData = {
   master_leads: [],
   unmatched_maps: [],
   unmatched_platform: [],
-  counts: { total_master: 0, total_maps_unmatched: 0, total_platform_unmatched: 0 }
+  website_leads: [],
+  linkedin_leads: [],
+  counts: { master: 0, maps: 0, platform: 0, website: 0, linkedin: 0 },
+  queue_progress: {}
 };
+window.activeTagFilter = 'All';
 
 window.switchTableTab = function(tab) {
   window.currentTableTab = tab;
-  ['master', 'maps', 'platform'].forEach(t => {
+  window.activeTagFilter = 'All';
+  if (window.selectedRowIds) {
+    window.selectedRowIds.clear();
+    if (typeof window.updateBatchBar === 'function') window.updateBatchBar();
+  }
+  ['master', 'maps', 'website', 'linkedin', 'platform'].forEach(t => {
     const btn = document.getElementById('btn-tab-' + t);
     if (btn) btn.classList.toggle('active', t === tab);
   });
   const titleEl = document.getElementById('current-table-title');
   if (titleEl) {
     if (tab === 'master') titleEl.innerText = '🌟 Master Normalized Leads (Cross-Verified Across Maps & Platforms)';
-    else if (tab === 'maps') titleEl.innerText = '🗺️ Google Maps Leads (All Records)';
+    else if (tab === 'maps') titleEl.innerText = '🗺️ Google Maps Leads (Fast Stream Ingestion)';
+    else if (tab === 'website') titleEl.innerText = '🌐 Website Inspector Leads (Email & Anti-Bot Discovery)';
+    else if (tab === 'linkedin') titleEl.innerText = '💼 LinkedIn Org Harvester (Workforce & Decision Makers)';
     else if (tab === 'platform') titleEl.innerText = '🟣 Platform Directory Listings (All Records)';
   }
+  window.renderTagFilterBar();
   if (typeof window.renderFiltersForCurrentTable === 'function') {
     window.renderFiltersForCurrentTable();
   }
   window.renderTable();
+};
+
+
+window.updatePlatformSyncCard = function(breakdown, summary) {
+  breakdown = breakdown || {};
+  summary = summary || {};
+
+  const bPlat = document.getElementById('sync-bar-plat');
+  const sPlat = document.getElementById('sync-stat-plat');
+  const cPlatScraped = document.getElementById('sync-chip-plat-scraped');
+  const cPlatBooking = document.getElementById('sync-chip-plat-booking');
+  const cPlatRated = document.getElementById('sync-chip-plat-rated');
+  const cPlatMatched = document.getElementById('sync-chip-plat-matched');
+  const cPlatPending = document.getElementById('sync-chip-plat-pending');
+  const listContainer = document.getElementById('sync-platform-breakdown-list');
+
+  // Check if Platform Scout agent toggle is active
+  const platToggle = document.getElementById('agent-platform-toggle');
+  const isPlatEnabled = platToggle ? platToggle.checked : true;
+
+  if (!isPlatEnabled) {
+    if (bPlat) bPlat.style.width = '0%';
+    if (sPlat) sPlat.innerText = 'Agent Disabled';
+    if (cPlatScraped) cPlatScraped.innerText = '✅ Scraped: 0';
+    if (cPlatBooking) cPlatBooking.innerText = '🔗 Booking: 0';
+    if (cPlatRated) cPlatRated.innerText = '⭐ Rated: 0';
+    if (cPlatMatched) cPlatMatched.innerText = '🌟 Matched: 0';
+    if (cPlatPending) cPlatPending.innerText = '⏳ In Queue: 0';
+    if (listContainer) {
+      listContainer.innerHTML = '<span style="font-size:0.7rem; color:#94a3b8; font-style:italic;">Platform Directory Scout is toggled OFF.</span>';
+    }
+    return;
+  }
+
+  // Get ONLY platforms that are currently selected in the UI checkboxes
+  const selectedCbs = document.querySelectorAll('.platform-src-cb:checked');
+  const selectedList = [];
+  selectedCbs.forEach(cb => {
+    if (cb.value) selectedList.push(cb.value);
+  });
+  const customCb = document.getElementById('platform-src-custom');
+  if (customCb && customCb.checked && !selectedList.includes('Custom')) {
+    selectedList.push('Custom');
+  }
+
+  const selectedLower = new Set(selectedList.map(s => s.toLowerCase()));
+
+  // Filter breakdown entries strictly to the selected platforms
+  const entries = Object.entries(breakdown).filter(([k]) => {
+    return selectedLower.has(k.toLowerCase());
+  });
+
+  // Calculate totals strictly from the selected platforms
+  let totalScraped = 0;
+  let totalTarget = 0;
+  let totalSkipped = 0;
+  let sumBooking = 0;
+  let sumRated = 0;
+  let sumMatched = 0;
+
+  entries.forEach(([k, v]) => {
+    const scr = v.scraped || 0;
+    const tot = v.total || scr;
+    const skp = v.skipped || 0;
+    totalScraped += scr;
+    totalTarget += tot;
+    totalSkipped += skp;
+    if (v.booking_links) sumBooking += v.booking_links;
+    if (v.rated_count) sumRated += v.rated_count;
+    if (v.matched_count) sumMatched += v.matched_count;
+  });
+
+  const overallPct = totalTarget > 0 ? Math.min(100, Math.round(((totalScraped + totalSkipped) / totalTarget) * 100)) : (totalScraped > 0 ? 100 : 0);
+  const remaining = Math.max(0, totalTarget - totalScraped);
+
+  if (bPlat) bPlat.style.width = `${overallPct}%`;
+  if (sPlat) {
+    if (selectedList.length === 0) {
+      sPlat.innerText = '0% (0 / 0 - None Selected)';
+    } else {
+      sPlat.innerText = `${overallPct}% (${totalScraped} / ${totalTarget})`;
+    }
+  }
+
+  if (cPlatScraped) cPlatScraped.innerText = `✅ Scraped: ${totalScraped}`;
+  if (cPlatBooking) cPlatBooking.innerText = `🔗 Booking: ${sumBooking}`;
+  if (cPlatRated) cPlatRated.innerText = `⭐ Rated: ${sumRated}`;
+  if (cPlatMatched) cPlatMatched.innerText = `🌟 Matched: ${sumMatched}`;
+  if (cPlatPending) cPlatPending.innerText = `⏳ In Queue: ${remaining}`;
+
+  if (listContainer) {
+    if (selectedList.length === 0) {
+      listContainer.innerHTML = '<span style="font-size:0.68rem; color:#94a3b8; font-style:italic;">No platforms selected. Please check at least one platform above.</span>';
+    } else if (entries.length === 0) {
+      listContainer.innerHTML = selectedList.map(pName => `
+        <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.7rem; padding:4px 6px; background:rgba(255,255,255,0.02); border-radius:6px; border:1px solid rgba(255,255,255,0.04);">
+          <span style="font-weight:600; color:#cbd5e1;">${escapeHtml(pName)}</span>
+          <span style="color:#64748b; font-size:0.65rem;">Waiting to scan...</span>
+        </div>
+      `).join('');
+    } else {
+      const colors = {
+        'Fresha': '#a855f7',
+        'Airbnb': '#ff385c',
+        'Yelp': '#f97316',
+        'TripAdvisor': '#00af87',
+        'Treatwell': '#3b82f6',
+        'Justdial': '#eab308',
+        'Custom': '#6366f1'
+      };
+
+      listContainer.innerHTML = entries.map(([pName, item]) => {
+        item = item || {};
+        const col = colors[pName] || '#8b5cf6';
+        const scr = item.scraped || 0;
+        const tot = item.total || (scr > 0 ? scr : 0);
+        const pct = item.percent !== undefined ? item.percent : (tot > 0 ? Math.min(100, Math.round((scr / tot) * 100)) : (scr > 0 ? 100 : 0));
+
+        const pBook = item.booking_links || 0;
+        const pRate = item.rated_count || 0;
+        const pMatch = item.matched_count || 0;
+
+        return `
+          <div style="display:flex; flex-direction:column; gap:2px; margin-top:4px; background:rgba(255,255,255,0.02); padding:4px 6px; border-radius:6px; border:1px solid rgba(255,255,255,0.04);">
+            <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.7rem;">
+              <span style="font-weight:700; color:${col}; display:flex; align-items:center; gap:4px;">
+                <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:${col};"></span>
+                ${escapeHtml(pName)}
+              </span>
+              <span style="color:#cbd5e1; font-weight:700; font-size:0.68rem;">${scr} / ${tot} (${pct}%)</span>
+            </div>
+            <div style="width:100%; height:4px; background:rgba(255,255,255,0.06); border-radius:999px; overflow:hidden; margin:2px 0;">
+              <div style="height:100%; width:${pct}%; background:${col}; border-radius:999px; transition:width 0.3s ease;"></div>
+            </div>
+            <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:2px;">
+              <span class="chip-sm chip-green">✅ ${scr} Scraped</span>
+              ${pBook > 0 ? `<span class="chip-sm chip-blue">🔗 ${pBook} Bookings</span>` : ''}
+              ${pRate > 0 ? `<span class="chip-sm chip-orange">⭐ ${pRate} Rated</span>` : ''}
+              ${pMatch > 0 ? `<span class="chip-sm chip-purple">🌟 ${pMatch} Matched</span>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
 };
 
 window.updateSplitData = function(data) {
@@ -54,8 +211,74 @@ window.updateSplitData = function(data) {
     master_leads: Array.isArray(data.master_leads) ? data.master_leads : [],
     unmatched_maps: Array.isArray(data.unmatched_maps) ? data.unmatched_maps : [],
     unmatched_platform: Array.isArray(data.unmatched_platform) ? data.unmatched_platform : [],
-    counts: data.counts || {}
+    website_leads: Array.isArray(data.website_leads) ? data.website_leads : [],
+    linkedin_leads: Array.isArray(data.linkedin_leads) ? data.linkedin_leads : [],
+    counts: data.counts || {},
+    queue_progress: data.queue_progress || {}
   };
+
+  // Update Website and LinkedIn tab badges
+  const bWeb = document.getElementById('badge-count-website');
+  if (bWeb) bWeb.innerText = window.tablesSplitData.website_leads.length;
+
+  const bLi = document.getElementById('badge-count-linkedin');
+  if (bLi) bLi.innerText = window.tablesSplitData.linkedin_leads.length;
+
+  // Update Live Sync Progress Panel
+  const qp = window.tablesSplitData.queue_progress || {};
+  const totalMaps = qp.total_maps || window.tablesSplitData.unmatched_maps.length;
+  const sMaps = document.getElementById('sync-stat-maps');
+  if (sMaps) sMaps.innerText = `${totalMaps} places captured`;
+
+  if (qp.maps) {
+    const m = qp.maps;
+    const cMWeb = document.getElementById('sync-chip-maps-web');
+    if (cMWeb) cMWeb.innerText = `🌐 With Web: ${m.with_website || 0}`;
+    const cMNoWeb = document.getElementById('sync-chip-maps-noweb');
+    if (cMNoWeb) cMNoWeb.innerText = `⚠️ No Web: ${m.no_website || 0}`;
+    const cMPhone = document.getElementById('sync-chip-maps-phone');
+    if (cMPhone) cMPhone.innerText = `📞 Phone: ${m.with_phone || 0}`;
+  }
+
+  if (qp.website) {
+    const w = qp.website;
+    const bW = document.getElementById('sync-bar-web');
+    if (bW) bW.style.width = `${w.percent || 0}%`;
+    const sW = document.getElementById('sync-stat-web');
+    if (sW) sW.innerText = `${w.percent || 0}% (${w.inspected || 0} / ${w.total || totalMaps})`;
+
+    const cWFound = document.getElementById('sync-chip-web-found');
+    if (cWFound) cWFound.innerText = `✅ Found: ${Math.max(0, (w.inspected || 0) - (w.no_website || 0))}`;
+    const cWEmail = document.getElementById('sync-chip-web-emails');
+    if (cWEmail) cWEmail.innerText = `✉️ Emails: ${w.emails_found || 0}`;
+    const cWNo = document.getElementById('sync-chip-web-noweb');
+    if (cWNo) cWNo.innerText = `⚠️ No Web: ${w.no_website || 0}`;
+    const cWPending = document.getElementById('sync-chip-web-pending');
+    if (cWPending) cWPending.innerText = `⏳ In Queue: ${w.pending || 0}`;
+  }
+
+  if (qp.linkedin) {
+    const l = qp.linkedin;
+    const bL = document.getElementById('sync-bar-li');
+    if (bL) bL.style.width = `${l.percent || 0}%`;
+    const sL = document.getElementById('sync-stat-li');
+    if (sL) sL.innerText = `${l.percent || 0}% (${l.inspected || 0} / ${l.total || totalMaps})`;
+
+    const cLFound = document.getElementById('sync-chip-li-found');
+    if (cLFound) cLFound.innerText = `✅ Found: ${l.found || 0}`;
+    const cLEmp = document.getElementById('sync-chip-li-emp');
+    if (cLEmp) cLEmp.innerText = `👥 Hierarchy: ${l.employees_found || 0}`;
+    const cLNo = document.getElementById('sync-chip-li-notfound');
+    if (cLNo) cLNo.innerText = `⚠️ Not Found: ${l.not_found || 0}`;
+    const cLPending = document.getElementById('sync-chip-li-pending');
+    if (cLPending) cLPending.innerText = `⏳ In Queue: ${l.pending || 0}`;
+  }
+
+  // Update Platform Scout Progress Card & Multi-Platform Breakdown
+  const platData = qp.platform || {};
+  const platBreakdown = qp.platforms_breakdown || {};
+  window.updatePlatformSyncCard(platBreakdown, platData);
+
 
   if (typeof placesData !== 'undefined') {
     const leadMap = new Map();
@@ -269,10 +492,15 @@ window.updateKPIs = function() {
 window.renderTableHeader = function() {
   const theadTr = document.querySelector('#places-table thead tr');
   if (!theadTr) return;
+  const selectAllTh = `<th style="width: 38px; text-align: center;"><input type="checkbox" id="select-all-checkbox" onclick="window.toggleSelectAll(this.checked)" title="Select / Deselect all visible records" /></th>`;
+  const actionsTh = `<th style="width: 85px; text-align: center;">Actions</th>`;
+
   if (window.currentTableTab === 'platform') {
     theadTr.innerHTML = `
+      ${selectAllTh}
       <th style="width: 35px;">#</th>
       <th>Platform Directory</th>
+      <th>Status Tag</th>
       <th>Business / Listing Title</th>
       <th>Category</th>
       <th>Screenshot / Photo</th>
@@ -283,29 +511,53 @@ window.renderTableHeader = function() {
       <th>Direct Booking URL</th>
       <th>Listing Link</th>
       <th>Found Date & Time</th>
+      ${actionsTh}
     `;
   } else if (window.currentTableTab === 'maps') {
     theadTr.innerHTML = `
+      ${selectAllTh}
       <th style="width: 35px;">#</th>
       <th>Business Name</th>
       <th>Category</th>
-      <th>Email Address</th>
-      <th>Social Media</th>
-      <th>Bot Security</th>
-      <th>Cookies</th>
-      <th>Team / Staff</th>
-      <th>Org Chart</th>
-      <th>Landing Page</th>
       <th>Phone</th>
       <th>Address</th>
-      <th>Rating</th>
-      <th>Platform Directory</th>
+      <th>Rating & Reviews</th>
+      <th>Website URL</th>
       <th>Maps Link</th>
+      <th>Capture Status</th>
       <th>Found Date & Time</th>
+      ${actionsTh}
+    `;
+  } else if (window.currentTableTab === 'website') {
+    theadTr.innerHTML = `
+      ${selectAllTh}
+      <th style="width: 35px;">#</th>
+      <th>Business Name</th>
+      <th>Status Tag</th>
+      <th>Website URL</th>
+      <th>Extracted Emails</th>
+      <th>Social Media</th>
+      <th>Anti-Bot Shield</th>
+      <th>Cookie Diagnostics</th>
+      <th>Screenshot</th>
+      <th>Actions</th>
+    `;
+  } else if (window.currentTableTab === 'linkedin') {
+    theadTr.innerHTML = `
+      ${selectAllTh}
+      <th style="width: 35px;">#</th>
+      <th>Business Name</th>
+      <th>Status Tag</th>
+      <th>Company LinkedIn</th>
+      <th>Workforce Size</th>
+      <th>Employees & Key People</th>
+      <th>Org Chart View</th>
+      <th>Actions</th>
     `;
   } else {
     // master normalized
     theadTr.innerHTML = `
+      ${selectAllTh}
       <th style="width: 35px;">#</th>
       <th>Business Name</th>
       <th>Category</th>
@@ -322,6 +574,7 @@ window.renderTableHeader = function() {
       <th>Platform Directory</th>
       <th>Links</th>
       <th>Found Date & Time</th>
+      ${actionsTh}
     `;
   }
 };
@@ -623,6 +876,12 @@ window.renderTable = function() {
   } else if (window.currentTableTab === 'maps') {
     activeList = window.tablesSplitData.unmatched_maps || [];
     emptyMsg = "No Google Maps leads found yet. Click 'Start Live Agent' to harvest leads.";
+  } else if (window.currentTableTab === 'website') {
+    activeList = window.tablesSplitData.website_leads || [];
+    emptyMsg = "No website inspection records yet.";
+  } else if (window.currentTableTab === 'linkedin') {
+    activeList = window.tablesSplitData.linkedin_leads || [];
+    emptyMsg = "No LinkedIn org records yet.";
   } else if (window.currentTableTab === 'platform') {
     activeList = window.tablesSplitData.unmatched_platform || [];
     emptyMsg = "No Platform Directory listings found yet. Enable Platform Scout to scrape directories.";
@@ -660,6 +919,10 @@ window.renderTable = function() {
   );
 
   const filteredList = activeList.filter(item => {
+    // 0. Status Tag Filter (for Website & LinkedIn tabs)
+    if (window.activeTagFilter && window.activeTagFilter !== 'All') {
+      if (item.status_tag !== window.activeTagFilter) return false;
+    }
     // 1. Search keyword (matches Title/Name, Address, Phone, Email, Platform)
     if (f.search) {
       const title = (item.title || item.name || item.company_name || '').toLowerCase();
@@ -849,7 +1112,19 @@ window.renderTable = function() {
         `
         : '<span class="badge badge-none" style="opacity:0.6;">—</span>';
 
+      const isSelected = window.selectedRowIds && window.selectedRowIds.has(item.id);
+      if (isSelected) tr.classList.add('row-selected');
+
+      const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
+      const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
+        <div style="display:flex; gap:6px; justify-content:center;">
+          <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('platform', ${item.id})" title="Edit listing">✏️</button>
+          <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('platform', ${item.id}, '${escapeHtml(item.title || 'Listing')}')" title="Delete listing">🗑️</button>
+        </div>
+      </td>`;
+
       tr.innerHTML = `
+        ${checkTd}
         <td style="color:#64748b; font-weight:600;">${item.id || (index + 1)}</td>
         <td>${platformColHtml}</td>
         <td class="shop-title">${escapeHtml(item.title || item.name || item.company_name || 'Listing')}</td>
@@ -862,6 +1137,7 @@ window.renderTable = function() {
         <td>${bookLink}</td>
         <td>${listLink}</td>
         <td>${formatDateTime(item.created_at)}</td>
+        ${actionsTd}
       `;
       tbody.appendChild(tr);
     });
@@ -990,8 +1266,21 @@ window.renderTable = function() {
       `;
     }
 
+    const isSelected = window.selectedRowIds && window.selectedRowIds.has(place.id);
+    if (isSelected) tr.classList.add('row-selected');
+
+    const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${place.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
+    const curType = window.currentTableTab === 'maps' ? 'maps' : 'master';
+    const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
+      <div style="display:flex; gap:6px; justify-content:center;">
+        <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('${curType}', ${place.id})" title="Edit lead">✏️</button>
+        <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('${curType}', ${place.id}, '${escapeHtml(place.name || 'Lead')}')" title="Delete lead">🗑️</button>
+      </div>
+    </td>`;
+
     if (window.currentTableTab === 'maps') {
       tr.innerHTML = `
+        ${checkTd}
         <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
         <td class="shop-title">${escapeHtml(place.name)}</td>
         <td>${categoryHtml}</td>
@@ -1008,6 +1297,7 @@ window.renderTable = function() {
         <td>${platformMapsHtml}</td>
         <td>${linksHtml}</td>
         <td>${formatDateTime(place.created_at)}</td>
+        ${actionsTd}
       `;
     } else {
       // Table 1: Master Normalized
@@ -1042,6 +1332,7 @@ window.renderTable = function() {
       }
 
       tr.innerHTML = `
+        ${checkTd}
         <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
         <td class="shop-title">${escapeHtml(place.name)}</td>
         <td>${categoryHtml}</td>
@@ -1058,10 +1349,28 @@ window.renderTable = function() {
         <td>${platformHtml}</td>
         <td>${linksHtml}</td>
         <td>${formatDateTime(place.created_at)}</td>
+        ${actionsTd}
       `;
     }
     tbody.appendChild(tr);
   });
+
+  // Update header checkbox and batch bar
+  const allBoxes = document.querySelectorAll('.row-select-checkbox');
+  const selBox = document.getElementById('select-all-checkbox');
+  if (selBox) {
+    if (allBoxes.length === 0) {
+      selBox.checked = false;
+      selBox.indeterminate = false;
+    } else {
+      const checkedCount = document.querySelectorAll('.row-select-checkbox:checked').length;
+      selBox.checked = checkedCount === allBoxes.length;
+      selBox.indeterminate = checkedCount > 0 && checkedCount < allBoxes.length;
+    }
+  }
+  if (typeof window.updateBatchBar === 'function') {
+    window.updateBatchBar();
+  }
 };
 
 // =======================================================================
@@ -1097,3 +1406,417 @@ window.addEventListener('DOMContentLoaded', () => {
     window.refreshTablesSplit();
   }, 2000);
 });
+
+
+// =======================================================================
+// SELECTION, BATCH OPERATIONS & INDIVIDUAL EDIT/DELETE LOGIC
+// =======================================================================
+
+window.selectedRowIds = new Set();
+
+window.toggleSelectAll = function(checked) {
+  const checkboxes = document.querySelectorAll('.row-select-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = checked;
+    const id = parseInt(cb.getAttribute('data-id'));
+    const tr = cb.closest('tr');
+    if (id) {
+      if (checked) {
+        window.selectedRowIds.add(id);
+        if (tr) tr.classList.add('row-selected');
+      } else {
+        window.selectedRowIds.delete(id);
+        if (tr) tr.classList.remove('row-selected');
+      }
+    }
+  });
+  window.updateBatchBar();
+};
+
+window.onRowSelectChange = function() {
+  const checkboxes = document.querySelectorAll('.row-select-checkbox');
+  window.selectedRowIds.clear();
+  let checkedCount = 0;
+  checkboxes.forEach(cb => {
+    const id = parseInt(cb.getAttribute('data-id'));
+    const tr = cb.closest('tr');
+    if (cb.checked) {
+      checkedCount++;
+      if (id) window.selectedRowIds.add(id);
+      if (tr) tr.classList.add('row-selected');
+    } else {
+      if (tr) tr.classList.remove('row-selected');
+    }
+  });
+
+  const selAll = document.getElementById('select-all-checkbox');
+  if (selAll) {
+    selAll.checked = checkedCount > 0 && checkedCount === checkboxes.length;
+    selAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+  }
+  window.updateBatchBar();
+};
+
+window.deselectAllRows = function() {
+  window.selectedRowIds.clear();
+  const checkboxes = document.querySelectorAll('.row-select-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = false;
+    const tr = cb.closest('tr');
+    if (tr) tr.classList.remove('row-selected');
+  });
+  const selAll = document.getElementById('select-all-checkbox');
+  if (selAll) {
+    selAll.checked = false;
+    selAll.indeterminate = false;
+  }
+  window.updateBatchBar();
+};
+
+window.updateBatchBar = function() {
+  const bar = document.getElementById('batch-actions-bar');
+  const countEl = document.getElementById('batch-selected-count');
+  const editBtn = document.getElementById('btn-edit-selected');
+  const editBtnText = document.getElementById('btn-edit-selected-text');
+  const deleteBtnText = document.getElementById('btn-delete-selected-text');
+  const selectBtnText = document.getElementById('select-btn-text');
+  const selectBtnIcon = document.getElementById('select-btn-icon');
+
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
+  const allBoxes = document.querySelectorAll('.row-select-checkbox');
+
+  // Update top "Select All" button state
+  if (selectBtnText && selectBtnIcon) {
+    if (allBoxes.length > 0 && count === allBoxes.length) {
+      selectBtnIcon.innerText = '❎';
+      selectBtnText.innerText = 'Deselect All';
+    } else {
+      selectBtnIcon.innerText = '☑️';
+      selectBtnText.innerText = count > 0 ? `Select All (${allBoxes.length})` : 'Select All';
+    }
+  }
+
+  if (!bar) return;
+  if (count > 0) {
+    bar.style.display = 'flex';
+    if (countEl) countEl.innerText = `${count} ${count === 1 ? 'record' : 'records'} selected`;
+
+    // Dynamic label for Edit button: single edit vs batch edit
+    if (editBtn && editBtnText) {
+      if (count === 1) {
+        editBtnText.innerText = 'Edit Record';
+        editBtn.title = 'Open full editor for this selected record';
+      } else {
+        editBtnText.innerText = 'Batch Edit';
+        editBtn.title = `Batch edit ${count} selected records`;
+      }
+    }
+
+    if (deleteBtnText) {
+      deleteBtnText.innerText = count === 1 ? '🗑️ Delete Record' : `🗑️ Delete Selected (${count})`;
+    }
+  } else {
+    bar.style.display = 'none';
+  }
+};
+
+window.handleEditSelectedClick = function() {
+  const count = window.selectedRowIds.size;
+  if (count === 0) {
+    alert('Please select at least one record using a checkbox.');
+    return;
+  }
+  if (count === 1) {
+    const id = Array.from(window.selectedRowIds)[0];
+    const curType = window.currentTableTab === 'platform' ? 'platform' : (window.currentTableTab === 'maps' ? 'maps' : 'master');
+    window.openEditRowModal(curType, id);
+  } else {
+    window.openBatchEditCategoryModal();
+  }
+};
+
+window.toggleSelectAllButton = function() {
+  const allBoxes = document.querySelectorAll('.row-select-checkbox');
+  if (allBoxes.length === 0) return;
+  const checkedCount = document.querySelectorAll('.row-select-checkbox:checked').length;
+  const shouldSelect = checkedCount < allBoxes.length;
+  window.toggleSelectAll(shouldSelect);
+
+  const headerCb = document.getElementById('select-all-checkbox');
+  if (headerCb) {
+    headerCb.checked = shouldSelect;
+    headerCb.indeterminate = false;
+  }
+};
+
+window.batchDeleteSelected = async function() {
+  const count = window.selectedRowIds.size;
+  if (count === 0) return;
+  const tableLabel = window.currentTableTab === 'platform' ? 'Platform Directory Listings' : 'Leads';
+  if (!confirm(`Are you sure you want to permanently delete ${count} selected ${tableLabel}? This action cannot be undone.`)) {
+    return;
+  }
+
+  const ids = Array.from(window.selectedRowIds);
+  const endpoint = window.currentTableTab === 'platform'
+    ? '/api/platform-listings/batch-delete'
+    : '/api/leads/batch-delete';
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids })
+    });
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    const data = await res.json();
+    window.deselectAllRows();
+    if (typeof loadDatabase === 'function') {
+      await loadDatabase();
+    }
+    alert(`Successfully deleted ${data.deleted_count || count} records.`);
+  } catch (err) {
+    console.error('Batch delete failed:', err);
+    alert('Failed to delete selected records: ' + err.message);
+  }
+};
+
+window.openBatchEditCategoryModal = function() {
+  const count = window.selectedRowIds.size;
+  if (count === 0) {
+    alert('Please select at least one record to update.');
+    return;
+  }
+  const modal = document.getElementById('batch-cat-modal');
+  const desc = document.getElementById('batch-cat-desc');
+  const input = document.getElementById('batch-cat-input');
+  if (desc) desc.innerText = `Set a new category for the ${count} selected record${count > 1 ? 's' : ''}:`;
+  if (input) input.value = '';
+  if (modal) modal.style.display = 'flex';
+};
+
+window.closeBatchCatModal = function() {
+  const modal = document.getElementById('batch-cat-modal');
+  if (modal) modal.style.display = 'none';
+};
+
+window.submitBatchCategory = async function() {
+  const input = document.getElementById('batch-cat-input');
+  const newCat = (input ? input.value : '').trim();
+  if (!newCat) {
+    alert('Please enter a valid category name.');
+    return;
+  }
+  const ids = Array.from(window.selectedRowIds);
+  const endpoint = window.currentTableTab === 'platform'
+    ? '/api/platform-listings/batch-update'
+    : '/api/leads/batch-update';
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids, updates: { category: newCat } })
+    });
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    window.closeBatchCatModal();
+    window.deselectAllRows();
+    if (typeof loadDatabase === 'function') {
+      await loadDatabase();
+    }
+    alert(`Successfully updated category to "${newCat}" for ${ids.length} records.`);
+  } catch (err) {
+    console.error('Batch category update failed:', err);
+    alert('Failed to update categories: ' + err.message);
+  }
+};
+
+window.exportSelectedCSV = function() {
+  const count = window.selectedRowIds.size;
+  if (count === 0) {
+    alert('No rows selected. Please select rows using checkboxes.');
+    return;
+  }
+  const idsParam = Array.from(window.selectedRowIds).join(',');
+  const tableParam = window.currentTableTab || 'all';
+  window.location.href = `/api/export/csv?ids=${idsParam}&table=${tableParam}`;
+};
+
+// -----------------------------------------------------------------------
+// Individual Edit & Delete Operations
+// -----------------------------------------------------------------------
+
+window.openEditRowModal = function(type, id) {
+  let record = null;
+  const numId = parseInt(id);
+  if (type === 'platform') {
+    record = (window.tablesSplitData.unmatched_platform || []).find(p => p.id === numId);
+  } else if (type === 'maps') {
+    record = (window.tablesSplitData.unmatched_maps || []).find(p => p.id === numId);
+  } else {
+    record = (window.tablesSplitData.master_leads || []).find(p => p.id === numId);
+  }
+
+  if (!record) {
+    alert('Record not found.');
+    return;
+  }
+
+  const modal = document.getElementById('edit-row-modal');
+  const titleEl = document.getElementById('edit-modal-title');
+  document.getElementById('edit-item-id').value = record.id;
+  document.getElementById('edit-item-type').value = type;
+
+  const isPlatform = type === 'platform';
+  if (titleEl) {
+    titleEl.innerText = isPlatform ? `✏️ Edit Directory Listing: #${record.id}` : `✏️ Edit Lead Details: #${record.id}`;
+  }
+
+  document.getElementById('edit-field-name').value = record.title || record.name || '';
+  document.getElementById('edit-field-category').value = record.category || '';
+  document.getElementById('edit-field-phone').value = (record.phone && record.phone !== 'N/A') ? record.phone : '';
+  document.getElementById('edit-field-address').value = (record.address && record.address !== 'N/A') ? record.address : '';
+  document.getElementById('edit-field-rating').value = (record.rating && record.rating !== 'N/A') ? record.rating : '';
+
+  const emailGroup = document.getElementById('edit-group-email');
+  const emailInput = document.getElementById('edit-field-email');
+  if (emailGroup && emailInput) {
+    if (isPlatform) {
+      emailGroup.style.display = 'none';
+      emailInput.value = '';
+    } else {
+      emailGroup.style.display = 'flex';
+      emailInput.value = (record.email && record.email !== 'N/A') ? record.email : '';
+    }
+  }
+
+  const websiteGroup = document.getElementById('edit-group-website');
+  const websiteInput = document.getElementById('edit-field-website');
+  if (websiteGroup && websiteInput) {
+    if (isPlatform) {
+      websiteGroup.style.display = 'none';
+      websiteInput.value = '';
+    } else {
+      websiteGroup.style.display = 'flex';
+      websiteInput.value = (record.website && record.website !== 'N/A') ? record.website : '';
+    }
+  }
+
+  const bookingGroup = document.getElementById('edit-group-booking');
+  const bookingInput = document.getElementById('edit-field-booking');
+  if (bookingGroup && bookingInput) {
+    if (isPlatform) {
+      bookingGroup.style.display = 'flex';
+      bookingInput.value = (record.booking_url && record.booking_url !== 'N/A') ? record.booking_url : (record.url || '');
+    } else {
+      bookingGroup.style.display = (record.booking_url && record.booking_url !== 'N/A') ? 'flex' : 'none';
+      bookingInput.value = (record.booking_url && record.booking_url !== 'N/A') ? record.booking_url : '';
+    }
+  }
+
+  const priceInput = document.getElementById('edit-field-price');
+  if (priceInput) {
+    priceInput.value = (record.price_info || record.price || record.platform_price || '');
+  }
+
+  if (modal) modal.style.display = 'flex';
+};
+
+window.closeEditRowModal = function() {
+  const modal = document.getElementById('edit-row-modal');
+  if (modal) modal.style.display = 'none';
+};
+
+window.saveRowEdit = async function(e) {
+  e.preventDefault();
+  const id = parseInt(document.getElementById('edit-item-id').value);
+  const type = document.getElementById('edit-item-type').value;
+  if (!id) return;
+
+  const isPlatform = type === 'platform';
+  const nameVal = document.getElementById('edit-field-name').value.trim();
+  const catVal = document.getElementById('edit-field-category').value.trim();
+  const phoneVal = document.getElementById('edit-field-phone').value.trim();
+  const addrVal = document.getElementById('edit-field-address').value.trim();
+  const ratingVal = document.getElementById('edit-field-rating').value.trim();
+  const priceVal = document.getElementById('edit-field-price').value.trim();
+
+  let payload = {};
+  let endpoint = '';
+
+  if (isPlatform) {
+    const bookingVal = document.getElementById('edit-field-booking').value.trim();
+    payload = {
+      title: nameVal,
+      category: catVal,
+      phone: phoneVal,
+      address: addrVal,
+      rating: ratingVal ? parseFloat(ratingVal) || 0.0 : 0.0,
+      price_info: priceVal,
+      booking_url: bookingVal
+    };
+    endpoint = `/api/platform-listings/${id}`;
+  } else {
+    const emailVal = document.getElementById('edit-field-email').value.trim();
+    const websiteVal = document.getElementById('edit-field-website').value.trim();
+    payload = {
+      name: nameVal,
+      category: catVal,
+      phone: phoneVal,
+      email: emailVal,
+      address: addrVal,
+      rating: ratingVal,
+      price: priceVal,
+      website: websiteVal
+    };
+    endpoint = `/api/leads/${id}`;
+  }
+
+  const btnSave = document.getElementById('btn-save-edit');
+  if (btnSave) {
+    btnSave.disabled = true;
+    btnSave.innerText = '💾 Saving...';
+  }
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    window.closeEditRowModal();
+    if (typeof loadDatabase === 'function') {
+      await loadDatabase();
+    }
+  } catch (err) {
+    console.error('Failed to save edit:', err);
+    alert('Error saving changes: ' + err.message);
+  } finally {
+    if (btnSave) {
+      btnSave.disabled = false;
+      btnSave.innerText = '💾 Save Changes';
+    }
+  }
+};
+
+window.deleteSingleRow = async function(type, id, title) {
+  const isPlatform = type === 'platform';
+  const label = isPlatform ? 'Directory Listing' : 'Lead';
+  if (!confirm(`Are you sure you want to delete the ${label} "${title || '#' + id}"?`)) {
+    return;
+  }
+
+  const endpoint = isPlatform ? `/api/platform-listings/${id}` : `/api/leads/${id}`;
+  try {
+    const res = await fetch(endpoint, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    if (window.selectedRowIds) window.selectedRowIds.delete(id);
+    if (typeof loadDatabase === 'function') {
+      await loadDatabase();
+    }
+  } catch (err) {
+    console.error('Failed to delete row:', err);
+    alert('Failed to delete record: ' + err.message);
+  }
+};

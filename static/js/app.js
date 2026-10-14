@@ -215,6 +215,18 @@ let placesData = [];
         card.style.display = toggle.checked ? 'flex' : 'none';
       }
       handleAgentToggleChange();
+
+      // Immediately refresh Platform Scout progress card
+      if (typeof window.updatePlatformSyncCard === 'function') {
+        const qp = window.tablesSplitData ? window.tablesSplitData.queue_progress : null;
+        window.updatePlatformSyncCard(
+          (qp && qp.platforms_breakdown) || (proximityStats && proximityStats.platforms) || null,
+          (qp && qp.platform) || null
+        );
+      }
+      if (typeof updateProximityUI === 'function') {
+        updateProximityUI({});
+      }
     }
 
     function getSelectedPlatforms() {
@@ -235,6 +247,18 @@ let placesData = [];
         customGroup.style.display = (customCb && customCb.checked) ? 'block' : 'none';
       }
       handleAgentToggleChange();
+
+      // Immediately refresh proximity UI and Platform Scout progress card for the selected platforms
+      if (typeof updateProximityUI === 'function') {
+        updateProximityUI({});
+      }
+      if (typeof window.updatePlatformSyncCard === 'function') {
+        const qp = window.tablesSplitData ? window.tablesSplitData.queue_progress : null;
+        window.updatePlatformSyncCard(
+          (qp && qp.platforms_breakdown) || (proximityStats && proximityStats.platforms) || null,
+          (qp && qp.platform) || null
+        );
+      }
     }
 
     async function runManualNormalize() {
@@ -253,15 +277,27 @@ let placesData = [];
     }
 
     function handleAgentToggleChange() {
-      const mapsOn = document.getElementById('agent-maps-toggle').checked;
-      const siteOn = document.getElementById('agent-website-toggle').checked;
-      const liOn = document.getElementById('agent-linkedin-toggle').checked;
+      const mapsOn = document.getElementById('agent-maps-toggle')?.checked || false;
+      const siteOn = document.getElementById('agent-website-toggle')?.checked || false;
+      const liOn = document.getElementById('agent-linkedin-toggle')?.checked || false;
       const platOn = document.getElementById('agent-platform-toggle')?.checked || false;
       const startBtn = document.getElementById('start-btn');
+
+      // Update live stream viewports to visibly show ONLY active enabled agents
+      const cardMaps = document.getElementById('card-maps');
+      const cardSite = document.getElementById('card-website');
+      const cardLi = document.getElementById('card-linkedin');
+      const cardPlat = document.getElementById('card-platform');
+
+      if (cardMaps) cardMaps.style.display = mapsOn ? 'flex' : 'none';
+      if (cardSite) cardSite.style.display = siteOn ? 'flex' : 'none';
+      if (cardLi) cardLi.style.display = liOn ? 'flex' : 'none';
+      if (cardPlat) cardPlat.style.display = platOn ? 'flex' : 'none';
 
       if (!mapsOn && !siteOn && !liOn && !platOn) {
         alert("Warning: At least one agent must be enabled!");
         document.getElementById('agent-maps-toggle').checked = true;
+        if (cardMaps) cardMaps.style.display = 'flex';
         return;
       }
 
@@ -308,17 +344,77 @@ let placesData = [];
       }
     }
 
+
+    // Infinity & Max Places Limit Controls
+    let isInfinityMode = true;
+
+    function handleMaxSliderInput(val) {
+      const v = parseInt(val);
+      const maxLabel = document.getElementById('max-label');
+      if (v >= 500) {
+        isInfinityMode = true;
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
+      } else {
+        isInfinityMode = false;
+        if (maxLabel) maxLabel.innerText = v;
+      }
+    }
+
+    function setMaxLimit(val) {
+      const scrapeAll = document.getElementById('scrape-all-toggle')?.checked;
+      if (scrapeAll) {
+        // If scrape all is active, notify user it is already infinite
+        logMessage("ℹ️ 'Scrape ALL Shops (Continuous)' is ON: Scraper will already harvest all places without limits.");
+        return;
+      }
+      const slider = document.getElementById('max-slider');
+      const maxLabel = document.getElementById('max-label');
+      if (val === 'infinity') {
+        isInfinityMode = true;
+        if (slider) slider.value = 500;
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
+        logMessage("♾️ Max Places Limit set to Unlimited / Infinity.");
+      } else {
+        isInfinityMode = false;
+        if (slider) slider.value = val;
+        if (maxLabel) maxLabel.innerText = val;
+        logMessage(`🎯 Max Places Limit set to ${val} places.`);
+      }
+    }
+
+    function toggleInfinityMode() {
+      const scrapeAll = document.getElementById('scrape-all-toggle')?.checked;
+      if (scrapeAll) return;
+      if (isInfinityMode) {
+        setMaxLimit(20);
+      } else {
+        setMaxLimit('infinity');
+      }
+    }
+
     // Toggle All Shops
     document.getElementById('scrape-all-toggle').addEventListener('change', function(e) {
       const group = document.getElementById('max-results-group');
       const qInput = document.getElementById('query-input');
+      const maxLabel = document.getElementById('max-label');
+      const slider = document.getElementById('max-slider');
       if (e.target.checked) {
-        group.style.opacity = '0.4';
+        group.style.opacity = '0.7';
         group.style.pointerEvents = 'none';
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Continuous - Scraping ALL Area Shops)</span>';
         qInput.placeholder = 'All Shops in Selected Area (No keyword needed)';
+        isInfinityMode = true;
       } else {
         group.style.opacity = '1';
         group.style.pointerEvents = 'auto';
+        const v = parseInt(slider?.value || 20);
+        if (v >= 500) {
+          isInfinityMode = true;
+          if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
+        } else {
+          isInfinityMode = false;
+          if (maxLabel) maxLabel.innerText = v;
+        }
         qInput.placeholder = 'e.g. Barber, Bakery, Dentist';
       }
     });
@@ -938,8 +1034,15 @@ let placesData = [];
         Object.assign(proximityStats.platforms, data.platforms);
       }
 
-      // Roll up overall metrics from platforms if available
-      const platKeys = Object.keys(proximityStats.platforms);
+      // Roll up overall metrics from ONLY selected platforms
+      const selectedCbs = document.querySelectorAll('.platform-src-cb:checked');
+      const selectedNames = [];
+      selectedCbs.forEach(cb => { if (cb.value) selectedNames.push(cb.value); });
+      const customCb = document.getElementById('platform-src-custom');
+      if (customCb && customCb.checked && !selectedNames.includes('Custom')) selectedNames.push('Custom');
+      const selectedLower = new Set(selectedNames.map(s => s.toLowerCase()));
+
+      const platKeys = Object.keys(proximityStats.platforms).filter(k => selectedLower.has(k.toLowerCase()));
       if (platKeys.length > 0) {
         let rolledScraped = 0, rolledSkipped = 0, rolledTotal = 0;
         platKeys.forEach(k => {
@@ -956,6 +1059,16 @@ let placesData = [];
       const total = Math.max(proximityStats.total || 0, proximityStats.scraped + proximityStats.skipped, 1);
       const scrapedPct = Math.min(100, (proximityStats.scraped / total) * 100);
       const skippedPct = Math.min(100 - scrapedPct, (proximityStats.skipped / total) * 100);
+
+      // Real-time hook: update Platform Scout Sync Card and each platform breakdown
+      if (typeof window.updatePlatformSyncCard === 'function') {
+        window.updatePlatformSyncCard(proximityStats.platforms, {
+          total: proximityStats.total,
+          scraped: proximityStats.scraped,
+          skipped: proximityStats.skipped,
+          percent: Math.min(100, Math.round(((proximityStats.scraped + proximityStats.skipped) / Math.max(1, proximityStats.total)) * 100))
+        });
+      }
 
       const barScraped = document.getElementById("bar-scraped");
       const barSkipped = document.getElementById("bar-skipped");
@@ -988,7 +1101,16 @@ let placesData = [];
       const grid = document.getElementById("platform-bars-grid");
       if (!grid) return;
       const plats = proximityStats.platforms || {};
-      const keys = Object.keys(plats);
+
+      // Filter strictly to selected platforms
+      const selectedCbs = document.querySelectorAll('.platform-src-cb:checked');
+      const selectedNames = [];
+      selectedCbs.forEach(cb => { if (cb.value) selectedNames.push(cb.value); });
+      const customCb = document.getElementById('platform-src-custom');
+      if (customCb && customCb.checked && !selectedNames.includes('Custom')) selectedNames.push('Custom');
+      const selectedLower = new Set(selectedNames.map(s => s.toLowerCase()));
+
+      const keys = Object.keys(plats).filter(k => selectedLower.has(k.toLowerCase()));
       if (keys.length === 0) {
         grid.style.display = "none";
         return;
@@ -1210,7 +1332,8 @@ let placesData = [];
       const scrapeAll = document.getElementById('scrape-all-toggle').checked;
       if (!query) query = "shops";
 
-      const maxResults = parseInt(document.getElementById('max-slider').value);
+      let rawMax = parseInt(document.getElementById('max-slider')?.value || 20);
+      const maxResults = (scrapeAll || isInfinityMode || rawMax >= 500) ? 999999 : rawMax;
       const lat = parseFloat(document.getElementById('lat-input').value);
       const lon = parseFloat(document.getElementById('lon-input').value);
 
@@ -1238,25 +1361,28 @@ let placesData = [];
       if (agentPlatform) parts.push(platformName);
       logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
 
-      // Trigger Extension to open tab live in this exact Chrome window if installed
-      if (agentMaps) {
-        try {
-          const encoded = encodeURIComponent(query);
-          const mapsUrl = (lat && lon)
-            ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
-            : `https://www.google.com/maps/search/${encoded}?hl=en`;
+      // Trigger Extension to open tabs live in this exact Chrome window ONLY for enabled agents
+      try {
+        const encoded = encodeURIComponent(query);
+        const mapsUrl = (lat && lon)
+          ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
+          : `https://www.google.com/maps/search/${encoded}?hl=en`;
 
-          window.postMessage({
-            source: "mavon_dashboard",
-            action: "START_LIVE_BROWSER_SCRAPING",
-            url: mapsUrl,
-            query: query,
-            max: maxResults,
-            scrapeWebsites: agentWebsite,
-            radiusKm: radiusKm
-          }, "*");
-        } catch (e) {}
-      }
+        window.postMessage({
+          source: "mavon_dashboard",
+          action: "START_LIVE_BROWSER_SCRAPING",
+          enable_maps: agentMaps,
+          url: agentMaps ? mapsUrl : null,
+          enable_website: agentWebsite,
+          enable_linkedin: agentLinkedin,
+          enable_platform: agentPlatform,
+          platform_url: agentPlatform ? (platformCustomUrl || "https://www.fresha.com/") : null,
+          query: query,
+          max: maxResults,
+          scrapeWebsites: agentWebsite,
+          radiusKm: radiusKm
+        }, "*");
+      } catch (e) {}
 
       try {
         const resp = await fetch('/api/start', {
