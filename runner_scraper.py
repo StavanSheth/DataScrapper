@@ -1294,548 +1294,491 @@ async def platform_area_search_worker(
     Dedicated Proximity & Area Worker for Tab 4 (Multi-Source Platform Directory Scout).
     Operates identically to Google Maps area scraping:
     Searches the platform directly for the target category/query in the target geographic area/locality,
-    smoothly scrolls to discover all proximity listing cards, extracts ratings/reviews/prices/booking URLs,
-    and stores them into the directory database.
-    Supports running multiple platforms (e.g. Fresha, Airbnb, Yelp, TripAdvisor) in live Chrome Tab 4.
+    smoothly scrolls to discover all proximity listing cards, clicks cards to inspect verified details,
+    extracts ratings/reviews/prices/booking URLs, captures detail screenshots, and stores them into the database.
     """
-    if not selected_platforms:
-        selected_platforms = ["Fresha"]
+    try:
+        if not selected_platforms:
+            selected_platforms = ["Fresha"]
 
-    active_clean_platforms = [p.strip() for p in selected_platforms if p.strip()]
-    emit_event("log", f"🟣 [Tab 4 Platform Scout] Target platforms active ({len(active_clean_platforms)}): {', '.join(active_clean_platforms)}")
+        active_clean_platforms = [p.strip() for p in selected_platforms if p.strip()]
+        emit_event("log", f"🟣 [Tab 4 Platform Scout] Target platforms active ({len(active_clean_platforms)}): {', '.join(active_clean_platforms)}")
 
-    # =========================================================================
-    # PHASE 1: PROXIMITY CENSUS (Discover total businesses across ALL platforms)
-    # Probes each platform header first, dynamically applying 20% timeout margin.
-    # =========================================================================
-    platform_totals = {}
-    for p_name in active_clean_platforms:
-        target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
-        prof = PLATFORM_PROFILES.get(p_name, {"baseline_sec": 5.0, "timeout_sec": 6.0})
-        timeout_ms = int(prof["timeout_sec"] * 1000)
+        # =========================================================================
+        # PHASE 1: PROXIMITY CENSUS (Discover total businesses across ALL platforms)
+        # =========================================================================
+        platform_totals = {}
+        for p_name in active_clean_platforms:
+            target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
+            prof = PLATFORM_PROFILES.get(p_name, {"baseline_sec": 5.0, "timeout_sec": 12.0})
+            timeout_ms = 15000  # Generous 15s timeout to prevent premature aborts
 
-        emit_event("status", f"Census: Probing {p_name} volume for '{category}' in '{location_name}'...")
-        emit_event("log", f"🎯 [Proximity Census] Probing {p_name} total available businesses in '{location_name}' (Limit: {prof['timeout_sec']}s)...")
-        emit_event("platform_navigated", {"url": target_url, "title": f"{p_name} Proximity Census", "platform": p_name})
+            emit_event("status", f"Census: Probing {p_name} volume for '{category}' in '{location_name}'...")
+            emit_event("log", f"🎯 [Proximity Census] Probing {p_name} total available businesses in '{location_name}'...")
+            emit_event("platform_navigated", {"url": target_url, "title": f"{p_name} Proximity Census", "platform": p_name})
 
-        detected_total = 0
-        try:
-            t0 = time.time()
-            await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            elapsed = time.time() - t0
-            rem_wait = max(0.4, min(1.5, prof["timeout_sec"] - elapsed))
-            await platform_page.wait_for_timeout(int(rem_wait * 1000))
-
-            detected_total = await extract_platform_total_count(platform_page, p_name)
-            if detected_total <= 0:
-                # Fallback: Count visible venue cards rendered on page 1
-                detected_total = await platform_page.evaluate("""() => {
-                    return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], li.border-color--default__09f24__Nrmcg, div.listing_details, article, [role="article"]').length;
-                }""")
-        except Exception as ce:
-            emit_event("log", f"⚠️ [Proximity Census] {p_name} response exceeded {prof['timeout_sec']}s. Defaulting to progressive count.")
-
-        final_plat_total = max(detected_total, max_results if max_results > 0 else 15)
-        platform_totals[p_name] = final_plat_total
-        emit_event("proximity_total", {
-            "platform": p_name,
-            "query": category,
-            "location": location_name,
-            "total": final_plat_total
-        })
-        emit_event("platform_progress", {
-            "platform": p_name,
-            "scraped": 0,
-            "skipped": 0,
-            "total": final_plat_total,
-            "percent": 0
-        })
-        emit_event("log", f"🎯 [Proximity Census Result] {p_name} reports ~{final_plat_total} businesses/listings in {location_name}.")
-
-    emit_event("log", "✅ Proximity Census Complete across all selected platforms. Beginning sequential harvesting...")
-
-    # =========================================================================
-    # PHASE 2: SEQUENTIAL HARVESTING (1 Platform After Another)
-    # Each platform is isolated in try...finally so failure NEVER skips another!
-    # =========================================================================
-    for plat_idx, p_name in enumerate(active_clean_platforms, 1):
-        target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
-        plat_total = platform_totals.get(p_name, max_results)
-        plat_scraped = 0
-        plat_skipped = 0
-
-        emit_event("status", f"Platform Scout [{plat_idx}/{len(active_clean_platforms)}]: Harvesting {p_name} in '{location_name}'...")
-        emit_event("log", f"🟣 [Tab 4 - Stage {plat_idx}/{len(active_clean_platforms)}] Harvesting {p_name} for '{category}' in '{location_name}'...")
-        emit_event("platform_navigated", {"url": target_url, "title": f"{p_name}: {category} in {location_name}", "platform": p_name})
-
-        try:
-            # Re-navigate if needed
-            if platform_page.url != target_url:
-                await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=18000)
-                try:
-                    await platform_page.wait_for_load_state("load", timeout=3000)
-                except Exception:
-                    pass
+            detected_total = 0
+            try:
+                await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
                 await platform_page.wait_for_timeout(1000)
-        except Exception as nav_e:
-            emit_event("log", f"⚠️ [Tab 4 - {p_name}] Navigation notice: {str(nav_e)[:60]}")
 
-        # Show HUD on Tab 4
-        try:
-            safe_loc = re.sub(r'[\'\"]', '', location_name)[:25]
-            await platform_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform: {p_name}', 'Harvesting {category} in {safe_loc}...', '#a855f7')")
-        except Exception:
-            pass
+                detected_total = await extract_platform_total_count(platform_page, p_name)
+                if detected_total <= 0:
+                    detected_total = await platform_page.evaluate("""() => {
+                        return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], li.border-color--default__09f24__Nrmcg, div.listing_details, article, [role="article"]').length;
+                    }""")
+            except Exception as ce:
+                emit_event("log", f"⚠️ [Proximity Census] {p_name} network response slow. Defaulting to progressive count.")
 
-        # 1. Accept cookies & handle anti-bot on directory page
-        try:
-            await detect_and_handle_cookies(platform_page)
-        except Exception:
-            pass
-        try:
-            await attempt_turnstile_solve(platform_page)
-        except Exception:
-            pass
-
-        # 2. Dismiss any blocking dialogs, currency selectors, sign-in banners, or location modals
-        try:
-            await platform_page.evaluate("""() => {
-                const dismiss = [
-                    'button[aria-label="Close"]', 'button[aria-label*="close" i]',
-                    'button[data-testid*="modal-close"]', 'button[data-testid="modal-container-close"]',
-                    'div[aria-label="Close"]', '.modal-close', 'button.close',
-                    '[data-qa*="close"]', 'button[aria-label="Dismiss"]',
-                    'button:has-text("Accept")', 'button:has-text("Continue without supporting")'
-                ];
-                for (const sel of dismiss) {
-                    document.querySelectorAll(sel).forEach(el => { try { el.click(); } catch(e){} });
-                }
-            }""")
-        except Exception:
-            pass
-
-        # Abort heavy video playback (e.g. Airbnb background videos) to optimize RAM and speed
-        try:
-            await platform_page.route("**/*.{mp4,avi,mkv,webm,mp3,wav,ogg}", lambda r: r.abort())
-        except Exception:
-            pass
-
-        # =====================================================================
-        # PROGRESSIVE MULTI-PASS SCROLLING & DISCOVERY
-        # Continuously scrolls down, triggers lazy cards to load, extracts in batch,
-        # and loops until target max_results is reached or bottom of feed is reached!
-        # =====================================================================
-        max_scroll_passes = max(10, min(50, (max_results // 2) + 8))
-        consecutive_stagnant = 0
-        extracted_listings = []
-        seen_listing_urls = set()
-
-        emit_event("log", f"📜 [Tab 4 - {p_name}] Beginning progressive scrolling discovery (Target: {max_results} listings)...")
-
-        for scroll_pass in range(1, max_scroll_passes + 1):
-            # Extract cards currently in DOM
-            current_batch = await platform_page.evaluate(r"""() => {
-                const results = [];
-                const currUrl = window.location.href;
-                const isAirbnb = currUrl.includes('airbnb');
-                const isFresha = currUrl.includes('fresha');
-                const isYelp = currUrl.includes('yelp');
-                const isTripAdvisor = currUrl.includes('tripadvisor');
-
-                // Blacklist of UI controls, filter toolbars, headers, and navigation chrome
-                const junkRegex = /^(?:filters?|filter\s*\(?\d*\)?|show\s+map|map|search|clear\s+all|explore|instant\s+book|rooms\s+and\s+beds|property\s+type|amenities|sort\s+by|guest\s+favorites?|menu|view\s+in\s+map|sign\s+in|log\s+in|navigation|next|previous|page\s+\d+|categories|ratings?|prices?|display\s+total|share|save)$/i;
-
-                let cardSelectors = [];
-                if (isAirbnb) {
-                    cardSelectors = ['div[data-testid="card-container"]', 'div[itemprop="itemListElement"]', 'div[aria-labelledby*="title_"]', 'div[class*="c4mnd7m"]', 'a[href*="/rooms/"]'];
-                } else if (isFresha) {
-                    cardSelectors = ['div[data-qa="venue-card"]', 'div.venue-card', 'a[href*="/a/"]', 'a[href*="/v/"]', 'a[href*="/b/"]', '[class*="venueCard"]', 'article'];
-                } else if (isYelp) {
-                    cardSelectors = ['div[data-testid="serp-ia-card"]', 'li.border-color--default__09f24__Nrmcg', 'div.container__09f24__FeTO7', 'div[class*="container__"]'];
-                } else if (isTripAdvisor) {
-                    cardSelectors = ['div.listing_details', 'div.listItem', 'div[data-automation="hotel-card-title"]', 'div.result-card', 'div[data-block-id]', 'div[class*="listItem"]'];
-                } else {
-                    cardSelectors = [
-                        'article', '[role="article"]',
-                        'div[data-testid*="property-card"]', 'div[data-testid*="listing"]', 'div[data-testid*="card"]', 'div[data-testid*="result"]',
-                        'div[itemprop="itemListElement"]', 'li[itemprop="itemListElement"]',
-                        'div.search-result', 'li.search-result', 'div.search-result-card', 'div.search-item',
-                        'div.venue-card', 'div.place-card', 'div.businessCard', 'div.listing-card', 'div.result-card',
-                        'div.directory-card', 'div.directory-item', 'div.store-card', 'div.vendor-card',
-                        'div.property-card', 'a.property-card'
-                    ];
-                }
-
-                let cards = Array.from(document.querySelectorAll(cardSelectors.join(', ')));
-
-                if (cards.length === 0) {
-                    const headingLinks = document.querySelectorAll('main h2 a, main h3 a, main h4 a, #root h2 a, #root h3 a, body h2 a, body h3 a');
-                    const seenContainers = new Set();
-                    headingLinks.forEach(hl => {
-                        const cont = hl.closest('article, [class*="card"], [class*="item"], [class*="listing"], [class*="result"], li, div');
-                        if (cont && !seenContainers.has(cont) && cont !== document.body && cont !== document.documentElement) {
-                            seenContainers.add(cont);
-                            cards.push(cont);
-                        }
-                    });
-                }
-
-                const seenUrlsOnPage = new Set();
-
-                cards.forEach((card, c_idx) => {
-                    let linkEl = null;
-                    if (card.matches('a')) {
-                        linkEl = card;
-                    } else {
-                        if (isAirbnb) {
-                            linkEl = card.querySelector('a[href*="/rooms/"]');
-                        } else if (isFresha) {
-                            linkEl = card.querySelector('a[href*="/a/"], a[href*="/v/"], a[href*="/b/"], a[href*="/salon/"], a[href*="/venue/"], a[data-qa="venue-name-link"]');
-                        } else if (isYelp) {
-                            linkEl = card.querySelector('a[href*="/biz/"]');
-                        } else if (isTripAdvisor) {
-                            linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"], a[href*="/Attraction_Review"], a[href*="/VacationRentalReview"]');
-                        }
-                        if (!linkEl) {
-                            linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
-                        }
-                        if (!linkEl) {
-                            linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
-                        }
-                    }
-
-                    if (!linkEl || !linkEl.href) return;
-                    let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
-
-                    if (isAirbnb && !href.includes('/rooms/')) return;
-                    if (isFresha && !href.match(/\/(?:a|v|b|salon|venue|providers)\//i) && !card.querySelector('[data-qa="venue-card"]')) return;
-                    if (isYelp && !href.includes('/biz/')) return;
-                    if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review') && !href.includes('/Attraction_Review')) return;
-
-                    if (href === currUrl.split('?')[0] || href.match(/\/search(?:results)?\b/i) || href.match(/\/find\b/i)) return;
-                    if (isAirbnb && (href.includes('/s/') || href.includes('/homes'))) return;
-                    if (href.match(/\/(?:login|signin|signup|register|auth|terms|privacy|cookie|about|contact|help|faq)\b/i)) return;
-                    if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
-
-                    if (seenUrlsOnPage.has(href)) return;
-                    seenUrlsOnPage.add(href);
-
-                    card.setAttribute('data-mavon-card', href);
-
-                    // Title extraction
-                    let title = '';
-                    let titleEl = card.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4, .title, a.booking-link, [class*="t1jqs7"]');
-                    if (titleEl) {
-                        title = (titleEl.innerText || titleEl.textContent || '').trim();
-                    }
-
-                    const aria = (linkEl.getAttribute('aria-label') || card.getAttribute('aria-label') || '').trim();
-                    if ((!title || junkRegex.test(title)) && aria) {
-                        title = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
-                    }
-
-                    if (!title || junkRegex.test(title)) {
-                        const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(s => s.length >= 3 && !junkRegex.test(s));
-                        if (lines.length > 0) title = lines[0];
-                    }
-
-                    if (!title || title.length < 3 || junkRegex.test(title)) return;
-
-                    // Address / Subtitle
-                    let address = '';
-                    const subEls = Array.from(card.querySelectorAll('[data-testid="listing-card-subtitle"], [data-qa="venue-address"], .subtitle, [class*="subtitle"], address, [class*="address"], [class*="locality"], [class*="location"]'));
-                    for (const el of subEls) {
-                        const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-                        if (txt && !txt.match(/\b\d+\s*(?:km|kilometres?|miles?)\s*away\b/i) &&
-                            !txt.match(/\b\d+[-–]\d+\s+[A-Za-z]+\b/) &&
-                            !txt.match(/^(?:individual host|superhost|entire\s+|private\s+room)/i) &&
-                            txt.length >= 3) {
-                            address = txt;
-                            break;
-                        }
-                    }
-                    if (!address && title) {
-                        const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
-                        if (inMatch && inMatch[1].trim().length >= 3) {
-                            address = inMatch[1].trim();
-                        }
-                    }
-
-                    // Rating & Reviews
-                    let ratingVal = 0.0;
-                    let revCount = 0;
-                    const rBadge = card.querySelector('[data-qa="rating-badge"], [aria-label*="rating"], [aria-label*="star"], [class*="rating"], span.r1dxllyb, span.ceNzKf');
-                    const rBadgeText = rBadge ? (rBadge.getAttribute('aria-label') || rBadge.innerText || '') : '';
-                    const textToScan = (rBadgeText + ' ' + aria + ' ' + (card.innerText || '')).replace(/\s+/g, ' ');
-
-                    let mRate = textToScan.match(/(?:rated\s+|rating:?\s*|score:?\s*|★\s*)([0-5](?:\.\d+)?)/i);
-                    if (!mRate) mRate = textToScan.match(/\b([0-5](?:\.\d+)?)\s*(?:★|\/5\b|out of 5\b|\bstar(?:s)?\b)/i);
-                    if (!mRate) mRate = textToScan.match(/\b([1-5]\.\d{1,2})\b/);
-                    if (mRate) ratingVal = parseFloat(mRate[1]);
-
-                    const revEl = card.querySelector('[data-qa="reviews-count"], .review-count, [class*="review"], [class*="count"]');
-                    const revText = revEl ? (revEl.innerText || revEl.getAttribute('aria-label') || '') : '';
-                    const revScan = (revText + ' ' + textToScan);
-                    const mk = revScan.match(/\(?\s*(\d+(?:\.\d+)?)\s*k\s*(?:reviews?|ratings?|votes?)?\s*\)?/i);
-                    if (mk && (revScan.toLowerCase().includes('k review') || revScan.toLowerCase().includes('k rating') || mk[0].includes('('))) {
-                        revCount = Math.round(parseFloat(mk[1]) * 1000);
-                    } else {
-                        const mRev = revScan.match(/(?:from\s*|\(|\b)(\d[\d,]*)\s*(?:reviews?|ratings?|votes?)\b/i) ||
-                                     revScan.match(/[0-5](?:\.\d+)?\s*\(\s*(\d[\d,]*)\s*\)/) ||
-                                     revScan.match(/(?:average\s*rating,?\s*|from\s*)(\d[\d,]*)/i);
-                        if (mRev) revCount = parseInt(mRev[1].replace(/,/g, ''), 10);
-                    }
-
-                    // Price
-                    let priceText = '';
-                    const priceEl = card.querySelector('[data-testid*="price"], [data-qa="price"], .price, [class*="_11jcbg2"], [class*="price"]');
-                    if (priceEl) priceText = (priceEl.innerText || '').replace(/[\r\n]+/g, ' ').trim();
-                    if (!priceText) {
-                        const pMatch = textToScan.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+(?:\s*(?:\/|\s+per\s+)?(?:night|total|person|stay))?/i);
-                        if (pMatch) priceText = pMatch[0];
-                    }
-                    if (priceText && !priceText.toLowerCase().includes('night') && !priceText.toLowerCase().includes('total')) {
-                        if (textToScan.toLowerCase().includes('night')) priceText = priceText + ' / night';
-                    }
-
-                    results.push({
-                        title: title.replace(/[\r\n]+/g, ' ').trim(),
-                        url: href,
-                        address: address,
-                        rating: ratingVal,
-                        reviews_count: revCount,
-                        price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
-                        screenshot: ""
-                    });
-                });
-
-                return results;
-            }""")
-
-            new_in_pass = 0
-            for item in current_batch:
-                u = item.get("url")
-                if u and u not in seen_listing_urls:
-                    seen_listing_urls.add(u)
-                    item["card_index"] = len(extracted_listings)
-                    extracted_listings.append(item)
-                    new_in_pass += 1
-
-            emit_event("log", f"📜 [Tab 4 - {p_name}] Scroll pass {scroll_pass}: Found {len(extracted_listings)}/{max_results} listings ({new_in_pass} new in this view).")
+            final_plat_total = max(detected_total, max_results if max_results > 0 else 15)
+            platform_totals[p_name] = final_plat_total
+            emit_event("proximity_total", {
+                "platform": p_name,
+                "query": category,
+                "location": location_name,
+                "total": final_plat_total
+            })
             emit_event("platform_progress", {
                 "platform": p_name,
-                "scraped": len(extracted_listings),
-                "skipped": plat_skipped,
-                "total": plat_total,
-                "percent": min(100, round((len(extracted_listings) / max(1, plat_total)) * 100))
+                "scraped": 0,
+                "skipped": 0,
+                "total": final_plat_total,
+                "percent": 0
             })
+            emit_event("log", f"🎯 [Proximity Census Result] {p_name} reports ~{final_plat_total} businesses/listings in {location_name}.")
 
-            if len(extracted_listings) >= max_results:
-                emit_event("log", f"🎯 [Tab 4 - {p_name}] Reached target quota of {max_results} listings!")
-                break
+        emit_event("log", "✅ Proximity Census Complete across all selected platforms. Beginning sequential harvesting...")
 
-            if new_in_pass == 0:
-                consecutive_stagnant += 1
-                if consecutive_stagnant >= 4:
-                    # Check for pagination Next button
-                    has_next = await platform_page.evaluate("""() => {
-                        const nextBtn = document.querySelector('a[aria-label="Next"], a[data-qa="pagination-next"], a[rel="next"], [class*="pagination-next"]');
-                        if (nextBtn) { nextBtn.click(); return true; }
-                        return false;
-                    }""")
-                    if has_next:
-                        emit_event("log", f"➡️ [Tab 4 - {p_name}] Triggered next pagination page...")
-                        await platform_page.wait_for_timeout(1500)
-                        consecutive_stagnant = 0
-                        continue
-                    else:
-                        emit_event("log", f"🏁 [Tab 4 - {p_name}] Reached end of directory results ({len(extracted_listings)} listings discovered).")
-                        break
-            else:
-                consecutive_stagnant = 0
-
-            # Scroll dynamically down page to trigger next proximity listings to render
-            await platform_page.evaluate("window.scrollBy({top: 1100, behavior: 'smooth'})")
-            await platform_page.wait_for_timeout(600)
-
-        emit_event("log", f"🟣 [Tab 4 - {p_name}] Total harvested listings from {p_name}: {len(extracted_listings)}.")
-
-        # Capture crisp screenshot of platform details for discovered listing cards (NOT room/venue photos)
-        ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
-        os.makedirs(ss_dir, exist_ok=True)
-        for cand in extracted_listings[:max_results]:
-            c_idx = cand.get("card_index", 0)
-            c_title = cand.get("title", "")
-            c_url = cand.get("url", "")
-            clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', c_title or p_name)[:25]
-            ss_file = f"{p_name}_{clean_fn}_{c_idx}_{int(time.time())}.jpg"
-            ss_full = os.path.join(ss_dir, ss_file)
+        # =========================================================================
+        # PHASE 2: SEQUENTIAL HARVESTING & CARD CLICKING (1 Platform After Another)
+        # =========================================================================
+        for plat_idx, p_name in enumerate(active_clean_platforms, 1):
             try:
-                card_loc = platform_page.locator(f'[data-mavon-card="{c_url}"]').first
-                if await card_loc.count() > 0:
-                    await card_loc.scroll_into_view_if_needed(timeout=1000)
-                    await platform_page.wait_for_timeout(150)
-                    # Hide photo carousel/images within card so the screenshot captures ONLY details and things on the platform
-                    await card_loc.evaluate("""el => {
-                        el.querySelectorAll('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img').forEach(img => {
-                            img.style.display = 'none';
+                target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
+                plat_total = platform_totals.get(p_name, max_results)
+                plat_scraped = 0
+                plat_skipped = 0
+
+                emit_event("status", f"Platform Scout [{plat_idx}/{len(active_clean_platforms)}]: Harvesting {p_name} in '{location_name}'...")
+                emit_event("log", f"🟣 [Tab 4 - Stage {plat_idx}/{len(active_clean_platforms)}] Harvesting {p_name} for '{category}' in '{location_name}'...")
+                emit_event("platform_navigated", {"url": target_url, "title": f"{p_name}: {category} in {location_name}", "platform": p_name})
+
+                try:
+                    if platform_page.url != target_url:
+                        await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+                        try:
+                            await platform_page.wait_for_load_state("load", timeout=3500)
+                        except Exception:
+                            pass
+                        await platform_page.wait_for_timeout(1000)
+                except Exception as nav_e:
+                    emit_event("log", f"⚠️ [Tab 4 - {p_name}] Navigation notice: {str(nav_e)[:60]}")
+
+                # Show HUD on Tab 4
+                try:
+                    safe_loc = re.sub(r'[\'\"]', '', location_name)[:25]
+                    await platform_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform: {p_name}', 'Harvesting {category} in {safe_loc}...', '#a855f7')")
+                except Exception:
+                    pass
+
+                # 1. Accept cookies & handle anti-bot on directory page
+                try:
+                    await detect_and_handle_cookies(platform_page)
+                except Exception:
+                    pass
+                try:
+                    await attempt_turnstile_solve(platform_page)
+                except Exception:
+                    pass
+
+                # 2. Dismiss any blocking dialogs, currency selectors, sign-in banners, or location modals
+                try:
+                    await platform_page.evaluate("""() => {
+                        const dismiss = [
+                            'button[aria-label="Close"]', 'button[aria-label*="close" i]',
+                            'button[data-testid*="modal-close"]', 'button[data-testid="modal-container-close"]',
+                            'div[aria-label="Close"]', '.modal-close', 'button.close',
+                            '[data-qa*="close"]', 'button[aria-label="Dismiss"]'
+                        ];
+                        for (const sel of dismiss) {
+                            document.querySelectorAll(sel).forEach(el => { try { el.click(); } catch(e){} });
+                        }
+                        // Check button text safely without pseudo-selectors
+                        document.querySelectorAll('button').forEach(b => {
+                            const t = (b.innerText || '').toLowerCase().trim();
+                            if (t === 'accept' || t === 'agree' || t === 'ok' || t === 'continue without supporting') {
+                                try { b.click(); } catch(e){}
+                            }
                         });
                     }""")
-                    await card_loc.screenshot(path=ss_full, quality=80, type="jpeg")
-                    if os.path.exists(ss_full):
-                        cand["screenshot"] = f"/screenshots/{ss_file}"
-            except Exception:
-                pass
-
-        # Save discovered listings into database with PRE-CHECK DEDUPLICATION
-        saved_count = 0
-        for cand in extracted_listings[:max_results]:
-            c_title = cand.get("title", "")
-            if not c_title:
-                continue
-            c_url = cand.get("url", target_url)
-
-            # Pre-check if listing is already indexed in database
-            if is_platform_listing_already_scraped(p_name, c_title, c_url, dedup_cache):
-                plat_skipped += 1
-                emit_event("lead_skipped", {
-                    "platform": p_name,
-                    "name": c_title,
-                    "reason": "Already in database",
-                    "scraped": plat_scraped,
-                    "skipped": plat_skipped,
-                    "total": plat_total
-                })
-                emit_event("platform_progress", {
-                    "platform": p_name,
-                    "scraped": plat_scraped,
-                    "skipped": plat_skipped,
-                    "total": plat_total,
-                    "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
-                })
-                continue
-            c_addr = cand.get("address")
-            if not c_addr or len(c_addr) < 3:
-                c_addr = f"{location_name}, Proximity Radius"
-            elif location_name.lower() not in c_addr.lower():
-                c_addr = f"{c_addr}, {location_name}"
-
-            cand_data = {
-                "platform": p_name,
-                "title": c_title,
-                "clean_brand": extract_core_brand_name(c_title, city=location_name),
-                "url": cand.get("url", target_url),
-                "booking_url": cand.get("booking_url", cand.get("url", target_url)),
-                "rating": cand.get("rating", 0.0),
-                "reviews_count": cand.get("reviews_count", 0),
-                "price_info": cand.get("price_info", ""),
-                "address": c_addr,
-                "screenshot": cand.get("screenshot", ""),
-                "verified": 0
-            }
-            save_platform_listing(cand_data)
-            saved_count += 1
-            plat_scraped += 1
-            if dedup_cache:
-                dedup_cache["listings_titles"].add(c_title.strip().lower())
-                dedup_cache["listings_urls"].add(c_url.split('?')[0].rstrip('/'))
-            emit_event("platform_progress", {
-                "platform": p_name,
-                "scraped": plat_scraped,
-                "skipped": plat_skipped,
-                "total": plat_total,
-                "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
-            })
-            emit_event("platform_listing_found", {
-                "lead_id": None,
-                "company_name": c_title,
-                "platform": p_name,
-                "rating": cand.get("rating", 0.0),
-                "review_count": cand.get("reviews_count", 0),
-                "listing_url": cand.get("url", target_url),
-                "booking_url": cand.get("url", target_url),
-                "price_range": cand.get("price_info", ""),
-                "verified": False
-            })
-
-        emit_event("log", f"🟣 [Tab 4 - {p_name}] Stored {saved_count} listings in database for '{location_name}'.")
-
-        # Deep detail inspection for top 2 listings
-        for deep_cand in extracted_listings[:2]:
-            deep_url = deep_cand.get("url")
-            if deep_url and deep_url.startswith("http") and deep_url != target_url:
-                try:
-                    emit_event("log", f"🔍 [Tab 4 Deep Details] Inspecting: {deep_cand.get('title')[:30]}...")
-                    await platform_page.goto(deep_url, wait_until="domcontentloaded", timeout=12000)
-                    await platform_page.wait_for_timeout(1000)
-
-                    # Scroll past hero photo gallery directly to the details, specs, amenities & booking section
-                    try:
-                        await platform_page.evaluate("""() => {
-                            // Minimize/hide giant photo gallery banner so details take center stage
-                            const gallery = document.querySelector('[data-section-id="OVERVIEW_DEFAULT"], [data-testid="pdp-gallery-container"], .photo-gallery-banner');
-                            if (gallery) {
-                                gallery.style.maxHeight = '120px';
-                                gallery.style.overflow = 'hidden';
-                                gallery.style.opacity = '0.3';
-                            }
-                            // Scroll to listing details, description, amenities, and price section
-                            const detailsTarget = document.querySelector(
-                                '[data-section-id="DESCRIPTION_DEFAULT"], ' +
-                                '[data-section-id="OVERVIEW_DEFAULT_V2"], ' +
-                                '[data-section-id="TITLE_DEFAULT"], ' +
-                                '[data-testid="pdp-overview-default"], ' +
-                                '#site-content, main, [data-qa="venue-services"], ' +
-                                '#reviews, .overview-section, .listing-details, #property-details'
-                            );
-                            if (detailsTarget) {
-                                detailsTarget.scrollIntoView({ block: 'start' });
-                            } else {
-                                window.scrollBy({ top: 480 });
-                            }
-                        }""")
-                        await platform_page.wait_for_timeout(600)
-                    except Exception:
-                        pass
-
-                    # Capture crisp screenshot of directory listing details (NOT room/venue photos)
-                    ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
-                    os.makedirs(ss_dir, exist_ok=True)
-                    clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', deep_cand.get("title", p_name))[:25]
-                    ss_file = f"{p_name}_{clean_fn}_{int(time.time())}.jpg"
-                    ss_full = os.path.join(ss_dir, ss_file)
-                    try:
-                        await platform_page.screenshot(path=ss_full, quality=80, type="jpeg")
-                    except Exception:
-                        pass
-
-                    deep_specs = await platform_page.evaluate(r"""() => {
-                        const out = { phone: '', address: '', booking_url: window.location.href, price_info: '' };
-                        const tel = document.querySelector('a[href^="tel:"]');
-                        if (tel) out.phone = (tel.innerText || tel.href.replace('tel:', '')).trim();
-                        const addrEl = document.querySelector('[data-qa="venue-address"], address, [itemprop="address"], .venue-address, .address');
-                        if (addrEl) out.address = (addrEl.innerText || '').replace(/\s+/g, ' ').trim();
-                        const bookBtn = document.querySelector('button[data-qa="book-now"], a[href*="book"], button.book-button, .booking-btn');
-                        if (bookBtn && bookBtn.href) out.booking_url = bookBtn.href;
-                        return out;
-                    }""")
-                    if deep_specs.get("phone") or deep_specs.get("address") or os.path.exists(ss_full):
-                        deep_cand_update = {
-                            "platform": p_name,
-                            "title": deep_cand.get("title"),
-                            "clean_brand": extract_core_brand_name(deep_cand.get("title"), city=location_name),
-                            "url": deep_url,
-                            "booking_url": deep_specs.get("booking_url", deep_url),
-                            "rating": deep_cand.get("rating", 0.0),
-                            "reviews_count": deep_cand.get("reviews_count", 0),
-                            "price_info": deep_cand.get("price_info", ""),
-                            "address": deep_specs.get("address") or f"{location_name}, Proximity Radius",
-                            "screenshot": f"/screenshots/{ss_file}" if os.path.exists(ss_full) else deep_cand.get("screenshot", ""),
-                            "verified": 0
-                        }
-                        save_platform_listing(deep_cand_update)
                 except Exception:
                     pass
+
+                # Abort heavy video playback (e.g. Airbnb background videos) to optimize RAM and speed
+                try:
+                    await platform_page.route("**/*.{mp4,avi,mkv,webm,mp3,wav,ogg}", lambda r: r.abort())
+                except Exception:
+                    pass
+
+                # =====================================================================
+                # PROGRESSIVE MULTI-PASS SCROLLING & DISCOVERY
+                # =====================================================================
+                max_scroll_passes = max(8, min(40, (max_results // 2) + 6))
+                consecutive_stagnant = 0
+                extracted_listings = []
+                seen_listing_urls = set()
+
+                emit_event("log", f"📜 [Tab 4 - {p_name}] Beginning progressive scrolling discovery (Target: {max_results} listings)...")
+
+                for scroll_pass in range(1, max_scroll_passes + 1):
+                    # Extract cards currently in DOM
+                    current_batch = await platform_page.evaluate(r"""() => {
+                        const results = [];
+                        const currUrl = window.location.href;
+                        const isAirbnb = currUrl.includes('airbnb');
+                        const isFresha = currUrl.includes('fresha');
+                        const isYelp = currUrl.includes('yelp');
+                        const isTripAdvisor = currUrl.includes('tripadvisor');
+
+                        const junkRegex = /^(?:filters?|filter\s*\(?\d*\)?|show\s+map|map|search|clear\s+all|explore|instant\s+book|rooms\s+and\s+beds|property\s+type|amenities|sort\s+by|guest\s+favorites?|menu|view\s+in\s+map|sign\s+in|log\s+in|navigation|next|previous|page\s+\d+|categories|ratings?|prices?|display\s+total|share|save)$/i;
+
+                        let cardSelectors = [];
+                        if (isAirbnb) {
+                            cardSelectors = ['div[data-testid="card-container"]', 'div[itemprop="itemListElement"]', 'div[aria-labelledby*="title_"]', 'div[class*="c4mnd7m"]', 'a[href*="/rooms/"]'];
+                        } else if (isFresha) {
+                            cardSelectors = ['div[data-qa="venue-card"]', 'div.venue-card', 'a[href*="/a/"]', 'a[href*="/v/"]', 'a[href*="/b/"]', '[class*="venueCard"]', 'article'];
+                        } else if (isYelp) {
+                            cardSelectors = ['div[data-testid="serp-ia-card"]', 'li.border-color--default__09f24__Nrmcg', 'div.container__09f24__FeTO7', 'div[class*="container__"]'];
+                        } else if (isTripAdvisor) {
+                            cardSelectors = ['div.listing_details', 'div.listItem', 'div[data-automation="hotel-card-title"]', 'div.result-card', 'div[data-block-id]', 'div[class*="listItem"]'];
+                        } else {
+                            cardSelectors = [
+                                'article', '[role="article"]',
+                                'div[data-testid*="property-card"]', 'div[data-testid*="listing"]', 'div[data-testid*="card"]', 'div[data-testid*="result"]',
+                                'div[itemprop="itemListElement"]', 'li[itemprop="itemListElement"]',
+                                'div.search-result', 'li.search-result', 'div.search-result-card', 'div.search-item',
+                                'div.venue-card', 'div.place-card', 'div.businessCard', 'div.listing-card', 'div.result-card',
+                                'div.directory-card', 'div.directory-item', 'div.store-card', 'div.vendor-card',
+                                'div.property-card', 'a.property-card'
+                            ];
+                        }
+
+                        let cards = Array.from(document.querySelectorAll(cardSelectors.join(', ')));
+
+                        if (cards.length === 0) {
+                            const headingLinks = document.querySelectorAll('main h2 a, main h3 a, main h4 a, #root h2 a, #root h3 a, body h2 a, body h3 a');
+                            const seenContainers = new Set();
+                            headingLinks.forEach(hl => {
+                                const cont = hl.closest('article, [class*="card"], [class*="item"], [class*="listing"], [class*="result"], li, div');
+                                if (cont && !seenContainers.has(cont) && cont !== document.body && cont !== document.documentElement) {
+                                    seenContainers.add(cont);
+                                    cards.push(cont);
+                                }
+                            });
+                        }
+
+                        const seenUrlsOnPage = new Set();
+
+                        cards.forEach((card, c_idx) => {
+                            let linkEl = null;
+                            if (card.matches('a')) {
+                                linkEl = card;
+                            } else {
+                                if (isAirbnb) {
+                                    linkEl = card.querySelector('a[href*="/rooms/"]');
+                                } else if (isFresha) {
+                                    linkEl = card.querySelector('a[href*="/a/"], a[href*="/v/"], a[href*="/b/"], a[href*="/salon/"], a[href*="/venue/"], a[data-qa="venue-name-link"]');
+                                } else if (isYelp) {
+                                    linkEl = card.querySelector('a[href*="/biz/"]');
+                                } else if (isTripAdvisor) {
+                                    linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"], a[href*="/Attraction_Review"], a[href*="/VacationRentalReview"]');
+                                }
+                                if (!linkEl) {
+                                    linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
+                                }
+                                if (!linkEl) {
+                                    linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
+                                }
+                            }
+
+                            if (!linkEl || !linkEl.href) return;
+                            let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
+
+                            if (isAirbnb && !href.includes('/rooms/')) return;
+                            if (isFresha && !href.match(/\/(?:a|v|b|salon|venue|providers)\//i) && !card.querySelector('[data-qa="venue-card"]')) return;
+                            if (isYelp && !href.includes('/biz/')) return;
+                            if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review') && !href.includes('/Attraction_Review')) return;
+
+                            if (href === currUrl.split('?')[0] || href.match(/\/search(?:results)?\b/i) || href.match(/\/find\b/i)) return;
+                            if (isAirbnb && (href.includes('/s/') || href.includes('/homes'))) return;
+                            if (href.match(/\/(?:login|signin|signup|register|auth|terms|privacy|cookie|about|contact|help|faq)\b/i)) return;
+                            if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+                            if (seenUrlsOnPage.has(href)) return;
+                            seenUrlsOnPage.add(href);
+
+                            card.setAttribute('data-mavon-card', c_idx.toString());
+
+                            // Title extraction
+                            let title = '';
+                            let titleEl = card.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4, .title, a.booking-link, [class*="t1jqs7"]');
+                            if (titleEl) {
+                                title = (titleEl.innerText || titleEl.textContent || '').trim();
+                            }
+
+                            const aria = (linkEl.getAttribute('aria-label') || card.getAttribute('aria-label') || '').trim();
+                            if ((!title || junkRegex.test(title)) && aria) {
+                                title = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
+                            }
+
+                            if (!title || junkRegex.test(title)) {
+                                const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(s => s.length >= 3 && !junkRegex.test(s));
+                                if (lines.length > 0) title = lines[0];
+                            }
+
+                            if (!title || title.length < 3 || junkRegex.test(title)) return;
+
+                            // Address / Subtitle
+                            let address = '';
+                            const subEls = Array.from(card.querySelectorAll('[data-testid="listing-card-subtitle"], [data-qa="venue-address"], .subtitle, [class*="subtitle"], address, [class*="address"], [class*="locality"], [class*="location"]'));
+                            for (const el of subEls) {
+                                const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                                if (txt && !txt.match(/\b\d+\s*(?:km|kilometres?|miles?)\s*away\b/i) &&
+                                    !txt.match(/\b\d+[-–]\d+\s+[A-Za-z]+\b/) &&
+                                    !txt.match(/^(?:individual host|superhost|entire\s+|private\s+room)/i) &&
+                                    txt.length >= 3) {
+                                    address = txt;
+                                    break;
+                                }
+                            }
+                            if (!address && title) {
+                                const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
+                                if (inMatch && inMatch[1].trim().length >= 3) {
+                                    address = inMatch[1].trim();
+                                }
+                            }
+
+                            // Rating & Reviews
+                            let ratingVal = 0.0;
+                            let revCount = 0;
+                            const rBadge = card.querySelector('[data-qa="rating-badge"], [aria-label*="rating"], [aria-label*="star"], [class*="rating"], span.r1dxllyb, span.ceNzKf');
+                            const rBadgeText = rBadge ? (rBadge.getAttribute('aria-label') || rBadge.innerText || '') : '';
+                            const textToScan = (rBadgeText + ' ' + aria + ' ' + (card.innerText || '')).replace(/\s+/g, ' ');
+
+                            let mRate = textToScan.match(/(?:rated\s+|rating:?\s*|score:?\s*|★\s*)([0-5](?:\.\d+)?)/i);
+                            if (!mRate) mRate = textToScan.match(/\b([0-5](?:\.\d+)?)\s*(?:★|\/5\b|out of 5\b|\bstar(?:s)?\b)/i);
+                            if (!mRate) mRate = textToScan.match(/\b([1-5]\.\d{1,2})\b/);
+                            if (mRate) ratingVal = parseFloat(mRate[1]);
+
+                            const revEl = card.querySelector('[data-qa="reviews-count"], .review-count, [class*="review"], [class*="count"]');
+                            const revText = revEl ? (revEl.innerText || revEl.getAttribute('aria-label') || '') : '';
+                            const revScan = (revText + ' ' + textToScan);
+                            const mk = revScan.match(/\(?\s*(\d+(?:\.\d+)?)\s*k\s*(?:reviews?|ratings?|votes?)?\s*\)?/i);
+                            if (mk && (revScan.toLowerCase().includes('k review') || revScan.toLowerCase().includes('k rating') || mk[0].includes('('))) {
+                                revCount = Math.round(parseFloat(mk[1]) * 1000);
+                            } else {
+                                const mRev = revScan.match(/(?:from\s*|\(|\b)(\d[\d,]*)\s*(?:reviews?|ratings?|votes?)\b/i) ||
+                                             revScan.match(/[0-5](?:\.\d+)?\s*\(\s*(\d[\d,]*)\s*\)/) ||
+                                             revScan.match(/(?:average\s*rating,?\s*|from\s*)(\d[\d,]*)/i);
+                                if (mRev) revCount = parseInt(mRev[1].replace(/,/g, ''), 10);
+                            }
+
+                            // Price
+                            let priceText = '';
+                            const priceEl = card.querySelector('[data-testid*="price"], [data-qa="price"], .price, [class*="_11jcbg2"], [class*="price"]');
+                            if (priceEl) priceText = (priceEl.innerText || '').replace(/[\r\n]+/g, ' ').trim();
+                            if (!priceText) {
+                                const pMatch = textToScan.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+(?:\s*(?:\/|\s+per\s+)?(?:night|total|person|stay))?/i);
+                                if (pMatch) priceText = pMatch[0];
+                            }
+                            if (priceText && !priceText.toLowerCase().includes('night') && !priceText.toLowerCase().includes('total')) {
+                                if (textToScan.toLowerCase().includes('night')) priceText = priceText + ' / night';
+                            }
+
+                            results.push({
+                                card_dom_idx: c_idx,
+                                title: title.replace(/[\r\n]+/g, ' ').trim(),
+                                url: href,
+                                address: address,
+                                rating: ratingVal,
+                                reviews_count: revCount,
+                                price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
+                                screenshot: ""
+                            });
+                        });
+
+                        return results;
+                    }""")
+
+                    new_in_pass = 0
+                    for item in current_batch:
+                        u = item.get("url")
+                        if u and u not in seen_listing_urls:
+                            seen_listing_urls.add(u)
+                            item["card_index"] = len(extracted_listings)
+                            extracted_listings.append(item)
+                            new_in_pass += 1
+
+                    emit_event("log", f"📜 [Tab 4 - {p_name}] Scroll pass {scroll_pass}: Found {len(extracted_listings)}/{max_results} listings ({new_in_pass} new in this view).")
+                    emit_event("platform_progress", {
+                        "platform": p_name,
+                        "scraped": len(extracted_listings),
+                        "skipped": plat_skipped,
+                        "total": plat_total,
+                        "percent": min(100, round((len(extracted_listings) / max(1, plat_total)) * 100))
+                    })
+
+                    if len(extracted_listings) >= max_results:
+                        emit_event("log", f"🎯 [Tab 4 - {p_name}] Reached target quota of {max_results} listings!")
+                        break
+
+                    if new_in_pass == 0:
+                        consecutive_stagnant += 1
+                        if consecutive_stagnant >= 4:
+                            has_next = await platform_page.evaluate("""() => {
+                                const nextBtn = document.querySelector('a[aria-label="Next"], a[data-qa="pagination-next"], a[rel="next"], [class*="pagination-next"]');
+                                if (nextBtn) { nextBtn.click(); return true; }
+                                return false;
+                            }""")
+                            if has_next:
+                                emit_event("log", f"➡️ [Tab 4 - {p_name}] Triggered next pagination page...")
+                                await platform_page.wait_for_timeout(1500)
+                                consecutive_stagnant = 0
+                                continue
+                            else:
+                                emit_event("log", f"🏁 [Tab 4 - {p_name}] Reached end of directory results ({len(extracted_listings)} listings discovered).")
+                                break
+                    else:
+                        consecutive_stagnant = 0
+
+                    await platform_page.evaluate("window.scrollBy({top: 1100, behavior: 'smooth'})")
+                    await platform_page.wait_for_timeout(600)
+
+                emit_event("log", f"🟣 [Tab 4 - {p_name}] Total harvested listings from {p_name}: {len(extracted_listings)}.")
+
+                # =====================================================================
+                # CARD CLICKING & VERIFIED DETAILS INSPECTION
+                # Clicks each card, highlights it visually, captures detail screenshots
+                # =====================================================================
+                ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
+                os.makedirs(ss_dir, exist_ok=True)
+
+                saved_count = 0
+                for cand in extracted_listings[:max_results]:
+                    c_title = cand.get("title", "")
+                    if not c_title:
+                        continue
+                    c_url = cand.get("url", target_url)
+                    c_idx = cand.get("card_index", 0)
+                    dom_idx = cand.get("card_dom_idx", c_idx)
+
+                    # Deduplication pre-check
+                    if is_platform_listing_already_scraped(p_name, c_title, c_url, dedup_cache):
+                        plat_skipped += 1
+                        emit_event("lead_skipped", {
+                            "platform": p_name,
+                            "name": c_title,
+                            "reason": "Already in database",
+                            "scraped": plat_scraped,
+                            "skipped": plat_skipped,
+                            "total": plat_total
+                        })
+                        emit_event("platform_progress", {
+                            "platform": p_name,
+                            "scraped": plat_scraped,
+                            "skipped": plat_skipped,
+                            "total": plat_total,
+                            "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
+                        })
+                        continue
+
+                    # Visual highlight and click on card
+                    emit_event("log", f"👉 [Tab 4 Click #{c_idx + 1}] Inspecting {p_name} card: {c_title}")
+                    emit_event("status", f"Platform #{c_idx + 1}: {c_title}")
+
+                    clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', c_title or p_name)[:25]
+                    ss_file = f"{p_name}_{clean_fn}_{c_idx}_{int(time.time())}.jpg"
+                    ss_full = os.path.join(ss_dir, ss_file)
+
+                    try:
+                        card_loc = platform_page.locator(f'[data-mavon-card="{dom_idx}"]').first
+                        if await card_loc.count() > 0:
+                            await card_loc.scroll_into_view_if_needed(timeout=1000)
+                            await platform_page.wait_for_timeout(150)
+
+                            # Visual highlight card using extension bridge
+                            try:
+                                await card_loc.evaluate(f"el => window.MavonScraper && window.MavonScraper.highlight(el, 'Inspecting #{c_idx + 1}')")
+                            except Exception:
+                                pass
+
+                            # Hide photo carousel/images within card so the screenshot captures ONLY details and things on the platform
+                            await card_loc.evaluate("""el => {
+                                el.querySelectorAll('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img').forEach(img => {
+                                    img.style.display = 'none';
+                                });
+                            }""")
+
+                            # Screenshot listing card details
+                            await card_loc.screenshot(path=ss_full, quality=80, type="jpeg")
+                            if os.path.exists(ss_full):
+                                cand["screenshot"] = f"/screenshots/{ss_file}"
+                    except Exception as card_e:
+                        pass
+
+                    c_addr = cand.get("address")
+                    if not c_addr or len(c_addr) < 3:
+                        c_addr = f"{location_name}, Proximity Radius"
+                    elif location_name.lower() not in c_addr.lower():
+                        c_addr = f"{c_addr}, {location_name}"
+
+                    cand_data = {
+                        "platform": p_name,
+                        "title": c_title,
+                        "clean_brand": extract_core_brand_name(c_title, city=location_name),
+                        "url": cand.get("url", target_url),
+                        "booking_url": cand.get("booking_url", cand.get("url", target_url)),
+                        "rating": cand.get("rating", 0.0),
+                        "reviews_count": cand.get("reviews_count", 0),
+                        "price_info": cand.get("price_info", ""),
+                        "address": c_addr,
+                        "screenshot": cand.get("screenshot", ""),
+                        "verified": 0
+                    }
+                    save_platform_listing(cand_data)
+                    saved_count += 1
+                    plat_scraped += 1
+                    if dedup_cache:
+                        dedup_cache["listings_titles"].add(c_title.strip().lower())
+                        dedup_cache["listings_urls"].add(c_url.split('?')[0].rstrip('/'))
+                    emit_event("platform_progress", {
+                        "platform": p_name,
+                        "scraped": plat_scraped,
+                        "skipped": plat_skipped,
+                        "total": plat_total,
+                        "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
+                    })
+                    emit_event("platform_listing_found", {
+                        "lead_id": None,
+                        "company_name": c_title,
+                        "platform": p_name,
+                        "rating": cand.get("rating", 0.0),
+                        "review_count": cand.get("reviews_count", 0),
+                        "listing_url": cand.get("url", target_url),
+                        "booking_url": cand.get("url", target_url),
+                        "price_range": cand.get("price_info", ""),
+                        "verified": False
+                    })
+
+                emit_event("log", f"🟣 [Tab 4 - {p_name}] Stored {saved_count} listings in database for '{location_name}'.")
+
+            except Exception as plat_err:
+                emit_event("log", f"⚠️ [Tab 4 Error on {p_name}] {type(plat_err).__name__}: {plat_err}")
+                logging.exception(f"Error on platform {p_name}")
+
+    except Exception as worker_err:
+        emit_event("log", f"❌ [Tab 4 Worker Error] {type(worker_err).__name__}: {worker_err}")
+        logging.exception("Platform area worker encountered fatal error")
 
 
 async def run_scraper(
