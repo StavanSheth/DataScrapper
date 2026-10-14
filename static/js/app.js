@@ -1559,6 +1559,16 @@ let placesData = [];
           ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
           : `https://www.google.com/maps/search/${encoded}?hl=en`;
 
+        window.postMessage({
+          source: "mavon_dashboard",
+          action: "START_LIVE_BROWSER_SCRAPING",
+          url: mapsUrl,
+          enable_maps: agentMaps,
+          enable_website: agentWebsite,
+          enable_linkedin: agentLinkedin,
+          enable_platform: agentPlatform,
+          platform_url: platformCustomUrl || null
+        }, "*");
       } catch (e) {}
 
 
@@ -1650,34 +1660,36 @@ let placesData = [];
         const data = await resp.json();
         if (data.active) {
           btn.className = 'btn-chrome-pill';
-          text.innerText = 'Connected to Active Chrome (9222)';
+          text.innerText = 'Connected: Chrome Port 9222';
           btn.title = 'Active Chrome connected on port 9222! Scraper will open tabs inside your existing browser window with all your logins.';
+        } else if (data.extension_active) {
+          btn.className = 'btn-chrome-pill';
+          text.innerText = 'Mavon Extension Active (Synced)';
+          btn.title = 'Mavon Chrome Assistant is connected and live syncing your active browser sessions.';
         } else {
           btn.className = 'btn-chrome-pill disconnected';
-          text.innerText = 'Attach Active Chrome (Port 9222)';
-          btn.title = 'Click to attach your open Chrome window on Port 9222 so all tabs and scraper agents run directly inside your existing browser!';
+          text.innerText = 'Chrome Assistant Ready';
+          btn.title = 'Scraper will run live in a dedicated visible Chrome window. To attach Port 9222, run start_chrome_debug.bat.';
         }
       } catch (e) {
         btn.className = 'btn-chrome-pill disconnected';
-        text.innerText = 'Attach Active Chrome (Port 9222)';
+        text.innerText = 'Chrome Assistant Ready';
       }
     }
 
     async function promptOrLaunchChromeDebug() {
-      const promptMsg = "To attach the scraper directly to your active Chrome browser (with your logins & tabs):\n\n" +
-        "1. Chrome will enable remote debugging on Port 9222.\n" +
-        "2. All your open tabs, extensions, and logins will be restored automatically.\n\n" +
-        "Would you like to attach Chrome on Port 9222 now?";
-      const confirmLaunch = confirm(promptMsg);
-      if (confirmLaunch) {
-        try {
-          const resp = await fetch('/api/chrome/launch', { method: 'POST' });
-          const res = await resp.json();
-          alert(res.message || "Chrome launched! Please wait a moment and check status.");
-          setTimeout(checkChromeDebugStatus, 2500);
-        } catch (e) {
-          alert("Could not automatically launch Chrome: " + e.message + "\\nPlease run start_chrome_debug.bat from the project folder instead.");
+      try {
+        const resp = await fetch('/api/chrome/status');
+        const data = await resp.json();
+        if (data.active) {
+          logMessage("✅ Chrome is actively connected on Remote Debugging Port 9222.");
+        } else if (data.extension_active) {
+          logMessage("🔌 Mavon Chrome Assistant is active! All LinkedIn logins and session cookies are live-synced.");
+        } else {
+          logMessage("ℹ️ Scraper runs live in a dedicated visible Chrome window. To attach your main Chrome window on port 9222, run start_chrome_debug.bat.");
         }
+      } catch (e) {
+        logMessage("ℹ️ Chrome assistant ready.");
       }
     }
 

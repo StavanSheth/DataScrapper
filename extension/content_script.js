@@ -4,21 +4,26 @@
 // ==============================================================================
 
 (function() {
-  // Inject the bridge script into the page's MAIN execution world
+  // Inject the bridge script into the page's MAIN execution world safely
   function injectBridge() {
     try {
+      const target = document.head || document.documentElement;
+      if (!target) return;
       const script = document.createElement("script");
       script.src = chrome.runtime.getURL("injected_bridge.js");
-      script.onload = function() {
-        this.remove();
-      };
-      (document.head || document.documentElement).appendChild(script);
+      script.onload = function() { this.remove(); };
+      script.onerror = function() { this.remove(); };
+      target.appendChild(script);
     } catch (e) {
-      console.error("[Mavon Extension] Bridge injection error:", e);
+      // Silently catch CSP restrictions on strict external domains
     }
   }
 
-  injectBridge();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", injectBridge, { once: true });
+  } else {
+    injectBridge();
+  }
 
   // Listen for Dashboard start message so tabs open directly in this active window
   window.addEventListener("message", (event) => {

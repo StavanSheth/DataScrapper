@@ -92,7 +92,7 @@ async function connect() {
       console.log("[Mavon Extension] Connected to Mavon Dashboard!");
       ws.send(JSON.stringify({
         type: "HELLO",
-        payload: { client: "chrome_extension", version: "2.2.0" }
+        payload: { client: "chrome_extension", version: "2.2.2" }
       }));
       syncLinkedInCookies().catch(() => {});
     };
