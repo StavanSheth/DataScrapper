@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sqlite3
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 JUNK_EMAIL_PATTERNS = [
     re.compile(r"intl-segmenter", re.I),
@@ -896,6 +896,44 @@ def get_all_leads() -> List[Dict[str, Any]]:
         """)
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Finds leads from database that were paused before their website or LinkedIn inspection finished.
+    """
+    pending_web = []
+    pending_li = []
+    with get_connection() as conn:
+        # Leads with a website where email/anti-bot inspection was paused or not done
+        rows_web = conn.execute("""
+            SELECT id, name, address, website
+            FROM leads
+            WHERE website IS NOT NULL AND website != 'N/A' AND website LIKE 'http%'
+              AND (bot_protection = 'Inspecting...' OR (email = 'N/A' AND (bot_protection IS NULL OR bot_protection = 'None')))
+            ORDER BY id ASC
+            LIMIT 50
+        """).fetchall()
+        for r in rows_web:
+            pending_web.append({"index": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]})
+
+        # Leads where LinkedIn employee roster was not yet harvested
+        rows_li = conn.execute("""
+            SELECT id, name, address, website, linkedin
+            FROM leads
+            WHERE (org_scraped = 0 OR org_scraped IS NULL)
+              AND id NOT IN (SELECT DISTINCT lead_id FROM employees WHERE lead_id IS NOT NULL)
+            ORDER BY id ASC
+            LIMIT 50
+        """).fetchall()
+        for r in rows_li:
+            pending_li.append({
+                "index": r[0],
+                "name": r[1],
+                "address": r[2] or "N/A",
+                "website": r[3] if r[3] and r[3] != "N/A" else "",
+                "linkedin_url": r[4] if r[4] and r[4] != "N/A" else ""
+            })
+    return pending_web, pending_li
 
 def get_lead_count() -> int:
     """Return total count of leads in database."""

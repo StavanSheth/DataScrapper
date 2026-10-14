@@ -13,7 +13,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -2138,6 +2138,17 @@ async def run_scraper(
         # Setup Parallel Asynchronous Queues for Tab 2, Tab 3, and Tab 4
         website_queue = asyncio.Queue() if (enable_website and extract_emails) else None
         linkedin_queue = asyncio.Queue() if linkedin_page else None
+
+        # RESUME CAPABILITY: Check for any incomplete leads from a previously paused run
+        pending_web, pending_li = get_pending_resume_leads()
+        if pending_web and website_queue:
+            emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_web)} website inspections left incomplete from previous session...")
+            for pw in pending_web:
+                website_queue.put_nowait(pw)
+        if pending_li and linkedin_queue and not enable_website:
+            emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_li)} LinkedIn org inspections left incomplete from previous session...")
+            for pl in pending_li:
+                linkedin_queue.put_nowait(pl)
         platform_queue = asyncio.Queue() if enable_platform else None
         website_done_event = asyncio.Event()
         linkedin_done_event = asyncio.Event()
@@ -2221,7 +2232,7 @@ async def run_scraper(
 
         emit_event("status", "Extracting places from feed...")
 
-        while (enable_maps and maps_page) and len(scraped_places) < target_max and scroll_attempts < max_scroll_attempts:
+        while (enable_maps and maps_page) and (len(scraped_places) + skipped_count) < target_max and scroll_attempts < max_scroll_attempts:
             links = maps_page.locator('div[role="feed"] a.hfpxzc, div[role="feed"] a[href*="/maps/place/"]')
             count = await links.count()
             if count == 0:
@@ -2231,7 +2242,7 @@ async def run_scraper(
             new_found_this_scroll = 0
 
             for i in range(count):
-                if len(scraped_places) >= target_max:
+                if (len(scraped_places) + skipped_count) >= target_max:
                     break
 
                 try:
