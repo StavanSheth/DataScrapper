@@ -1392,7 +1392,7 @@ function initTableExtRealtime() {
           window.updateSplitData(msg.tables_split);
         } else if (msg.type === 'tables_split') {
           window.updateSplitData(msg.data);
-        } else if (['place_scraped', 'place_updated', 'platform_listing_found', 'org_updated', 'db_cleared'].includes(msg.type)) {
+        } else if (msg.type === 'db_cleared') {
           window.refreshTablesSplit();
         }
       } catch (e) {}
@@ -1406,9 +1406,6 @@ function initTableExtRealtime() {
 window.addEventListener('DOMContentLoaded', () => {
   window.refreshTablesSplit();
   initTableExtRealtime();
-  setInterval(() => {
-    window.refreshTablesSplit();
-  }, 2000);
 });
 
 

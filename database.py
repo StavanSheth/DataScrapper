@@ -240,19 +240,24 @@ def init_db():
                 CREATE VIEW IF NOT EXISTS v_unmatched_maps AS
                 SELECT * FROM leads ORDER BY id DESC;
             """)
+            conn.execute("DROP VIEW IF EXISTS v_website_leads;")
             conn.execute("""
-                CREATE VIEW IF NOT EXISTS v_website_leads AS
+                CREATE VIEW v_website_leads AS
                 SELECT * FROM leads
-                WHERE (website IS NOT NULL AND website != '' AND website != 'N/A')
-                   OR website_status IN ('clean', 'emails_found', 'social', 'failed')
+                WHERE website_status IN ('clean', 'emails_found', 'social', 'failed', 'scraped')
+                   OR (email IS NOT NULL AND email != '' AND email != 'N/A')
+                   OR (instagram IS NOT NULL AND instagram != '')
+                   OR (facebook IS NOT NULL AND facebook != '')
+                   OR (bot_protection IS NOT NULL AND bot_protection != 'N/A' AND bot_protection != 'None')
                 ORDER BY id DESC;
             """)
+            conn.execute("DROP VIEW IF EXISTS v_linkedin_leads;")
             conn.execute("""
-                CREATE VIEW IF NOT EXISTS v_linkedin_leads AS
+                CREATE VIEW v_linkedin_leads AS
                 SELECT * FROM leads
                 WHERE (employee_count IS NOT NULL AND employee_count != '' AND employee_count != '0')
-                   OR (linkedin IS NOT NULL AND linkedin != '' AND linkedin != 'N/A')
                    OR org_scraped > 0
+                   OR linkedin_status IN ('found', 'scraped', 'not_found', 'failed')
                 ORDER BY id DESC;
             """)
         except Exception:
@@ -1646,7 +1651,9 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         w_row["has_website"] = has_w
         w_row["has_email"] = has_e
         w_row["has_socials"] = has_s
-        website_leads.append(w_row)
+        # Only show leads in Website table that have actually been catered/inspected so far
+        if w_tag not in ["Pending in Queue", "No Website on Map"]:
+            website_leads.append(w_row)
 
         # 4. Format LinkedIn Harvester Lead
         li_url = str(l.get("linkedin", "") or l.get("linkedin_url", "") or "").strip()
@@ -1681,7 +1688,9 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         li_row["status_tag"] = li_tag
         li_row["has_linkedin"] = bool(li_url and li_url != "N/A")
         li_row["has_employees"] = bool(org_scraped > 0 or (emp_cnt and emp_cnt != "0"))
-        linkedin_leads.append(li_row)
+        # Only show leads in LinkedIn table that have actually been catered/inspected so far
+        if li_tag != "Pending in Queue":
+            linkedin_leads.append(li_row)
 
     # Format Platform Directory Listings with rich diagnostic status tags
     unmatched_platform = []

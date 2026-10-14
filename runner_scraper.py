@@ -643,20 +643,20 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 tab_page = await context.new_page()
                 await clear_fixed_viewport(tab_page)
                 try:
-                    await tab_page.route("**/*.{mp4,mp3,avi,webm,mkv,wav,ogg,woff,woff2,ttf,eot}", lambda r: r.abort())
+                    await tab_page.route("**/*.{mp4,mp3,avi,webm,mkv,wav,ogg,woff,woff2,ttf,eot,svg,gif}", lambda r: r.abort())
                 except Exception:
                     pass
                 if pages_dict is not None:
                     pages_dict["website"] = tab_page
 
-            # Navigate dedicated tab to shop website with complete DOM & load state wait
+            # Navigate dedicated tab to shop website with complete DOM & load state wait (Fast 7s timeout)
             try:
-                await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=15000)
+                await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=7000)
                 try:
-                    await tab_page.wait_for_load_state("load", timeout=3500)
+                    await tab_page.wait_for_load_state("load", timeout=1500)
                 except Exception:
                     pass
-                await tab_page.wait_for_timeout(800)
+                await tab_page.wait_for_timeout(300)
             except Exception as e:
                 emit_event("log", f"⚠️ Website note on #{idx}: {str(e)[:50]}")
 
@@ -1672,25 +1672,25 @@ async def platform_area_search_worker(
 
                         const seenUrlsOnPage = new Set();
 
-                        cards.forEach((card, c_idx) => {
+                        cards.forEach((initialCard, c_idx) => {
                             let linkEl = null;
-                            if (card.matches('a')) {
-                                linkEl = card;
+                            if (initialCard.matches('a')) {
+                                linkEl = initialCard;
                             } else {
                                 if (isAirbnb) {
-                                    linkEl = card.querySelector('a[href*="/rooms/"]');
+                                    linkEl = initialCard.querySelector('a[href*="/rooms/"]');
                                 } else if (isFresha) {
-                                    linkEl = card.querySelector('a[href*="/a/"], a[href*="/v/"], a[href*="/b/"], a[href*="/salon/"], a[href*="/venue/"], a[data-qa="venue-name-link"]');
+                                    linkEl = initialCard.querySelector('a[href*="/a/"], a[href*="/v/"], a[href*="/b/"], a[href*="/salon/"], a[href*="/venue/"], a[data-qa="venue-name-link"]');
                                 } else if (isYelp) {
-                                    linkEl = card.querySelector('a[href*="/biz/"]');
+                                    linkEl = initialCard.querySelector('a[href*="/biz/"]');
                                 } else if (isTripAdvisor) {
-                                    linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"], a[href*="/Attraction_Review"], a[href*="/VacationRentalReview"]');
+                                    linkEl = initialCard.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"], a[href*="/Attraction_Review"], a[href*="/VacationRentalReview"]');
                                 }
                                 if (!linkEl) {
-                                    linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
+                                    linkEl = initialCard.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
                                 }
                                 if (!linkEl) {
-                                    linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
+                                    linkEl = initialCard.querySelector('a[href^="http"], a[href^="/"]');
                                 }
                             }
 
@@ -1698,7 +1698,7 @@ async def platform_area_search_worker(
                             let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
 
                             if (isAirbnb && !href.includes('/rooms/')) return;
-                            if (isFresha && !href.match(/\/(?:a|v|b|salon|venue|providers)\//i) && !card.querySelector('[data-qa="venue-card"]')) return;
+                            if (isFresha && !href.match(/\/(?:a|v|b|salon|venue|providers)\//i) && !initialCard.querySelector('[data-qa="venue-card"]')) return;
                             if (isYelp && !href.includes('/biz/')) return;
                             if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review') && !href.includes('/Attraction_Review')) return;
 
@@ -1709,6 +1709,18 @@ async def platform_area_search_worker(
 
                             if (seenUrlsOnPage.has(href)) return;
                             seenUrlsOnPage.add(href);
+
+                            // IMPORTANT: Find the real containing card with text and metadata (not an empty overlay link)
+                            let card = initialCard;
+                            if (card.matches('a') || (card.innerText || '').trim().length < 5) {
+                                let parent = linkEl.closest('article, [class*="card"], li, div') || linkEl.parentElement;
+                                while (parent && parent.parentElement && (parent.innerText || '').trim().length < 5) {
+                                    parent = parent.parentElement;
+                                }
+                                if (parent && (parent.innerText || '').trim().length >= 5) {
+                                    card = parent;
+                                }
+                            }
 
                             card.setAttribute('data-mavon-card', c_idx.toString());
 
@@ -1748,6 +1760,15 @@ async def platform_area_search_worker(
                                 const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
                                 if (inMatch && inMatch[1].trim().length >= 3) {
                                     address = inMatch[1].trim();
+                                }
+                            }
+                            if (!address) {
+                                const cardLines = (card.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+                                for (const l of cardLines) {
+                                    if (l !== title && (l.includes('mi ') || l.includes('km ') || l.includes('East') || l.includes('West') || l.includes('Street') || l.includes('Road') || l.includes('Avenue') || l.includes('Nagar') || l.includes('Compound') || l.includes('Colony'))) {
+                                        address = l.replace(/^[0-9\.\s]+(?:mi|km)\s*·?\s*/i, '').trim();
+                                        break;
+                                    }
                                 }
                             }
 
@@ -2230,8 +2251,16 @@ async def run_scraper(
         platform_page = None
 
         if cdp_connected:
-            existing_maps = [p for p in context.pages if "google.com/maps" in p.url]
-            existing_li = [p for p in context.pages if "linkedin.com" in p.url]
+            def is_maps_tab(p):
+                u = p.url.lower()
+                return "/maps" in u or "maps.google" in u
+
+            def is_blank_tab(p):
+                u = p.url.lower()
+                return u in ["about:blank", "chrome://newtab/", "chrome://new-tab-page/", "chrome://newtab"]
+
+            existing_maps = [p for p in context.pages if is_maps_tab(p)]
+            existing_li = [p for p in context.pages if "linkedin.com" in p.url.lower()]
             known_plat_domains = ["fresha.com", "airbnb.com", "yelp.com", "tripadvisor.com", "booking.com", "zomato.com", "justdial.com", "treatwell", "opentable.com", "yellowpages.com"]
             if platform_name and "." in platform_name:
                 known_plat_domains.append(platform_name.lower())
@@ -2261,10 +2290,13 @@ async def run_scraper(
                     except Exception: pass
                 existing_plat = []
 
-            maps_page = existing_maps[0] if (existing_maps and enable_maps) else (await context.new_page() if enable_maps else None)
-            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else (await context.new_page() if enable_linkedin else None)
-            platform_page = existing_plat[0] if (existing_plat and enable_platform) else (await context.new_page() if enable_platform else None)
-            website_page = await context.new_page() if (enable_website and extract_emails) else None
+            used_tabs = set(existing_maps + existing_li + existing_plat)
+            blank_tabs = [p for p in context.pages if is_blank_tab(p) and p not in used_tabs]
+
+            maps_page = existing_maps[0] if (existing_maps and enable_maps) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_maps else None)
+            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_linkedin else None)
+            platform_page = existing_plat[0] if (existing_plat and enable_platform) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_platform else None)
+            website_page = (blank_tabs.pop(0) if blank_tabs else await context.new_page()) if (enable_website and extract_emails) else None
         else:
             pages_avail = list(context.pages)
             maps_page = pages_avail.pop(0) if (enable_maps and pages_avail) else (await context.new_page() if enable_maps else None)
@@ -2347,16 +2379,18 @@ async def run_scraper(
         website_queue = asyncio.Queue() if enable_website else None
         linkedin_queue = asyncio.Queue() if linkedin_page else None
 
-        # RESUME CAPABILITY: Check for any incomplete leads from a previously paused run
-        pending_web, pending_li = get_pending_resume_leads()
-        if pending_web and website_queue:
-            emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_web)} website inspections left incomplete from previous session...")
-            for pw in pending_web:
-                website_queue.put_nowait(pw)
-        if pending_li and linkedin_queue:
-            emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_li)} LinkedIn org inspections left incomplete from previous session...")
-            for pl in pending_li:
-                linkedin_queue.put_nowait(pl)
+        # RESUME CAPABILITY: Only resume old incomplete leads if Maps is disabled (dedicated background worker mode)
+        # When Google Maps is running, prioritize the live harvested stream from Maps without old-queue lag!
+        if not enable_maps:
+            pending_web, pending_li = get_pending_resume_leads()
+            if pending_web and website_queue:
+                emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_web)} website inspections left incomplete from previous session...")
+                for pw in pending_web:
+                    website_queue.put_nowait(pw)
+            if pending_li and linkedin_queue:
+                emit_event("log", f"🔄 [Resume Pipeline] Continuing {len(pending_li)} LinkedIn org inspections left incomplete from previous session...")
+                for pl in pending_li:
+                    linkedin_queue.put_nowait(pl)
         platform_queue = asyncio.Queue() if enable_platform else None
         website_done_event = asyncio.Event()
         linkedin_done_event = asyncio.Event()
@@ -2558,7 +2592,7 @@ async def run_scraper(
                             const catBtn = document.querySelector('button.DkEaL, button[jsaction*="category"], div.fontBodyMedium button, span.YhemCb');
                             if (catBtn) {
                                 const cText = catBtn.innerText.trim();
-                                const ignore = ["learn more", "see more", "read more", "claim this business", "suggest an edit", "save", "nearby", "send to phone", "share", "reviews", "photos", "overview", "about", "directions", "copy"];
+                                const ignore = ["learn more", "see more", "read more", "claim this business", "suggest an edit", "save", "nearby", "send to phone", "share", "reviews", "photos", "overview", "about", "directions", "copy", "update results when map moves", "update results", "search this area"];
                                 if (cText && !ignore.some(x => cText.toLowerCase().includes(x))) {
                                     d.category = cText;
                                 }
@@ -2846,7 +2880,7 @@ async def run_scraper(
                     pass
 
             is_continuous = (scrape_all or max_results >= 9999)
-            stagnant_limit = 16 if is_continuous else 8
+            stagnant_limit = 24 if is_continuous else 14
             if consecutive_no_new >= stagnant_limit:
                 emit_event("log", f"No new places loaded after {stagnant_limit} scrolls. All area shops captured.")
                 break
@@ -2855,11 +2889,16 @@ async def run_scraper(
             try:
                 feed = maps_page.locator('div[role="feed"]').first
                 if await feed.is_visible(timeout=1000):
-                    await feed.evaluate("el => el.scrollBy(0, 2000)")
-                    await maps_page.wait_for_timeout(450)
+                    await feed.evaluate("el => { el.scrollBy(0, 3000); el.dispatchEvent(new Event('scroll', { bubbles: true })); }")
+                    if count > 0:
+                        try:
+                            await links.last.scroll_into_view_if_needed(timeout=800)
+                        except Exception:
+                            pass
+                    await maps_page.wait_for_timeout(500)
             except Exception:
-                await maps_page.mouse.wheel(0, 1500)
-                await maps_page.wait_for_timeout(450)
+                await maps_page.mouse.wheel(0, 2000)
+                await maps_page.wait_for_timeout(500)
 
         if enable_maps and maps_page:
             emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
