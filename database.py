@@ -1279,7 +1279,7 @@ def classify_seniority(title: str) -> str:
 
 def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lead_id: int = None, company_linkedin_url: str = "") -> int:
     """Save a batch of employees, updating lead count and LinkedIn URL in leads table."""
-    if not company_name or not employees:
+    if not company_name:
         return 0
 
     saved_count = 0
@@ -1293,40 +1293,42 @@ def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lea
             if row:
                 lead_id = row[0]
 
-        for emp in employees:
-            fname = str(emp.get("full_name", "")).strip()
-            title = str(emp.get("title", "")).strip()
-            if not fname:
-                continue
-            seniority = emp.get("seniority_level") or classify_seniority(title)
-            purl = str(emp.get("linkedin_profile_url", "")).strip()
-            em = str(emp.get("email", "")).strip()
-            loc = str(emp.get("location", "")).strip()
-            av = str(emp.get("avatar_url", "")).strip()
+        if employees:
+            for emp in employees:
+                fname = str(emp.get("full_name", "")).strip()
+                title = str(emp.get("title", "")).strip()
+                if not fname:
+                    continue
+                seniority = emp.get("seniority_level") or classify_seniority(title)
+                purl = str(emp.get("linkedin_profile_url", "")).strip()
+                em = str(emp.get("email", "")).strip()
+                loc = str(emp.get("location", "")).strip()
+                av = str(emp.get("avatar_url", "")).strip()
 
-            try:
-                conn.execute("""
-                    INSERT INTO employees (lead_id, company_name, full_name, title, seniority_level, linkedin_profile_url, email, location, avatar_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(company_name, full_name, title) DO UPDATE SET
-                        seniority_level = excluded.seniority_level,
-                        linkedin_profile_url = CASE WHEN excluded.linkedin_profile_url != '' THEN excluded.linkedin_profile_url ELSE employees.linkedin_profile_url END,
-                        email = CASE WHEN excluded.email != '' THEN excluded.email ELSE employees.email END,
-                        location = CASE WHEN excluded.location != '' THEN excluded.location ELSE employees.location END,
-                        avatar_url = CASE WHEN excluded.avatar_url != '' THEN excluded.avatar_url ELSE employees.avatar_url END
-                """, (lead_id, company_name, fname, title, seniority, purl, em, loc, av))
-                saved_count += 1
-            except Exception:
-                pass
+                try:
+                    conn.execute("""
+                        INSERT INTO employees (lead_id, company_name, full_name, title, seniority_level, linkedin_profile_url, email, location, avatar_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(company_name, full_name, title) DO UPDATE SET
+                            seniority_level = excluded.seniority_level,
+                            linkedin_profile_url = CASE WHEN excluded.linkedin_profile_url != '' THEN excluded.linkedin_profile_url ELSE employees.linkedin_profile_url END,
+                            email = CASE WHEN excluded.email != '' THEN excluded.email ELSE employees.email END,
+                            location = CASE WHEN excluded.location != '' THEN excluded.location ELSE employees.location END,
+                            avatar_url = CASE WHEN excluded.avatar_url != '' THEN excluded.avatar_url ELSE employees.avatar_url END
+                    """, (lead_id, company_name, fname, title, seniority, purl, em, loc, av))
+                    saved_count += 1
+                except Exception:
+                    pass
 
         total_emp = conn.execute("SELECT COUNT(*) FROM employees WHERE company_name = ?", (company_name,)).fetchone()[0]
         conn.execute("""
             UPDATE leads SET
                 employee_count = ?,
                 org_scraped = 1,
-                linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END
+                linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
+                linkedin_status = CASE WHEN ? != '' THEN 'verified' ELSE linkedin_status END
             WHERE name = ? OR (id = ? AND ? IS NOT NULL)
-        """, (str(total_emp), company_linkedin_url, company_linkedin_url, company_name, lead_id, lead_id))
+        """, (str(total_emp), company_linkedin_url, company_linkedin_url, company_linkedin_url, company_name, lead_id, lead_id))
 
         conn.commit()
     return saved_count

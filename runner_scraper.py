@@ -737,10 +737,50 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             except Exception:
                 pass
 
-            # 4. Extract Emails & Social Media Links
+            # 4. Extract Emails & Social Media Links (Universal JSON-LD Schema + DOM Regex)
             fresh_html = await tab_page.content()
             emails = set(extract_emails_from_text(fresh_html))
             socials = extract_socials_from_text(fresh_html)
+
+            # Universal Contract 1: Extract structured Schema.org / JSON-LD metadata
+            try:
+                ld_data = await tab_page.evaluate(r"""() => {
+                    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+                    const ems = [];
+                    const socs = {};
+                    for (const s of scripts) {
+                        try {
+                            const raw = JSON.parse(s.innerText || s.textContent || "{}");
+                            const items = Array.isArray(raw) ? raw : (raw['@graph'] || [raw]);
+                            for (const item of items) {
+                                if (item.email) {
+                                    const em = String(item.email).replace(/^mailto:/i, '').trim();
+                                    if (em.includes('@')) ems.push(em);
+                                }
+                                if (item.sameAs) {
+                                    const links = Array.isArray(item.sameAs) ? item.sameAs : [item.sameAs];
+                                    for (const l of links) {
+                                        const u = String(l).toLowerCase();
+                                        if (u.includes('instagram.com/')) socs['instagram'] = l;
+                                        if (u.includes('facebook.com/')) socs['facebook'] = l;
+                                        if (u.includes('linkedin.com/')) socs['linkedin'] = l;
+                                        if (u.includes('twitter.com/') || u.includes('x.com/')) socs['twitter'] = l;
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    return { emails: ems, socials: socs };
+                }""")
+                if ld_data:
+                    if ld_data.get("emails"):
+                        emails.update(ld_data["emails"])
+                    if ld_data.get("socials"):
+                        for k, v in ld_data["socials"].items():
+                            if not socials.get(k) and v:
+                                socials[k] = v
+            except Exception:
+                pass
 
             # Re-check cookies after scroll
             second_cookie = await detect_and_handle_cookies(tab_page)
@@ -964,9 +1004,9 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 try:
                     await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
                     try:
-                        await tab_page.wait_for_selector('div.org-people-profile-card, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"], .org-people-profiles-module', timeout=5000)
+                        await tab_page.wait_for_selector('div.org-people-profile-card, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"], .org-people-profiles-module, a[href*="/in/"]', timeout=3500)
                     except Exception:
-                        await tab_page.wait_for_timeout(1500)
+                        await tab_page.wait_for_timeout(1000)
                 except Exception as e:
                     emit_event("log", f"⚠️ Navigation note: {str(e)[:50]}")
 
@@ -976,53 +1016,81 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 except Exception:
                     pass
 
-                # Step 3: Progressive DOM scrolling to bypass top insights and reveal employee cards
-                emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery on /people/...")
-                try:
-                    # Scroll down to people module directly if found, or scroll past insights
-                    await tab_page.evaluate(r"""() => {
-                        const target = document.querySelector('.org-people-profiles-module, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"]');
-                        if (target) {
-                            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        } else {
-                            window.scrollBy({ top: 1100, behavior: 'smooth' });
-                        }
-                    }""")
-                    await tab_page.wait_for_timeout(1000)
-                except Exception:
-                    pass
+                # Micro-Business Fast-Exit Check (Company has 0 public employees or redirected away from /people/)
+                curr_p_url = (tab_page.url or "").lower()
+                is_zero_employees = await tab_page.evaluate(r"""() => {
+                    const text = (document.body.innerText || "").toLowerCase();
+                    if (text.includes("0 employees on linkedin") || text.includes("0 people") || text.includes("no people to show")) {
+                        return true;
+                    }
+                    const inLinks = document.querySelectorAll('a[href*="/in/"]:not([href*="linkedin.com/help"])');
+                    if (inLinks.length === 0 && (window.location.href.includes('/about') || !window.location.href.includes('/people'))) {
+                        return true;
+                    }
+                    return false;
+                }""")
 
-                for s_i in range(3):
+                if is_zero_employees or ("/about" in curr_p_url and "/people" not in curr_p_url):
+                    emit_event("log", f"ℹ️ [LinkedIn Fast-Exit] '{core_brand}' is a boutique / micro-business (0 public LinkedIn employees). Bypassing progressive scrolls.")
+                else:
+                    # Step 3: Progressive DOM scrolling to bypass top insights and reveal employee cards
+                    emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery on /people/...")
                     try:
-                        await tab_page.evaluate("window.scrollBy({top: 900})")
-                        await tab_page.wait_for_timeout(400)
+                        await tab_page.evaluate(r"""() => {
+                            const target = document.querySelector('.org-people-profiles-module, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"]');
+                            if (target) {
+                                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            } else {
+                                window.scrollBy({ top: 1100, behavior: 'smooth' });
+                            }
+                        }""")
+                        await tab_page.wait_for_timeout(800)
                     except Exception:
-                        break
+                        pass
 
-                # Step 4: Extract from company /people/ tab
+                    for s_i in range(3):
+                        try:
+                            await tab_page.evaluate("window.scrollBy({top: 900})")
+                            await tab_page.wait_for_timeout(350)
+                        except Exception:
+                            break
+
+                # Step 4: Universal Extract from company /people/ tab
                 emit_event("log", f"🔍 [LinkedIn Step 4/5 - Card Parsing] Extracting employee cards from company directory...")
                 try:
                     raw_extracted = await tab_page.evaluate(r"""() => {
                         const list = [];
+                        const seenUrls = new Set();
                         const seenNames = new Set();
-                        const cards = document.querySelectorAll(
-                            'div.org-people-profile-card, ' +
-                            'li.org-people-profile-card__profile-card-spacing, ' +
-                            'div[data-view-name="org-people-profile-card"], ' +
-                            'ul.org-people-profiles-module__profile-list > li, ' +
-                            '.org-people-profiles-module__profile-list li, ' +
-                            '.entity-result, ' +
-                            'li.reusable-search__result-container'
-                        );
 
-                        cards.forEach(card => {
+                        // Universal extraction: scan all /in/ profile anchors on the page
+                        const profileLinks = document.querySelectorAll('a[href*="/in/"]:not([href*="linkedin.com/help"])');
+                        for (const link of profileLinks) {
+                            const profile = link.href.split('?')[0].replace(/\/+$/, '');
+                            if (!profile || seenUrls.has(profile) || profile.endsWith('/in') || profile.endsWith('/in/')) {
+                                continue;
+                            }
+
+                            const card = link.closest(
+                                'div.org-people-profile-card, ' +
+                                'li.org-people-profile-card__profile-card-spacing, ' +
+                                'div[data-view-name*="people"], ' +
+                                'div[data-view-name="org-people-profile-card"], ' +
+                                'ul.org-people-profiles-module__profile-list > li, ' +
+                                '.org-people-profiles-module__profile-list li, ' +
+                                '.entity-result, ' +
+                                'li.reusable-search__result-container, ' +
+                                'li, div'
+                            ) || link;
+
                             let nameEl = card.querySelector(
                                 '.org-people-profile-card__profile-title, ' +
                                 '.artdeco-entity-lockup__title a, ' +
                                 '.artdeco-entity-lockup__title, ' +
                                 'a[data-field="name"], ' +
                                 '.entity-result__title-text a, ' +
-                                'span[aria-hidden="true"]'
+                                'span[aria-hidden="true"], ' +
+                                'h3, h2'
                             );
                             let titleEl = card.querySelector(
                                 '.lt-line-clamp--multi-line, ' +
@@ -1031,15 +1099,13 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                                 '.org-people-profile-card__profile-position, ' +
                                 '.entity-result__primary-subtitle'
                             );
-                            let linkEl = card.querySelector('a.app-aware-link[href*="/in/"], a[href*="/in/"]');
                             let imgEl = card.querySelector('img[src*="licdn.com"], img.org-people-profile-card__profile-picture, img.presence-entity__image');
                             let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
 
-                            let rawName = nameEl ? nameEl.innerText.trim() : "";
-                            let rawTitle = titleEl ? titleEl.innerText.trim() : "";
-                            let profile = linkEl ? linkEl.href.split('?')[0] : "";
+                            let rawName = nameEl ? (nameEl.innerText || nameEl.textContent || "").trim() : "";
+                            let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent || "").trim() : "";
                             let avatar = imgEl ? imgEl.src : "";
-                            let loc = locEl ? locEl.innerText.trim() : "";
+                            let loc = locEl ? (locEl.innerText || locEl.textContent || "").trim() : "";
 
                             let cleanName = rawName
                                 .replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '')
@@ -1056,17 +1122,17 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                                 .trim();
 
                             if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
+                                seenUrls.add(profile);
                                 seenNames.add(cleanName);
                                 list.push({
                                     full_name: cleanName,
                                     title: cleanTitle || "Employee",
                                     linkedin_profile_url: profile,
                                     avatar_url: avatar,
-                                    location: loc,
-                                    snippet: ""
+                                    location: loc
                                 });
                             }
-                        });
+                        }
                         return list;
                     }""")
                     if raw_extracted and isinstance(raw_extracted, list):
