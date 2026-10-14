@@ -1164,22 +1164,28 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
 
                         li_peop_extracted = await tab_page.evaluate(r"""() => {
                             const list = [];
+                            const seenUrls = new Set();
                             const seenNames = new Set();
-                            const cards = document.querySelectorAll('.entity-result, li.reusable-search__result-container, div.org-people-profile-card');
-                            cards.forEach(card => {
-                                let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
-                                let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
-                                let linkEl = card.querySelector('a[href*="/in/"]');
+
+                            // Universal search: find all profile anchors matching /in/
+                            const profileLinks = document.querySelectorAll('a[href*="/in/"]:not([href*="linkedin.com/help"])');
+                            for (const link of profileLinks) {
+                                const profile = link.href.split('?')[0].replace(/\/+$/, '');
+                                if (!profile || seenUrls.has(profile) || profile.endsWith('/in') || profile.endsWith('/in/')) continue;
+
+                                const card = link.closest('.entity-result, li.reusable-search__result-container, div[data-view-name], .artdeco-entity-lockup, div.org-people-profile-card, li, div') || link;
+
+                                let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"], h3, h2, a');
+                                let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle, .artdeco-entity-lockup__caption');
                                 let imgEl = card.querySelector('img[src*="licdn.com"]');
                                 let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
                                 let snippetEl = card.querySelector('.entity-result__summary, .reusable-search__card-summary');
 
-                                let rawName = nameEl ? (nameEl.innerText || nameEl.textContent) : "";
-                                let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent) : "";
-                                let profile = linkEl ? linkEl.href.split('?')[0] : "";
+                                let rawName = nameEl ? (nameEl.innerText || nameEl.textContent || "") : "";
+                                let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent || "") : "";
                                 let avatar = imgEl ? imgEl.src : "";
-                                let loc = locEl ? locEl.innerText.trim() : "";
-                                let snippet = snippetEl ? snippetEl.innerText.trim() : "";
+                                let loc = locEl ? (locEl.innerText || locEl.textContent || "").trim() : "";
+                                let snippet = snippetEl ? (snippetEl.innerText || snippetEl.textContent || "").trim() : "";
 
                                 let cleanName = rawName
                                     .replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '')
@@ -1193,6 +1199,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                                 let cleanTitle = rawTitle.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
 
                                 if (cleanName && cleanName !== "LinkedIn Member" && !seenNames.has(cleanName) && cleanName.length > 2 && cleanName.length < 50) {
+                                    seenUrls.add(profile);
                                     seenNames.add(cleanName);
                                     list.push({
                                         full_name: cleanName,
@@ -1203,7 +1210,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                                         snippet: snippet
                                     });
                                 }
-                            });
+                            }
                             return list;
                         }""")
 

@@ -1326,7 +1326,7 @@ def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lea
                 employee_count = ?,
                 org_scraped = 1,
                 linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
-                linkedin_status = CASE WHEN ? != '' THEN 'verified' ELSE linkedin_status END
+                linkedin_status = CASE WHEN ? != '' THEN 'verified' ELSE 'no_profile' END
             WHERE name = ? OR (id = ? AND ? IS NOT NULL)
         """, (str(total_emp), company_linkedin_url, company_linkedin_url, company_linkedin_url, company_name, lead_id, lead_id))
 
