@@ -2053,16 +2053,88 @@ async def run_scraper(
         browser = None
         context = None
 
+        def get_chrome_executable_path() -> Optional[str]:
+            candidates = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    return c
+            return None
+
+        async def launch_chrome_with_cdp() -> bool:
+            import socket
+            def is_cdp_listening():
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.25)
+                    res = s.connect_ex(("127.0.0.1", 9222))
+                    s.close()
+                    return res == 0
+                except Exception:
+                    return False
+
+            if is_cdp_listening():
+                return True
+
+            chrome_exe = get_chrome_executable_path()
+            if not chrome_exe:
+                return False
+
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+            for _ in range(15):
+                await asyncio.sleep(0.2)
+                chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True)
+                if "chrome.exe" not in chk.stdout:
+                    break
+            await asyncio.sleep(0.5)
+
+            user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+            launch_args_cdp = [
+                chrome_exe,
+                "--remote-debugging-port=9222",
+                f"--user-data-dir={user_data_path}",
+                "--remote-allow-origins=*",
+                "--restore-last-session",
+                "--start-maximized",
+                "http://localhost:8080"
+            ]
+            try:
+                subprocess.Popen(launch_args_cdp)
+            except Exception as ex:
+                logger.warning(f"Error launching Chrome: {ex}")
+                return False
+
+            for _ in range(30):
+                await asyncio.sleep(0.2)
+                if is_cdp_listening():
+                    return True
+            return False
+
         if visible_browser:
             # First priority: connect directly to user's active Chrome browser via CDP port 9222
             try:
                 emit_event("log", "🔗 Connecting to your active Google Chrome browser (CDP :9222)...")
-                browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=3000)
+                browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=2000)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
                 cdp_connected = True
                 emit_event("log", "✅ Successfully attached to your active Google Chrome window! All logins, extensions and active accounts are preserved.")
             except Exception:
-                emit_event("log", "ℹ️ Chrome port 9222 not reachable. Launching dedicated scraper Chrome window. (Tip: Run 'start_chrome_debug.bat' anytime to attach to your active Chrome window).")
+                emit_event("log", "🔄 Chrome port 9222 not yet open. Auto-launching your Google Chrome on port 9222 with tabs and logins restored...")
+                started_cdp = await launch_chrome_with_cdp()
+                if started_cdp:
+                    try:
+                        browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=4000)
+                        context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
+                        cdp_connected = True
+                        emit_event("log", "✅ Successfully attached to your active Google Chrome window! All logins, extensions and active accounts are preserved.")
+                    except Exception as re_err:
+                        logger.warning(f"CDP retry connect error: {re_err}")
+
+            if cdp_connected and context:
+                force_foreground_window()
 
             # Second priority: launch dedicated visible Chrome if CDP is not available
             if not context:
@@ -2370,8 +2442,27 @@ async def run_scraper(
         # Navigate Tab 2 (LinkedIn) on startup so both Maps and LinkedIn tabs are open by default
         if linkedin_page:
             try:
-                emit_event("log", "Navigating Tab 2 (LinkedIn): https://www.linkedin.com/")
+                emit_event("log", "Navigating Tab (LinkedIn): https://www.linkedin.com/")
                 await linkedin_page.goto("https://www.linkedin.com/", wait_until="domcontentloaded")
+            except Exception:
+                pass
+
+        # Initialize Tab (Website) on startup so all active tabs are visible and ready
+        if website_page:
+            try:
+                emit_event("log", "Initializing Tab (Website Agent): Live domain & anti-bot observer ready.")
+                await website_page.set_content("""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Shop Website Intelligence Agent (Live)</title></head>
+                    <body style="margin:0;font-family:Segoe UI,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#0f172a;color:#f8fafc;text-align:center;">
+                        <div style="font-size:48px;margin-bottom:12px;">🌐</div>
+                        <h2 style="font-size:22px;margin:0 0 8px 0;font-weight:700;">Shop Website Intelligence Agent</h2>
+                        <p style="font-size:14px;color:#94a3b8;max-width:440px;line-height:1.5;margin:0 0 16px 0;">Live in your Chrome browser. As Google Maps extracts shops with websites, domains will load, test anti-bot protection, handle cookie banners, and harvest emails here live.</p>
+                        <span style="display:inline-block;padding:6px 16px;border-radius:9999px;background:#1e293b;border:1px solid #334155;color:#38bdf8;font-size:12px;font-weight:600;">Status: Live on Screen</span>
+                    </body>
+                    </html>
+                """)
             except Exception:
                 pass
 
@@ -2442,6 +2533,10 @@ async def run_scraper(
             emit_event("log", f"Navigating Tab 1 (Google Maps): {search_url}")
             emit_event("status", f"Searching Google Maps: {cleaned_query}")
             await maps_page.goto(search_url, wait_until="domcontentloaded")
+            try:
+                await maps_page.bring_to_front()
+            except Exception:
+                pass
             force_foreground_window()
 
             # Handle Cookie Consent on Google Maps

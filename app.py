@@ -671,69 +671,99 @@ async def trigger_renumber():
     await broadcast({"type": "init", "places": leads, "count": len(leads)})
     return {"status": "ok", "info": res, "total": len(leads), "places": leads}
 
+def get_chrome_executable_path() -> Optional[str]:
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+def check_cdp_port_live() -> bool:
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        res = s.connect_ex(("127.0.0.1", 9222))
+        s.close()
+        if res != 0:
+            return False
+        req = urllib.request.Request("http://localhost:9222/json/version")
+        with urllib.request.urlopen(req, timeout=0.6) as resp:
+            data = json.loads(resp.read().decode())
+            return bool(data.get("Browser"))
+    except Exception:
+        return False
+
 @app.get("/api/chrome/status")
 @app.get("/api/chrome-status")
 async def get_chrome_status():
-    if extension_ws is not None:
-        return {
-            "active": True,
-            "connected": True,
-            "browser": "Chrome (Extension Connected)",
-            "message": "Connected to active Chrome via Extension Bridge"
-        }
-    import socket
-    def check_socket():
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.15)
-            res = s.connect_ex(("127.0.0.1", 9222))
-            s.close()
-            return res == 0
-        except Exception:
-            return False
-
-    is_open = await asyncio.to_thread(check_socket)
-    if not is_open:
-        return {"active": False, "browser": None, "message": "Port 9222 not connected"}
-
-    try:
-        req = urllib.request.Request("http://localhost:9222/json/version")
-        with urllib.request.urlopen(req, timeout=0.5) as resp:
-            data = json.loads(resp.read().decode())
-            return {
-                "active": True,
-                "browser": data.get("Browser", "Chrome"),
-                "message": "Connected to active Chrome (Port 9222)"
-            }
-    except Exception:
-        return {"active": False, "browser": None, "message": "Port 9222 not connected"}
+    cdp_active = await asyncio.to_thread(check_cdp_port_live)
+    ext_active = (extension_ws is not None)
+    return {
+        "active": cdp_active,
+        "cdp_active": cdp_active,
+        "extension_active": ext_active,
+        "browser": "Chrome (Port 9222 Active)" if cdp_active else ("Chrome Extension Connected (Attach Port 9222)" if ext_active else None),
+        "message": "Connected to active Chrome (Port 9222)" if cdp_active else "Chrome Port 9222 not connected"
+    }
 
 @app.post("/api/chrome/launch")
 async def launch_chrome_debug():
-    chrome_exe = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    if not os.path.exists(chrome_exe):
-        chrome_exe = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-    if not os.path.exists(chrome_exe):
+    chrome_exe = get_chrome_executable_path()
+    if not chrome_exe:
         raise HTTPException(status_code=404, detail="Google Chrome executable not found at standard path.")
 
-    try:
-        # Check if already active
-        try:
-            req = urllib.request.Request("http://localhost:9222/json/version")
-            with urllib.request.urlopen(req, timeout=0.8) as resp:
-                return {"status": "success", "message": "Chrome Port 9222 is already connected!"}
-        except Exception:
-            pass
+    # If already active, return success immediately
+    if await asyncio.to_thread(check_cdp_port_live):
+        return {"status": "success", "message": "Chrome Port 9222 is already connected!"}
 
-        # Relaunch Chrome with port 9222 and session restore to preserve all real user accounts & logins
+    try:
+        # 1. Terminate running chrome processes to release profile lock
         subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
-        await asyncio.sleep(1.0)
-        cmd = f'start "" "{chrome_exe}" --remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session --start-maximized "http://localhost:8080"'
-        subprocess.Popen(cmd, shell=True)
-        return {
-            "status": "success",
-            "message": "Chrome launched on Remote Debugging Port 9222 with all your logins, accounts, and tabs preserved!"
-        }
+
+        # 2. Wait until processes have exited cleanly
+        for _ in range(15):
+            await asyncio.sleep(0.2)
+            chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True)
+            if "chrome.exe" not in chk.stdout:
+                break
+        await asyncio.sleep(0.5)
+
+        # 3. Launch Chrome with CDP port 9222 and session restore so all open tabs and accounts return
+        user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+        launch_args = [
+            chrome_exe,
+            "--remote-debugging-port=9222",
+            f"--user-data-dir={user_data_path}",
+            "--remote-allow-origins=*",
+            "--restore-last-session",
+            "--start-maximized",
+            "http://localhost:8080"
+        ]
+        subprocess.Popen(launch_args)
+
+        # 4. Wait up to 6 seconds for port 9222 to be ready
+        connected = False
+        for _ in range(25):
+            await asyncio.sleep(0.25)
+            if await asyncio.to_thread(check_cdp_port_live):
+                connected = True
+                break
+
+        if connected:
+            return {
+                "status": "success",
+                "message": "Chrome launched on Remote Debugging Port 9222 with all your tabs and logins restored!"
+            }
+        else:
+            return {
+                "status": "warning",
+                "message": "Chrome launched. Port 9222 is binding... Please wait a moment."
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch Chrome: {e}")
 
