@@ -488,8 +488,11 @@
               <span>🗺️ Google Maps Harvester (Base)</span>
               <span class="sync-stat" id="sync-stat-maps">0 leads captured</span>
             </div>
-            <div class="sync-bar-wrap">
-              <div class="sync-bar" id="sync-bar-maps" style="width: 100%; background: linear-gradient(90deg, #3b82f6, #60a5fa);"></div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-maps">
+              <div class="sync-bar-seg" id="seg-maps-web" title="With Website" style="width: 0%; background: #10b981;"></div>
+              <div class="sync-bar-seg" id="seg-maps-phone" title="With Phone" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-maps-noweb" title="No Website" style="width: 0%; background: #f97316;"></div>
+              <div class="sync-bar" id="sync-bar-maps" style="display:none; width: 100%;"></div>
             </div>
             <div class="sync-chips">
               <span class="chip-sm chip-blue" id="sync-chip-maps-live">⚡ Stream Active</span>
@@ -505,8 +508,12 @@
               <span>🌐 Website Inspector</span>
               <span class="sync-stat" id="sync-stat-web">0% (0 / 0)</span>
             </div>
-            <div class="sync-bar-wrap">
-              <div class="sync-bar" id="sync-bar-web" style="width: 0%; background: linear-gradient(90deg, #10b981, #34d399);"></div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-web">
+              <div class="sync-bar-seg" id="seg-web-found" title="Found Websites" style="width: 0%; background: #10b981;"></div>
+              <div class="sync-bar-seg" id="seg-web-emails" title="Emails Discovered" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-web-noweb" title="No Website" style="width: 0%; background: #f97316;"></div>
+              <div class="sync-bar-seg" id="seg-web-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar" id="sync-bar-web" style="display:none; width: 0%;"></div>
             </div>
             <div class="sync-chips">
               <span class="chip-sm chip-green" id="sync-chip-web-found">✅ Found: 0</span>
@@ -522,8 +529,12 @@
               <span>💼 LinkedIn Org Harvester</span>
               <span class="sync-stat" id="sync-stat-li">0% (0 / 0)</span>
             </div>
-            <div class="sync-bar-wrap">
-              <div class="sync-bar" id="sync-bar-li" style="width: 0%; background: linear-gradient(90deg, #0ea5e9, #38bdf8);"></div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-li">
+              <div class="sync-bar-seg" id="seg-li-found" title="Found Companies" style="width: 0%; background: #0ea5e9;"></div>
+              <div class="sync-bar-seg" id="seg-li-emp" title="Hierarchy Extracted" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-li-notfound" title="Not Found" style="width: 0%; background: #ef4444;"></div>
+              <div class="sync-bar-seg" id="seg-li-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar" id="sync-bar-li" style="display:none; width: 0%;"></div>
             </div>
             <div class="sync-chips">
               <span class="chip-sm chip-blue" id="sync-chip-li-found">✅ Found: 0</span>
@@ -539,8 +550,13 @@
               <span>🟣 Platform Directory Scout</span>
               <span class="sync-stat" id="sync-stat-plat">0% (0 / 0)</span>
             </div>
-            <div class="sync-bar-wrap">
-              <div class="sync-bar" id="sync-bar-plat" style="width: 0%; background: linear-gradient(90deg, #a855f7, #d946ef);"></div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-plat">
+              <div class="sync-bar-seg" id="seg-plat-scraped" title="Scraped Listings" style="width: 0%; background: #10b981;"></div>
+              <div class="sync-bar-seg" id="seg-plat-booking" title="Booking Links" style="width: 0%; background: #0ea5e9;"></div>
+              <div class="sync-bar-seg" id="seg-plat-rated" title="Rated" style="width: 0%; background: #f97316;"></div>
+              <div class="sync-bar-seg" id="seg-plat-matched" title="Matched to Maps" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-plat-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar" id="sync-bar-plat" style="display:none; width: 0%;"></div>
             </div>
             <div class="sync-chips" id="sync-chips-plat-summary">
               <span class="chip-sm chip-green" id="sync-chip-plat-scraped">✅ Scraped: 0</span>

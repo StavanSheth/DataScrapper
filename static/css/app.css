@@ -1750,15 +1750,22 @@ tr.row-selected td {
 .sync-bar-wrap {
   width: 100%;
   height: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   overflow: hidden;
+  display: flex;
 }
 
 .sync-bar {
   height: 100%;
   border-radius: 999px;
   transition: width 0.4s ease;
+}
+
+.sync-bar-seg {
+  height: 100%;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  min-width: 0;
 }
 
 .sync-chips {

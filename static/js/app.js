@@ -1509,7 +1509,9 @@ let placesData = [];
       // Maps / Multi-Agent Mode
       let query = document.getElementById('query-input').value.trim();
       const scrapeAll = document.getElementById('scrape-all-toggle').checked;
-      if (!query || query.toLowerCase() === 'all' || query === '*') query = "places";
+      if (!query || ['all', 'all businesses', 'all shops', '*', 'shop', 'shops', 'places'].includes(query.toLowerCase())) {
+        query = "businesses";
+      }
 
       let rawMax = parseInt(document.getElementById('max-slider')?.value || 20);
       const maxResults = (scrapeAll || isInfinityMode || rawMax >= 500) ? 999999 : rawMax;

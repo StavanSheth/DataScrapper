@@ -133,6 +133,23 @@ window.updatePlatformSyncCard = function(breakdown, summary) {
   const overallPct = totalTarget > 0 ? Math.min(100, Math.round(((totalScraped + totalSkipped) / totalTarget) * 100)) : (totalScraped > 0 ? 100 : 0);
   const remaining = Math.max(0, totalTarget - totalScraped);
 
+  const pScraped = totalTarget > 0 ? (totalScraped / totalTarget) * 100 : 0;
+  const pBooking = totalTarget > 0 ? (sumBooking / totalTarget) * 100 : 0;
+  const pRated = totalTarget > 0 ? (sumRated / totalTarget) * 100 : 0;
+  const pMatched = totalTarget > 0 ? (sumMatched / totalTarget) * 100 : 0;
+  const pPending = totalTarget > 0 ? (remaining / totalTarget) * 100 : 0;
+
+  const sPlatScraped = document.getElementById('seg-plat-scraped');
+  if (sPlatScraped) sPlatScraped.style.width = `${pScraped.toFixed(1)}%`;
+  const sPlatBooking = document.getElementById('seg-plat-booking');
+  if (sPlatBooking) sPlatBooking.style.width = `${pBooking.toFixed(1)}%`;
+  const sPlatRated = document.getElementById('seg-plat-rated');
+  if (sPlatRated) sPlatRated.style.width = `${pRated.toFixed(1)}%`;
+  const sPlatMatched = document.getElementById('seg-plat-matched');
+  if (sPlatMatched) sPlatMatched.style.width = `${pMatched.toFixed(1)}%`;
+  const sPlatPending = document.getElementById('seg-plat-pending');
+  if (sPlatPending) sPlatPending.style.width = `${pPending.toFixed(1)}%`;
+
   if (bPlat) bPlat.style.width = `${overallPct}%`;
   if (sPlat) {
     if (selectedList.length === 0) {
@@ -232,46 +249,130 @@ window.updateSplitData = function(data) {
 
   if (qp.maps) {
     const m = qp.maps;
+    const total = Math.max(1, totalMaps);
+    const withWeb = m.with_website || 0;
+    const withPhone = m.with_phone || 0;
+    const noWeb = m.no_website || 0;
+
+    const sMWeb = document.getElementById('seg-maps-web');
+    if (sMWeb) sMWeb.style.width = `${((withWeb / total) * 100).toFixed(1)}%`;
+    const sMPhone = document.getElementById('seg-maps-phone');
+    if (sMPhone) sMPhone.style.width = `${((Math.min(total - withWeb, withPhone) / total) * 100).toFixed(1)}%`;
+    const sMNoWeb = document.getElementById('seg-maps-noweb');
+    if (sMNoWeb) sMNoWeb.style.width = `${((noWeb / total) * 100).toFixed(1)}%`;
+
     const cMWeb = document.getElementById('sync-chip-maps-web');
-    if (cMWeb) cMWeb.innerText = `🌐 With Web: ${m.with_website || 0}`;
+    if (cMWeb) cMWeb.innerText = `🌐 With Web: ${withWeb}`;
     const cMNoWeb = document.getElementById('sync-chip-maps-noweb');
-    if (cMNoWeb) cMNoWeb.innerText = `⚠️ No Web: ${m.no_website || 0}`;
+    if (cMNoWeb) cMNoWeb.innerText = `⚠️ No Web: ${noWeb}`;
     const cMPhone = document.getElementById('sync-chip-maps-phone');
-    if (cMPhone) cMPhone.innerText = `📞 Phone: ${m.with_phone || 0}`;
+    if (cMPhone) cMPhone.innerText = `📞 Phone: ${withPhone}`;
   }
 
   if (qp.website) {
     const w = qp.website;
+    const total = Math.max(1, w.total || totalMaps);
+    const inspected = w.inspected || 0;
+    const emailsFound = w.emails_found || 0;
+    const noWeb = w.no_website || 0;
+    const foundWebsites = Math.max(0, inspected - noWeb);
+    const foundWithoutEmails = Math.max(0, foundWebsites - emailsFound);
+    const pending = (w.pending !== undefined) ? w.pending : Math.max(0, total - inspected);
+
+    // Segment widths matching exact tag colors (Green = Found, Purple = Emails, Orange = No Web, Gray = Pending)
+    const pFound = (foundWithoutEmails / total) * 100;
+    const pEmails = (emailsFound / total) * 100;
+    const pNoWeb = (noWeb / total) * 100;
+    const pPending = (pending / total) * 100;
+
+    const sFound = document.getElementById('seg-web-found');
+    if (sFound) {
+      sFound.style.width = `${pFound.toFixed(1)}%`;
+      sFound.title = `Found Websites: ${foundWebsites}`;
+    }
+    const sEmails = document.getElementById('seg-web-emails');
+    if (sEmails) {
+      sEmails.style.width = `${pEmails.toFixed(1)}%`;
+      sEmails.title = `Emails Discovered: ${emailsFound}`;
+    }
+    const sNoWeb = document.getElementById('seg-web-noweb');
+    if (sNoWeb) {
+      sNoWeb.style.width = `${pNoWeb.toFixed(1)}%`;
+      sNoWeb.title = `No Website: ${noWeb}`;
+    }
+    const sPending = document.getElementById('seg-web-pending');
+    if (sPending) {
+      sPending.style.width = `${pPending.toFixed(1)}%`;
+      sPending.title = `In Queue: ${pending}`;
+    }
+
     const bW = document.getElementById('sync-bar-web');
     if (bW) bW.style.width = `${w.percent || 0}%`;
+
     const sW = document.getElementById('sync-stat-web');
-    if (sW) sW.innerText = `${w.percent || 0}% (${w.inspected || 0} / ${w.total || totalMaps})`;
+    if (sW) sW.innerText = `${w.percent || 0}% (${inspected} / ${total})`;
 
     const cWFound = document.getElementById('sync-chip-web-found');
-    if (cWFound) cWFound.innerText = `✅ Found: ${Math.max(0, (w.inspected || 0) - (w.no_website || 0))}`;
+    if (cWFound) cWFound.innerText = `✅ Found: ${foundWebsites}`;
     const cWEmail = document.getElementById('sync-chip-web-emails');
-    if (cWEmail) cWEmail.innerText = `✉️ Emails: ${w.emails_found || 0}`;
+    if (cWEmail) cWEmail.innerText = `✉️ Emails: ${emailsFound}`;
     const cWNo = document.getElementById('sync-chip-web-noweb');
-    if (cWNo) cWNo.innerText = `⚠️ No Web: ${w.no_website || 0}`;
+    if (cWNo) cWNo.innerText = `⚠️ No Web: ${noWeb}`;
     const cWPending = document.getElementById('sync-chip-web-pending');
-    if (cWPending) cWPending.innerText = `⏳ In Queue: ${w.pending || 0}`;
+    if (cWPending) cWPending.innerText = `⏳ In Queue: ${pending}`;
   }
 
   if (qp.linkedin) {
     const l = qp.linkedin;
+    const total = Math.max(1, l.total || totalMaps);
+    const inspected = l.inspected || 0;
+    const found = l.found || 0;
+    const emp = l.employees_found || 0;
+    const foundOnly = Math.max(0, found - emp);
+    const notFound = l.not_found || 0;
+    const pending = (l.pending !== undefined) ? l.pending : Math.max(0, total - inspected);
+
+    // Segment widths matching exact tag colors (Blue = Found, Purple = Hierarchy, Red = Not Found, Gray = Pending)
+    const pFound = (foundOnly / total) * 100;
+    const pEmp = (emp / total) * 100;
+    const pNotFound = (notFound / total) * 100;
+    const pPending = (pending / total) * 100;
+
+    const sFound = document.getElementById('seg-li-found');
+    if (sFound) {
+      sFound.style.width = `${pFound.toFixed(1)}%`;
+      sFound.title = `Found Companies: ${found}`;
+    }
+    const sEmp = document.getElementById('seg-li-emp');
+    if (sEmp) {
+      sEmp.style.width = `${pEmp.toFixed(1)}%`;
+      sEmp.title = `Hierarchy Extracted: ${emp}`;
+    }
+    const sNotFound = document.getElementById('seg-li-notfound');
+    if (sNotFound) {
+      sNotFound.style.width = `${pNotFound.toFixed(1)}%`;
+      sNotFound.title = `Not Found: ${notFound}`;
+    }
+    const sPending = document.getElementById('seg-li-pending');
+    if (sPending) {
+      sPending.style.width = `${pPending.toFixed(1)}%`;
+      sPending.title = `In Queue: ${pending}`;
+    }
+
     const bL = document.getElementById('sync-bar-li');
     if (bL) bL.style.width = `${l.percent || 0}%`;
+
     const sL = document.getElementById('sync-stat-li');
-    if (sL) sL.innerText = `${l.percent || 0}% (${l.inspected || 0} / ${l.total || totalMaps})`;
+    if (sL) sL.innerText = `${l.percent || 0}% (${inspected} / ${total})`;
 
     const cLFound = document.getElementById('sync-chip-li-found');
-    if (cLFound) cLFound.innerText = `✅ Found: ${l.found || 0}`;
+    if (cLFound) cLFound.innerText = `✅ Found: ${found}`;
     const cLEmp = document.getElementById('sync-chip-li-emp');
-    if (cLEmp) cLEmp.innerText = `👥 Hierarchy: ${l.employees_found || 0}`;
+    if (cLEmp) cLEmp.innerText = `👥 Hierarchy: ${emp}`;
     const cLNo = document.getElementById('sync-chip-li-notfound');
-    if (cLNo) cLNo.innerText = `⚠️ Not Found: ${l.not_found || 0}`;
+    if (cLNo) cLNo.innerText = `⚠️ Not Found: ${notFound}`;
     const cLPending = document.getElementById('sync-chip-li-pending');
-    if (cLPending) cLPending.innerText = `⏳ In Queue: ${l.pending || 0}`;
+    if (cLPending) cLPending.innerText = `⏳ In Queue: ${pending}`;
   }
 
   // Update Platform Scout Progress Card & Multi-Platform Breakdown

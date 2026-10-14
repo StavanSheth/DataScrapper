@@ -391,8 +391,8 @@ async def start_scraping(payload: Dict[str, Any]):
 
     query = payload.get("query", "").strip()
     scrape_all = bool(payload.get("scrape_all", False))
-    if not query:
-        query = "shops"
+    if not query or query.lower() in ["all", "all businesses", "all shops", "all shops in area", "*", "shop", "shops"]:
+        query = "businesses"
 
     max_results = int(payload.get("max_results", 20))
     visible_browser = bool(payload.get("visible_browser", True))
