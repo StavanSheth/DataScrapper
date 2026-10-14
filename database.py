@@ -536,10 +536,11 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                 return matching_id
             else:
                 # Insert brand-new lead
+                w_status = "pending" if (website and website.startswith("http")) else "no_website"
                 cursor = conn.execute("""
-                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status))
+                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status, website_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status, w_status))
                 conn.commit()
                 return cursor.lastrowid
         except Exception:
@@ -880,7 +881,8 @@ def update_lead_website_data(
                         twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
                         screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END
+                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
+                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
                     WHERE website = ? OR website = ? OR website = ?
                 """, (
                     email, email, email,
@@ -891,6 +893,7 @@ def update_lead_website_data(
                     screenshot, screenshot,
                     bot_protection, bot_protection,
                     cookie_status, cookie_status,
+                    website_status, website_status,
                     clean_website,
                     clean_website.rstrip('/'),
                     clean_website.rstrip('/') + '/'
@@ -907,7 +910,8 @@ def update_lead_website_data(
                         twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
                         screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END
+                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
+                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
                     WHERE name = ? AND (
                         address = ?
                         OR address = 'N/A'
@@ -925,6 +929,7 @@ def update_lead_website_data(
                     screenshot, screenshot,
                     bot_protection, bot_protection,
                     cookie_status, cookie_status,
+                    website_status, website_status,
                     clean_name,
                     clean_address,
                     clean_address,
@@ -943,7 +948,8 @@ def update_lead_website_data(
                         twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
                         screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END
+                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
+                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
                     WHERE name = ?
                 """, (
                     email, email, email,
@@ -954,6 +960,7 @@ def update_lead_website_data(
                     screenshot, screenshot,
                     bot_protection, bot_protection,
                     cookie_status, cookie_status,
+                    website_status, website_status,
                     clean_name
                 ))
 

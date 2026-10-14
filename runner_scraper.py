@@ -624,7 +624,8 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     "id": idx, "name": name, "address": address, "website": website_url,
                     "instagram": website_url if is_ig else "",
                     "facebook": website_url if not is_ig else "",
-                    "bot_protection": f"Social Profile ({plat_name})"
+                    "bot_protection": f"Social Profile ({plat_name})",
+                    "website_status": "social"
                 })
             except Exception:
                 pass
@@ -633,6 +634,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
 
         emit_event("log", f"🌐 [Tab 2 - Simultaneous] Inspecting shop website: {website_url}")
         emit_event("status", f"Browsing website #{idx}: {name}")
+        emit_event("website_navigated", {"url": website_url, "name": name, "index": idx})
 
         try:
 
@@ -900,6 +902,33 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
 
         except Exception as err:
             emit_event("log", f"⚠️ Error processing website for #{idx}: {str(err)[:60]}")
+            try:
+                update_lead_website_data(
+                    name=name,
+                    address=address,
+                    website=website_url,
+                    bot_protection=f"Unreachable ({str(err)[:20]})",
+                    website_status="failed"
+                )
+                emit_event("place_updated", {
+                    "index": idx,
+                    "name": name,
+                    "address": address,
+                    "website": website_url,
+                    "bot_protection": f"Unreachable ({str(err)[:20]})",
+                    "website_status": "failed"
+                })
+            except Exception:
+                pass
+            if linkedin_queue:
+                linkedin_queue.put_nowait({
+                    "index": idx,
+                    "name": name,
+                    "address": item.get("address", ""),
+                    "website": website_url,
+                    "linkedin_url": "",
+                    "website_emails": []
+                })
         finally:
             queue.task_done()
 
@@ -1339,7 +1368,8 @@ def build_platform_area_url(platform_name: str, category: str, location_name: st
 
     # 3. Built-in Smart Templates for known popular directories
     if "fresha" in p_lower:
-        return f"https://www.fresha.com/search?query={enc_cat}&address={enc_loc}"
+        f_cat = "salon" if enc_cat.lower() in ["shops", "shop", "all", "business"] else enc_cat
+        return f"https://www.fresha.com/search?query={f_cat}&address={enc_loc}"
     elif "airbnb" in p_lower:
         return f"https://www.airbnb.com/s/{loc_hyphen}/homes?query={enc_cat}"
     elif "yelp" in p_lower:
@@ -1458,6 +1488,13 @@ async def platform_area_search_worker(
                 detected_total = 0
                 try:
                     await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    try:
+                        await platform_page.wait_for_selector(
+                            'div[data-testid="card-container"], div[data-qa="venue-card"], a[href*="/a/"], a[href*="/v/"], [data-testid="serp-ia-card"], div.listing_details, article, [role="article"]',
+                            timeout=6000
+                        )
+                    except Exception:
+                        pass
                     await platform_page.wait_for_timeout(1000)
 
                     detected_total = await extract_platform_total_count(platform_page, p_name)
@@ -1507,7 +1544,10 @@ async def platform_area_search_worker(
                     if platform_page.url != target_url:
                         await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
                         try:
-                            await platform_page.wait_for_load_state("load", timeout=3500)
+                            await platform_page.wait_for_selector(
+                                'div[data-testid="card-container"], div[data-qa="venue-card"], a[href*="/a/"], a[href*="/v/"], [data-testid="serp-ia-card"], div.listing_details, article, [role="article"]',
+                                timeout=8000
+                            )
                         except Exception:
                             pass
                         await platform_page.wait_for_timeout(1000)
@@ -1787,7 +1827,7 @@ async def platform_area_search_worker(
 
                     if new_in_pass == 0:
                         consecutive_stagnant += 1
-                        if consecutive_stagnant >= 4:
+                        if consecutive_stagnant >= 7:
                             has_next = await platform_page.evaluate("""() => {
                                 const nextBtn = document.querySelector('a[aria-label="Next"], a[data-qa="pagination-next"], a[rel="next"], [class*="pagination-next"]');
                                 if (nextBtn) { nextBtn.click(); return true; }
@@ -2304,7 +2344,7 @@ async def run_scraper(
                 pass
 
         # Setup Parallel Asynchronous Queues for Tab 2, Tab 3, and Tab 4
-        website_queue = asyncio.Queue() if (enable_website and extract_emails) else None
+        website_queue = asyncio.Queue() if enable_website else None
         linkedin_queue = asyncio.Queue() if linkedin_page else None
 
         # RESUME CAPABILITY: Check for any incomplete leads from a previously paused run
@@ -2719,7 +2759,7 @@ async def run_scraper(
                     # PARALLEL PIPELINE: Send website job to Tab 2 simultaneously!
                     # Tab 1 DOES NOT STOP! It immediately moves to the next place!
                     # -----------------------------------------------------------------
-                    if enable_website and extract_emails and website and website.startswith("http") and website_queue:
+                    if enable_website and website and website.startswith("http") and website_queue:
                         website_queue.put_nowait({
                             "index": idx,
                             "name": place_title,

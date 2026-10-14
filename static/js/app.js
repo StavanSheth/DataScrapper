@@ -1174,8 +1174,17 @@ let placesData = [];
               updateProximityUI(msg.data || msg);
             } else if (msg.type === 'live_frame') {
               updateLiveStream(msg.data);
+            } else if (msg.type === 'tables_split') {
+              if (typeof window.updateSplitData === 'function') {
+                window.updateSplitData(msg.data);
+              }
             } else if (msg.type === 'place_scraped') {
               placesData.unshift(msg.data);
+              if (window.tablesSplitData && Array.isArray(window.tablesSplitData.unmatched_maps)) {
+                window.tablesSplitData.unmatched_maps.unshift(msg.data);
+                const bMaps = document.getElementById('badge-count-maps');
+                if (bMaps) bMaps.innerText = window.tablesSplitData.unmatched_maps.length;
+              }
               renderTable();
               updateKPIs();
             } else if (msg.type === 'place_updated') {
@@ -1184,6 +1193,16 @@ let placesData = [];
                 Object.assign(target, msg.data);
               } else {
                 placesData.unshift(msg.data);
+              }
+              if (window.tablesSplitData) {
+                ['unmatched_maps', 'master_leads', 'website_leads'].forEach(key => {
+                  const list = window.tablesSplitData[key];
+                  if (Array.isArray(list)) {
+                    const t = list.find(p => (p.name === msg.data.name && (p.address === msg.data.address || p.address === 'N/A' || msg.data.address === 'N/A')) || (msg.data.id && p.id === msg.data.id));
+                    if (t) Object.assign(t, msg.data);
+                  }
+                });
+                if (typeof window.refreshTablesSplit === 'function') window.refreshTablesSplit();
               }
               renderTable();
               updateKPIs();
@@ -1199,6 +1218,12 @@ let placesData = [];
                 target.platform_price = listing.price_range;
                 target.platform_verified = listing.verified ? 1 : 0;
               }
+              if (window.tablesSplitData && Array.isArray(window.tablesSplitData.unmatched_platform)) {
+                window.tablesSplitData.unmatched_platform.unshift(listing);
+                const bPlat = document.getElementById('badge-count-platform');
+                if (bPlat) bPlat.innerText = window.tablesSplitData.unmatched_platform.length;
+              }
+              if (typeof window.refreshTablesSplit === 'function') window.refreshTablesSplit();
               renderTable();
               updateKPIs();
             } else if (msg.type === 'org_updated') {
@@ -1207,6 +1232,7 @@ let placesData = [];
                 target.employee_count = msg.data.employee_count;
                 if (msg.data.linkedin_url) target.linkedin = msg.data.linkedin_url;
               }
+              if (typeof window.refreshTablesSplit === 'function') window.refreshTablesSplit();
               renderTable();
               updateKPIs();
             } else if (msg.type === 'status') {
@@ -1215,6 +1241,13 @@ let placesData = [];
               logMessage(msg.data);
             } else if (msg.type === 'db_cleared') {
               placesData = [];
+              if (window.tablesSplitData) {
+                window.tablesSplitData.master_leads = [];
+                window.tablesSplitData.unmatched_maps = [];
+                window.tablesSplitData.unmatched_platform = [];
+                window.tablesSplitData.website_leads = [];
+                window.tablesSplitData.linkedin_leads = [];
+              }
               renderTable();
               updateKPIs();
             }
@@ -1360,6 +1393,16 @@ let placesData = [];
       if (agentLinkedin) parts.push("LinkedIn");
       if (agentPlatform) parts.push(platformName);
       logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
+
+      if (typeof window.switchTableTab === 'function' && window.currentTableTab === 'master') {
+        const masterCount = (window.tablesSplitData && window.tablesSplitData.master_leads) ? window.tablesSplitData.master_leads.length : 0;
+        if (masterCount === 0) {
+          if (agentMaps) window.switchTableTab('maps');
+          else if (agentPlatform) window.switchTableTab('platform');
+          else if (agentWebsite) window.switchTableTab('website');
+          else if (agentLinkedin) window.switchTableTab('linkedin');
+        }
+      }
 
       // Trigger Extension to open tabs live in this exact Chrome window ONLY for enabled agents
       try {

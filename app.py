@@ -234,8 +234,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     edata = event.get("data")
                     if etype == "place_scraped":
                         save_lead(edata)
-                        if extension_ws and edata.get("website") and str(edata.get("website")).startswith("http"):
-                            asyncio.create_task(extension_ws.send_json({"action": "OPEN_SHOP_TAB", "payload": {"url": edata.get("website")}}))
+                    elif etype == "website_navigated":
+                        if extension_ws and edata.get("url") and str(edata.get("url")).startswith("http"):
+                            asyncio.create_task(extension_ws.send_json({"action": "OPEN_SHOP_TAB", "payload": {"url": edata.get("url")}}))
                     elif etype == "place_updated":
                         update_lead_website_data(
                             name=edata.get("name", ""),
@@ -248,7 +249,8 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                             twitter=edata.get("twitter", ""),
                             screenshot=edata.get("screenshot", ""),
                             bot_protection=edata.get("bot_protection", ""),
-                            cookie_status=edata.get("cookie_status", "")
+                            cookie_status=edata.get("cookie_status", ""),
+                            website_status=edata.get("website_status", "found")
                         )
                     elif etype == "org_updated":
                         # Emitted when Tab 3 finishes extracting LinkedIn hierarchy for a company
