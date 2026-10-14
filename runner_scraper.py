@@ -2010,6 +2010,7 @@ async def run_scraper(
     dedup_area: bool = True,
     skip_existing_db: bool = False,
     standalone_companies: Optional[str] = None,
+    extension_active: bool = False,
 ):
     cleaned_query = query.strip() if query else ""
     if not cleaned_query or cleaned_query.lower() in ["all", "all businesses", "all shops", "all shops in area", "*", "shop", "shops", "places"]:
@@ -2080,28 +2081,31 @@ async def run_scraper(
 
             # Second priority: launch dedicated visible Chrome if CDP is not available
             if not context:
-                # Purge stale session cache so Chrome never re-opens tabs from old sessions
-                stale_sessions = os.path.join(profile_dir, "Default", "Sessions")
-                if os.path.exists(stale_sessions):
-                    try:
-                        shutil.rmtree(stale_sessions, ignore_errors=True)
-                    except Exception:
-                        pass
+                if extension_active:
+                    emit_event("log", "🧩 Mavon Extension is active in your Chrome! Tabs are running live in your main browser window.")
+                else:
+                    # Purge stale session cache so Chrome never re-opens tabs from old sessions
+                    stale_sessions = os.path.join(profile_dir, "Default", "Sessions")
+                    if os.path.exists(stale_sessions):
+                        try:
+                            shutil.rmtree(stale_sessions, ignore_errors=True)
+                        except Exception:
+                            pass
 
-                emit_event("log", "Launching fresh Google Chrome window with Mavon Extension...")
-                try:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=profile_dir,
-                        channel="chrome",
-                        headless=False,
-                        args=launch_args,
-                        no_viewport=True,
-                        locale="en-US"
-                    )
-                    if context:
-                        force_foreground_window()
-                except Exception as e:
-                    logger.warning(f"Native Chrome launch fallback: {e}")
+                    emit_event("log", "Launching fresh Google Chrome window with Mavon Extension...")
+                    try:
+                        context = await p.chromium.launch_persistent_context(
+                            user_data_dir=profile_dir,
+                            channel="chrome",
+                            headless=False,
+                            args=launch_args,
+                            no_viewport=True,
+                            locale="en-US"
+                        )
+                        if context:
+                            force_foreground_window()
+                    except Exception as e:
+                        logger.warning(f"Native Chrome launch fallback: {e}")
 
         # Headless fallback if toggle is OFF
         if not context:
@@ -2474,6 +2478,7 @@ async def run_scraper(
 
             emit_event("log", f"Navigating Tab 1 (Google Maps): {search_url}")
             emit_event("status", f"Searching Google Maps: {cleaned_query}")
+            emit_event("maps_navigated", {"url": search_url, "query": cleaned_query})
             await maps_page.goto(search_url, wait_until="domcontentloaded")
             try:
                 await maps_page.bring_to_front()
@@ -3045,6 +3050,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-dedup-area", dest="dedup_area", action="store_false")
     parser.add_argument("--skip-existing-db", action="store_true", default=False)
     parser.add_argument("--standalone-companies", type=str, default=None)
+    parser.add_argument("--extension-active", action="store_true", default=False)
     args = parser.parse_args()
 
     asyncio.run(run_scraper(
@@ -3067,4 +3073,5 @@ if __name__ == "__main__":
         dedup_area=args.dedup_area,
         skip_existing_db=args.skip_existing_db,
         standalone_companies=args.standalone_companies,
+        extension_active=args.extension_active,
     ))

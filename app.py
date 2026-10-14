@@ -189,6 +189,24 @@ async def extension_ws_endpoint(websocket: WebSocket):
         if extension_ws == websocket:
             extension_ws = None
 
+def radius_to_zoom(radius_km: float) -> int:
+    if radius_km <= 1.0: return 16
+    elif radius_km <= 3.0: return 15
+    elif radius_km <= 7.0: return 14
+    elif radius_km <= 15.0: return 13
+    elif radius_km <= 30.0: return 12
+    else: return 11
+
+async def send_to_extension(action: str, payload: Optional[Dict[str, Any]] = None):
+    global extension_ws
+    if extension_ws:
+        try:
+            msg = {"action": action, "payload": payload or {}}
+            await extension_ws.send_json(msg)
+            logger.info(f"📤 Dispatched to Chrome Extension: {action}")
+        except Exception as e:
+            logger.warning(f"Failed to dispatch {action} to Chrome Extension: {e}")
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -237,7 +255,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     if etype == "place_scraped":
                         save_lead(edata)
                     elif etype == "website_navigated":
-                        pass
+                        url = edata.get("url") if isinstance(edata, dict) else None
+                        if url:
+                            await send_to_extension("OPEN_SHOP_TAB", {"url": url})
                     elif etype == "place_updated":
                         update_lead_website_data(
                             name=edata.get("name", ""),
@@ -327,9 +347,15 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         proximity_metrics["time_saved_sec"] = round(proximity_metrics["skipped_count"] * 3.5, 1)
                         add_log(f"⏭️ [Skipped In DB] {edata.get('name', 'Shop')} already in DB. Bypassed crawl ({proximity_metrics['time_saved_sec']}s saved).")
                     elif etype == "linkedin_navigated":
-                        pass
+                        url = edata.get("url") if isinstance(edata, dict) else None
+                        if url:
+                            await send_to_extension("NAVIGATE_LINKEDIN", {"url": url})
                     elif etype == "platform_navigated":
-                        pass
+                        url = edata.get("url") if isinstance(edata, dict) else None
+                        if url:
+                            await send_to_extension("NAVIGATE_PLATFORM", {"url": url})
+                    elif etype == "maps_navigated":
+                        await send_to_extension("ACTIVATE_TAB", {"tab": "maps"})
                     elif etype == "status":
                         current_status = str(edata)
                     elif etype == "log":
@@ -499,9 +525,50 @@ async def start_scraping(payload: Dict[str, Any]):
     if skip_existing_db:
         cmd.append("--skip-existing-db")
 
-    try:
-        pass
+    if extension_ws is not None:
+        cmd.append("--extension-active")
 
+    # Format target URLs for Chrome Extension live tabs
+    maps_target_url = None
+    if enable_maps:
+        effective_zoom = radius_to_zoom(radius_km) if radius_km else zoom
+        encoded_query = urllib.parse.quote_plus(query)
+        if lat is not None and lon is not None:
+            maps_target_url = f"https://www.google.com/maps/search/{encoded_query}/@{lat},{lon},{effective_zoom}z?hl=en"
+        else:
+            maps_target_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
+
+    plat_target_url = None
+    if enable_platform:
+        if platform_custom_url:
+            plat_target_url = platform_custom_url
+        else:
+            p_low = platform_name.lower().strip()
+            loc_enc = urllib.parse.quote_plus(payload.get("location", "") or query)
+            if "fresha" in p_low:
+                plat_target_url = f"https://www.fresha.com/search?query={loc_enc}"
+            elif "airbnb" in p_low:
+                plat_target_url = f"https://www.airbnb.com/s/{loc_enc}/homes"
+            elif "yelp" in p_low:
+                plat_target_url = f"https://www.yelp.com/search?find_desc={urllib.parse.quote_plus(query)}&find_loc={loc_enc}"
+            elif "tripadvisor" in p_low:
+                plat_target_url = f"https://www.tripadvisor.com/Search?q={loc_enc}"
+            else:
+                plat_target_url = f"https://www.{p_low}.com/"
+
+    li_target_url = "https://www.linkedin.com/feed/" if enable_linkedin else None
+
+    # Dispatch to Extension to open live tabs directly in user's active Chrome window
+    await send_to_extension("START_HARVESTER", {
+        "maps_url": maps_target_url,
+        "linkedin_url": li_target_url,
+        "platform_url": plat_target_url,
+        "enable_maps": enable_maps,
+        "enable_linkedin": enable_linkedin,
+        "enable_platform": enable_platform
+    })
+
+    try:
         active_process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -566,6 +633,7 @@ async def start_companies_scraping(payload: Dict[str, Any]):
 @app.post("/api/stop")
 async def stop_scraping():
     global active_process, is_scraping, current_status
+    await send_to_extension("CLOSE_SHOP_TAB")
     if active_process and active_process.returncode is None:
         try:
             active_process.terminate()
