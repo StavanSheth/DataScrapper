@@ -1,3 +1,4 @@
+import urllib.parse
 import argparse
 import asyncio
 import base64
@@ -7,12 +8,12 @@ import logging
 import os
 import re
 import sys
-import urllib.parse
 import math
-from typing import Dict, Any, List, Optional
+import time
+from typing import Dict, Any, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, get_platform_listings
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -581,8 +582,8 @@ async def clear_fixed_viewport(page):
     except Exception:
         pass
 
-async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Event, maps_page=None, linkedin_queue: asyncio.Queue = None, pages_dict: Dict = None, cdp_connected: bool = False):
-    tab_page = None
+async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Event, website_page=None, maps_page=None, linkedin_queue: asyncio.Queue = None, pages_dict: Dict = None, cdp_connected: bool = False):
+    tab_page = website_page
     """
     Dedicated Worker for Tab 2: Visually loads shop websites in parallel, checks Cloudflare/anti-bot,
     takes landing page screenshots, extracts emails and social media accounts simultaneously.
@@ -610,17 +611,14 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
 
         try:
 
-            # Open Tab 3 (Shop Website) dynamically only when a shop with website is processed
+            # Strict Tab 2 Isolation: Dedicated page for Shop Website (Never touches Maps, LinkedIn, or Platform tabs)
             if tab_page is None or tab_page.is_closed():
-                if cdp_connected:
-                    candidate_pages = [p for p in context.pages if p != maps_page and p != (pages_dict.get("linkedin") if pages_dict else None) and "google.com/maps" not in p.url and "linkedin.com" not in p.url]
-                    if candidate_pages:
-                        tab_page = candidate_pages[0]
-                    else:
-                        tab_page = await context.new_page()
-                else:
-                    tab_page = await context.new_page()
+                tab_page = await context.new_page()
                 await clear_fixed_viewport(tab_page)
+                try:
+                    await tab_page.route("**/*.{mp4,mp3,avi,webm,mkv,wav,ogg,woff,woff2,ttf,eot}", lambda r: r.abort())
+                except Exception:
+                    pass
                 if pages_dict is not None:
                     pages_dict["website"] = tab_page
 
@@ -909,12 +907,26 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 except Exception:
                     pass
 
-                # Step 3: Progressive DOM scrolling
-                emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery...")
+                # Step 3: Progressive DOM scrolling to bypass top insights and reveal employee cards
+                emit_event("log", f"📜 [LinkedIn Step 3/5 - Progressive Scroll] Triggering member cards discovery on /people/...")
+                try:
+                    # Scroll down to people module directly if found, or scroll past insights
+                    await tab_page.evaluate(r"""() => {
+                        const target = document.querySelector('.org-people-profiles-module, ul.org-people-profiles-module__profile-list, [data-view-name="org-people-profile-card"]');
+                        if (target) {
+                            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        } else {
+                            window.scrollBy({ top: 1100, behavior: 'smooth' });
+                        }
+                    }""")
+                    await tab_page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
                 for s_i in range(3):
                     try:
-                        await tab_page.evaluate("window.scrollBy({top: 650, behavior: 'smooth'})")
-                        await tab_page.wait_for_timeout(900)
+                        await tab_page.evaluate("window.scrollBy({top: 900})")
+                        await tab_page.wait_for_timeout(400)
                     except Exception:
                         break
 
@@ -924,13 +936,34 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                     raw_extracted = await tab_page.evaluate(r"""() => {
                         const list = [];
                         const seenNames = new Set();
-                        const cards = document.querySelectorAll('div.org-people-profile-card, li.org-people-profile-card__profile-card-spacing, div[data-view-name="org-people-profile-card"], .entity-result, li.reusable-search__result-container');
+                        const cards = document.querySelectorAll(
+                            'div.org-people-profile-card, ' +
+                            'li.org-people-profile-card__profile-card-spacing, ' +
+                            'div[data-view-name="org-people-profile-card"], ' +
+                            'ul.org-people-profiles-module__profile-list > li, ' +
+                            '.org-people-profiles-module__profile-list li, ' +
+                            '.entity-result, ' +
+                            'li.reusable-search__result-container'
+                        );
 
                         cards.forEach(card => {
-                            let nameEl = card.querySelector('.org-people-profile-card__profile-title, .entity-result__title-text a, .artdeco-entity-lockup__title, span[aria-hidden="true"]');
-                            let titleEl = card.querySelector('.lt-line-clamp--multi-line, .entity-result__primary-subtitle, .artdeco-entity-lockup__subtitle');
-                            let linkEl = card.querySelector('a[href*="/in/"]');
-                            let imgEl = card.querySelector('img[src*="licdn.com"]');
+                            let nameEl = card.querySelector(
+                                '.org-people-profile-card__profile-title, ' +
+                                '.artdeco-entity-lockup__title a, ' +
+                                '.artdeco-entity-lockup__title, ' +
+                                'a[data-field="name"], ' +
+                                '.entity-result__title-text a, ' +
+                                'span[aria-hidden="true"]'
+                            );
+                            let titleEl = card.querySelector(
+                                '.lt-line-clamp--multi-line, ' +
+                                '.artdeco-entity-lockup__subtitle, ' +
+                                'div.artdeco-entity-lockup__caption, ' +
+                                '.org-people-profile-card__profile-position, ' +
+                                '.entity-result__primary-subtitle'
+                            );
+                            let linkEl = card.querySelector('a.app-aware-link[href*="/in/"], a[href*="/in/"]');
+                            let imgEl = card.querySelector('img[src*="licdn.com"], img.org-people-profile-card__profile-picture, img.presence-entity__image');
                             let locEl = card.querySelector('.entity-result__secondary-subtitle, .org-people-profile-card__profile-location');
 
                             let rawName = nameEl ? nameEl.innerText.trim() : "";
@@ -1077,8 +1110,9 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
             if final_linkedin_url and "/people" in final_linkedin_url:
                 final_linkedin_url = final_linkedin_url.replace("/people", "")
 
-            # Save batch to SQLite
-            saved = save_employees_batch(company_name=name, employees=employees, company_linkedin_url=final_linkedin_url)
+            # Save batch to SQLite with explicit lead_id reference
+            lead_id_target = item.get("id") or item.get("lead_id")
+            saved = save_employees_batch(company_name=name, employees=employees, lead_id=lead_id_target, company_linkedin_url=final_linkedin_url)
 
             exec_count = sum(1 for e in employees if classify_seniority(e.get("title", "")) == "executive")
             mgmt_count = sum(1 for e in employees if classify_seniority(e.get("title", "")) == "management")
@@ -1102,250 +1136,636 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
         finally:
             queue.task_done()
 
-async def platform_worker(
+
+def parse_search_query_and_location(query: str, lat: Optional[float] = None, lon: Optional[float] = None) -> Tuple[str, str]:
+    """Extracts category/keyword and geographic location/proximity from user search query and coordinates."""
+    q = (query or "").strip()
+    category = q
+    location_name = ""
+
+    m = re.split(r'\s+(?:in|near|at|around)\s+', q, maxsplit=1, flags=re.I)
+    if len(m) == 2:
+        category = m[0].strip()
+        location_name = m[1].strip()
+    elif "," in q:
+        parts = q.split(",", 1)
+        category = parts[0].strip()
+        location_name = parts[1].strip()
+    elif lat is not None and lon is not None:
+        if 18.8 <= float(lat) <= 19.4 and 72.7 <= float(lon) <= 73.2:
+            location_name = "Mumbai"
+        else:
+            location_name = f"{lat:.2f},{lon:.2f}"
+    else:
+        location_name = q
+
+    return category or "Business", location_name or "Area"
+
+def build_platform_area_url(platform_name: str, category: str, location_name: str, custom_pattern: str = "") -> str:
+    """
+    Builds area/proximity search URL for ANY directory platform.
+    Supports built-in platforms, custom templates ({query}, {location}, {category}, {city}),
+    direct domain names, and smart fallback discovery.
+    """
+    p_lower = platform_name.lower().strip()
+    enc_cat = urllib.parse.quote_plus(category)
+    enc_loc = urllib.parse.quote_plus(location_name)
+    loc_hyphen = urllib.parse.quote(re.sub(r'\s+', '-', location_name.strip()))
+    cat_hyphen = urllib.parse.quote(re.sub(r'\s+', '-', category.strip()))
+
+    # 1. Custom URL pattern with template variable replacement
+    if custom_pattern and "http" in custom_pattern:
+        url = custom_pattern
+        url = url.replace("{query}", enc_cat).replace("{category}", enc_cat)
+        url = url.replace("{location}", enc_loc).replace("{city}", enc_loc)
+        url = url.replace("{loc_slug}", loc_hyphen).replace("{cat_slug}", cat_hyphen)
+        if "{" not in custom_pattern and ("?" not in custom_pattern or "=" not in custom_pattern):
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}q={enc_cat}&location={enc_loc}"
+        return url
+
+    # 2. If platform_name itself is a full URL
+    if p_lower.startswith("http://") or p_lower.startswith("https://"):
+        url = platform_name
+        if "{" in url:
+            url = url.replace("{query}", enc_cat).replace("{category}", enc_cat)
+            url = url.replace("{location}", enc_loc).replace("{city}", enc_loc)
+        else:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}q={enc_cat}&location={enc_loc}"
+        return url
+
+    # 3. Built-in Smart Templates for known popular directories
+    if "fresha" in p_lower:
+        return f"https://www.fresha.com/search?query={enc_cat}&address={enc_loc}"
+    elif "airbnb" in p_lower:
+        return f"https://www.airbnb.com/s/{loc_hyphen}/homes?query={enc_cat}"
+    elif "yelp" in p_lower:
+        return f"https://www.yelp.com/search?find_desc={enc_cat}&find_loc={enc_loc}"
+    elif "tripadvisor" in p_lower:
+        return f"https://www.tripadvisor.com/Search?q={enc_cat}+{enc_loc}"
+    elif "booking" in p_lower:
+        return f"https://www.booking.com/searchresults.html?ss={enc_loc}+{enc_cat}"
+    elif "zomato" in p_lower:
+        return f"https://www.zomato.com/{loc_hyphen.lower()}/restaurants?q={enc_cat}"
+    elif "justdial" in p_lower:
+        return f"https://www.justdial.com/{loc_hyphen}/{enc_cat}"
+    elif "treatwell" in p_lower:
+        return f"https://www.treatwell.co.uk/places/treatment-{cat_hyphen.lower()}/in-{loc_hyphen.lower()}/"
+    elif "yellowpages" in p_lower:
+        return f"https://www.yellowpages.com/search?search_terms={enc_cat}&geo_location_terms={enc_loc}"
+    elif "opentable" in p_lower:
+        return f"https://www.opentable.com/s?term={enc_cat}&near={enc_loc}"
+    elif "trustpilot" in p_lower:
+        return f"https://www.trustpilot.com/search?query={enc_cat}+{enc_loc}"
+
+    # 4. If platform_name is a domain (e.g. "somedirectory.com")
+    if "." in p_lower and " " not in p_lower:
+        clean_dom = p_lower.replace("www.", "")
+        return f"https://www.{clean_dom}/search?q={enc_cat}&location={enc_loc}"
+
+    # 5. Fallback: Proximity site search or Google directory discovery
+    return f"https://www.google.com/search?q={enc_cat}+{enc_loc}+{urllib.parse.quote_plus(platform_name)}"
+
+
+PLATFORM_PROFILES = {
+    "Fresha": {"baseline_sec": 5.0, "timeout_sec": 6.0, "color": "#a855f7", "icon": "🟣"},
+    "Airbnb": {"baseline_sec": 6.0, "timeout_sec": 7.2, "color": "#ef4444", "icon": "🔴"},
+    "Yelp": {"baseline_sec": 4.5, "timeout_sec": 5.4, "color": "#f97316", "icon": "🟠"},
+    "TripAdvisor": {"baseline_sec": 5.5, "timeout_sec": 6.6, "color": "#10b981", "icon": "🟢"},
+    "Google Maps": {"baseline_sec": 4.5, "timeout_sec": 5.4, "color": "#3b82f6", "icon": "🗺️"},
+}
+
+async def extract_platform_total_count(platform_page, platform_name: str) -> int:
+    """
+    Parses exact count badge rendered by directory platforms on proximity search.
+    """
+    try:
+        return await platform_page.evaluate(r"""(p) => {
+            const text = document.body.innerText || '';
+            if (p === 'Airbnb') {
+                const counter = document.querySelector('[data-testid="results-counter"], h1 span, [class*="results-counter"]');
+                if (counter) {
+                    const m = counter.innerText.match(/(\d[\d,]*)\s+(?:stays?|places?|homes?)/i);
+                    if (m) return parseInt(m[1].replace(/,/g, ''));
+                }
+            } else if (p === 'Yelp') {
+                const el = document.querySelector('[class*="pagination-results-count"], span.css-1122ukr');
+                if (el) {
+                    const m = el.innerText.match(/of\s+(\d[\d,]*)/i);
+                    if (m) return parseInt(m[1].replace(/,/g, ''));
+                }
+            } else if (p === 'TripAdvisor') {
+                const el = document.querySelector('.geos_widget_title, [class*="result-count"]');
+                if (el) {
+                    const m = el.innerText.match(/(\d[\d,]*)\s+(?:places?|properties|restaurants)/i);
+                    if (m) return parseInt(m[1].replace(/,/g, ''));
+                }
+            }
+            const gen = text.match(/\b(\d[\d,]*)\s+(?:results?|listings?|places?|venues?)\b/i);
+            return gen ? parseInt(gen[1].replace(/,/g, '')) : 0;
+        }""", platform_name)
+    except Exception:
+        return 0
+
+async def platform_area_search_worker(
     context,
-    queue: asyncio.Queue,
-    done_event: asyncio.Event,
-    pages_dict: Dict,
-    platform_name: str = "Fresha",
+    platform_page,
+    selected_platforms: List[str],
+    category: str,
+    location_name: str,
+    radius_km: float = 5.0,
+    max_results: int = 15,
     custom_url_pattern: str = "",
-    cdp_connected: bool = False,
-    maps_page = None,
-    linkedin_page = None,
-    general_location: str = ""
+    visible_browser: bool = True,
+    dedup_cache: Dict[str, Any] = None,
 ):
     """
-    Dedicated Worker for Tab 4 (Multi-Platform Directory Agent: Fresha, Airbnb, Yelp, TripAdvisor, Custom).
-    Searches target platforms using location and radius context, verifies brand matches,
-    extracts direct booking URLs, platform ratings, reviews, and pricing tiers,
-    and merges the normalized directory intelligence into the database.
+    Dedicated Proximity & Area Worker for Tab 4 (Multi-Source Platform Directory Scout).
+    Operates identically to Google Maps area scraping:
+    Searches the platform directly for the target category/query in the target geographic area/locality,
+    smoothly scrolls to discover all proximity listing cards, extracts ratings/reviews/prices/booking URLs,
+    and stores them into the directory database.
+    Supports running multiple platforms (e.g. Fresha, Airbnb, Yelp, TripAdvisor) in live Chrome Tab 4.
     """
-    tab_page = None
-    p_name = platform_name.strip() if platform_name else "Fresha"
+    if not selected_platforms:
+        selected_platforms = ["Fresha"]
 
-    while not done_event.is_set() or not queue.empty():
+    active_clean_platforms = [p.strip() for p in selected_platforms if p.strip()]
+    emit_event("log", f"🟣 [Tab 4 Platform Scout] Target platforms active ({len(active_clean_platforms)}): {', '.join(active_clean_platforms)}")
+
+    # =========================================================================
+    # PHASE 1: PROXIMITY CENSUS (Discover total businesses across ALL platforms)
+    # Probes each platform header first, dynamically applying 20% timeout margin.
+    # =========================================================================
+    platform_totals = {}
+    for p_name in active_clean_platforms:
+        target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
+        prof = PLATFORM_PROFILES.get(p_name, {"baseline_sec": 5.0, "timeout_sec": 6.0})
+        timeout_ms = int(prof["timeout_sec"] * 1000)
+
+        emit_event("status", f"Census: Probing {p_name} volume for '{category}' in '{location_name}'...")
+        emit_event("log", f"🎯 [Proximity Census] Probing {p_name} total available businesses in '{location_name}' (Limit: {prof['timeout_sec']}s)...")
+        emit_event("platform_navigated", {"url": target_url, "title": f"{p_name} Proximity Census", "platform": p_name})
+
+        detected_total = 0
         try:
-            item = await asyncio.wait_for(queue.get(), timeout=1.0)
-        except asyncio.TimeoutError:
-            continue
+            t0 = time.time()
+            await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            elapsed = time.time() - t0
+            rem_wait = max(0.4, min(1.5, prof["timeout_sec"] - elapsed))
+            await platform_page.wait_for_timeout(int(rem_wait * 1000))
+
+            detected_total = await extract_platform_total_count(platform_page, p_name)
+            if detected_total <= 0:
+                # Fallback: Count visible venue cards rendered on page 1
+                detected_total = await platform_page.evaluate("""() => {
+                    return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], li.border-color--default__09f24__Nrmcg, div.listing_details, article, [role="article"]').length;
+                }""")
+        except Exception as ce:
+            emit_event("log", f"⚠️ [Proximity Census] {p_name} response exceeded {prof['timeout_sec']}s. Defaulting to progressive count.")
+
+        final_plat_total = max(detected_total, max_results if max_results > 0 else 15)
+        platform_totals[p_name] = final_plat_total
+        emit_event("proximity_total", {
+            "platform": p_name,
+            "query": category,
+            "location": location_name,
+            "total": final_plat_total
+        })
+        emit_event("platform_progress", {
+            "platform": p_name,
+            "scraped": 0,
+            "skipped": 0,
+            "total": final_plat_total,
+            "percent": 0
+        })
+        emit_event("log", f"🎯 [Proximity Census Result] {p_name} reports ~{final_plat_total} businesses/listings in {location_name}.")
+
+    emit_event("log", "✅ Proximity Census Complete across all selected platforms. Beginning sequential harvesting...")
+
+    # =========================================================================
+    # PHASE 2: SEQUENTIAL HARVESTING (1 Platform After Another)
+    # Each platform is isolated in try...finally so failure NEVER skips another!
+    # =========================================================================
+    for plat_idx, p_name in enumerate(active_clean_platforms, 1):
+        target_url = build_platform_area_url(p_name, category, location_name, custom_url_pattern)
+        plat_total = platform_totals.get(p_name, max_results)
+        plat_scraped = 0
+        plat_skipped = 0
+
+        emit_event("status", f"Platform Scout [{plat_idx}/{len(active_clean_platforms)}]: Harvesting {p_name} in '{location_name}'...")
+        emit_event("log", f"🟣 [Tab 4 - Stage {plat_idx}/{len(active_clean_platforms)}] Harvesting {p_name} for '{category}' in '{location_name}'...")
+        emit_event("platform_navigated", {"url": target_url, "title": f"{p_name}: {category} in {location_name}", "platform": p_name})
+
+        try:
+            # Re-navigate if needed
+            if platform_page.url != target_url:
+                await platform_page.goto(target_url, wait_until="domcontentloaded", timeout=18000)
+                await platform_page.wait_for_timeout(1800)
+        except Exception as nav_e:
+            emit_event("log", f"⚠️ [Tab 4 - {p_name}] Navigation notice: {str(nav_e)[:60]}")
+
+        # Show HUD on Tab 4
+        try:
+            safe_loc = re.sub(r'[\'\"]', '', location_name)[:25]
+            await platform_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform: {p_name}', 'Harvesting {category} in {safe_loc}...', '#a855f7')")
         except Exception:
-            break
+            pass
 
-        idx = item.get("index", 1)
-        name = item.get("name", "").strip()
-        address = item.get("address", "")
-        lead_id = item.get("id")
-
-        if not name:
-            queue.task_done()
-            continue
-
-        city = extract_city_from_address(address) or general_location
-        core_brand = clean_brand_tokens(name, city=city)
-
-        emit_event("log", f"🟣 [Tab 4 - Platform Agent] Searching {p_name} for #{idx} '{name}' (Brand: '{core_brand}', Loc: '{city}')...")
-        emit_event("status", f"Scanning {p_name}: {core_brand}")
-
+        # Abort heavy video playback (e.g. Airbnb background videos) to optimize RAM and speed
         try:
-            # 1. Ensure Tab 4 page exists
-            if tab_page is None or tab_page.is_closed():
-                if cdp_connected:
-                    other_pages = [
-                        p for p in context.pages
-                        if p != maps_page
-                        and p != linkedin_page
-                        and p != (pages_dict.get("website") if pages_dict else None)
-                        and "google.com/maps" not in p.url
-                        and "linkedin.com" not in p.url
-                    ]
-                    if other_pages:
-                        tab_page = other_pages[0]
-                    else:
-                        tab_page = await context.new_page()
-                else:
-                    tab_page = await context.new_page()
+            await platform_page.route("**/*.{mp4,avi,mkv,webm,mp3,wav,ogg}", lambda r: r.abort())
+        except Exception:
+            pass
 
-                await clear_fixed_viewport(tab_page)
-                if pages_dict is not None:
-                    pages_dict["platform"] = tab_page
-
-            # 2. Build platform search URL
-            enc_brand = urllib.parse.quote(core_brand)
-            enc_city = urllib.parse.quote(city) if city else ""
-            target_url = ""
-
-            p_lower = p_name.lower()
-            if custom_url_pattern and "http" in custom_url_pattern:
-                target_url = custom_url_pattern.replace("{query}", enc_brand).replace("{location}", enc_city).replace("{city}", enc_city)
-            elif "fresha" in p_lower:
-                target_url = f"https://www.fresha.com/search?query={enc_brand}&address={enc_city}" if enc_city else f"https://www.fresha.com/search?query={enc_brand}"
-            elif "airbnb" in p_lower:
-                target_url = f"https://www.airbnb.com/s/{enc_city or enc_brand}/homes?query={enc_brand}"
-            elif "yelp" in p_lower:
-                target_url = f"https://www.yelp.com/search?find_desc={enc_brand}&find_loc={enc_city}"
-            elif "tripadvisor" in p_lower:
-                target_url = f"https://www.tripadvisor.com/Search?q={enc_brand}+{enc_city}"
-            else:
-                target_url = f"https://www.google.com/search?q={urllib.parse.quote(f'{core_brand} {city} {p_name}')}"
-
-            emit_event("log", f"🌐 [Tab 4] Navigating to {p_name}: {target_url}")
+        # Scroll dynamically down page to trigger proximity listings to render
+        for sc in range(3):
             try:
-                await tab_page.goto(target_url, wait_until="domcontentloaded", timeout=14000)
-                await tab_page.wait_for_timeout(1800)
-            except Exception as nav_e:
-                emit_event("log", f"⚠️ Tab 4 navigation note: {str(nav_e)[:50]}")
-
-            # HUD on Tab 4
-            try:
-                safe_brand = re.sub(r'[\'"]', '', core_brand)[:20]
-                await tab_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform: {p_name}', 'Matching {safe_brand}...', '#a855f7')")
+                await platform_page.evaluate("window.scrollBy({top: 850})")
+                await platform_page.wait_for_timeout(450)
             except Exception:
                 pass
 
-            # Scroll once to trigger listings
-            try:
-                await tab_page.evaluate("window.scrollBy({top: 500, behavior: 'smooth'})")
-                await tab_page.wait_for_timeout(800)
-            except Exception:
-                pass
+        # Extract cards across platforms with high-precision platform selectors, junk blacklisting, and validation
+        extracted_listings = await platform_page.evaluate(r"""() => {
+            const results = [];
+            const seenUrls = new Set();
+            const currUrl = window.location.href;
+            const isAirbnb = currUrl.includes('airbnb');
+            const isFresha = currUrl.includes('fresha');
+            const isYelp = currUrl.includes('yelp');
+            const isTripAdvisor = currUrl.includes('tripadvisor');
 
-            # 3. Extract candidate listings across platforms
-            extracted_listings = await tab_page.evaluate(r"""() => {
-                const results = [];
-                const cards = document.querySelectorAll(
-                    'a[href*="/a/"], div[data-qa="venue-card"], div.venue-card, ' +
-                    'div[data-testid="card-container"], div[itemprop="itemListElement"], ' +
-                    'div[data-testid="serp-ia-card"], li.border-color--default__09f24__Nrmcg, ' +
-                    '.search-result-card, a.property-card, div.result-card, ' +
-                    'div[role="group"], a[href*="/rooms/"]'
-                );
+            // Blacklist of UI controls, filter toolbars, headers, and navigation chrome
+            const junkRegex = /^(?:filters?|filter\s*\(?\d*\)?|show\s+map|map|search|clear\s+all|explore|instant\s+book|rooms\s+and\s+beds|property\s+type|amenities|sort\s+by|guest\s+favorites?|menu|view\s+in\s+map|sign\s+in|log\s+in|navigation|next|previous|page\s+\d+|categories|ratings?|prices?|display\s+total|share|save)$/i;
 
-                cards.forEach(card => {
-                    let titleEl = card.querySelector('h2, h3, h4, .title, [data-qa="venue-name"], [data-testid="listing-card-title"], div[id^="title_"], a.booking-link, [class*="t1jqs7"]');
-                    let ratingEl = card.querySelector('[data-qa="rating-badge"], .rating, [aria-label*="rating"], [aria-label*="star"], span[class*="rating"], span[class*="r1dxllyb"]');
-                    let reviewsEl = card.querySelector('[data-qa="reviews-count"], .review-count, span[class*="review"], span[class*="count"]');
-                    let linkEl = card.matches('a') ? card : card.querySelector('a[href*="/rooms/"], a[href*="/a/"], a[href]');
+            let cardSelectors = [];
+            if (isAirbnb) {
+                cardSelectors = ['div[data-testid="card-container"]', 'div[itemprop="itemListElement"]', 'div[aria-labelledby*="title_"]', 'a[href*="/rooms/"]'];
+            } else if (isFresha) {
+                cardSelectors = ['div[data-qa="venue-card"]', 'div.venue-card', 'a[href*="/a/"]'];
+            } else if (isYelp) {
+                cardSelectors = ['div[data-testid="serp-ia-card"]', 'li.border-color--default__09f24__Nrmcg', 'div.container__09f24__FeTO7'];
+            } else if (isTripAdvisor) {
+                cardSelectors = ['div.listing_details', 'div.listItem', 'div[data-automation="hotel-card-title"]', 'div.result-card'];
+            } else {
+                // Universal directory card selectors across any modern web platform
+                cardSelectors = [
+                    'article', '[role="article"]',
+                    'div[data-testid*="property-card"]', 'div[data-testid*="listing"]', 'div[data-testid*="card"]', 'div[data-testid*="result"]',
+                    'div[itemprop="itemListElement"]', 'li[itemprop="itemListElement"]',
+                    'div.search-result', 'li.search-result', 'div.search-result-card', 'div.search-item',
+                    'div.venue-card', 'div.place-card', 'div.businessCard', 'div.listing-card', 'div.result-card',
+                    'div.directory-card', 'div.directory-item', 'div.store-card', 'div.vendor-card',
+                    'div.property-card', 'a.property-card'
+                ];
+            }
 
-                    let title = titleEl ? (titleEl.innerText || titleEl.textContent || "").trim() : "";
-                    if (!title && linkEl) {
-                        const aria = linkEl.getAttribute('aria-label') || '';
-                        title = aria.split(' - ')[0] || aria.split(' · ')[0] || aria;
-                    }
-                    if (!title) {
-                        title = (card.innerText || "").split('\n')[0].trim();
-                    }
+            let cards = Array.from(document.querySelectorAll(cardSelectors.join(', ')));
 
-                    let url = linkEl ? linkEl.href : window.location.href;
-                    let rawRating = ratingEl ? (ratingEl.getAttribute('aria-label') || ratingEl.innerText || "").trim() : "";
-                    if (!rawRating) {
-                        const m = (card.innerText || '').match(/(?:★|star|rating)?\s*(\d\.\d+)\s*(?:\((\d+)\))?/i);
-                        if (m) rawRating = m[0];
-                    }
-
-                    let rawReviews = reviewsEl ? (reviewsEl.innerText || "").trim() : "";
-                    
-                    let priceText = '';
-                    let priceEl = card.querySelector('[data-qa="price"], .price, [class*="price"]');
-                    if (priceEl) {
-                        priceText = (priceEl.innerText || "").trim();
-                    } else {
-                        card.querySelectorAll('span, div').forEach(el => {
-                            const txt = (el.innerText || '').trim();
-                            if (txt.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+/i) && (!priceText || txt.length < priceText.length)) {
-                                priceText = txt;
-                            }
-                        });
-                    }
-
-                    let rMatch = rawRating.match(/(\d+(?:\.\d+)?)/);
-                    let ratingVal = rMatch ? parseFloat(rMatch[1]) : 0.0;
-
-                    let revMatch = rawReviews.match(/(\d[\d,]*)/);
-                    let revCount = revMatch ? parseInt(revMatch[1].replace(/,/g, ''), 10) : 0;
-
-                    const lowerTitle = title.toLowerCase();
-                    if (title && url && url.startsWith('http') && 
-                        !url.includes('/login') && !url.includes('/signup') &&
-                        lowerTitle !== 'filters' && lowerTitle !== 'filter' && 
-                        lowerTitle !== 'show map' && lowerTitle !== 'search') {
-                        results.push({
-                            title: title.replace(/[\r\n]+/g, ' ').trim(),
-                            url: url.split('?')[0],
-                            rating: ratingVal,
-                            reviews_count: revCount,
-                            price_info: priceText.replace(/[\r\n]+/g, ' ').trim()
-                        });
+            // Dynamic fallback: If no cards matched on an unusual custom site, find repeating containers enclosing heading links
+            if (cards.length === 0) {
+                const headingLinks = document.querySelectorAll('main h2 a, main h3 a, main h4 a, #root h2 a, #root h3 a, body h2 a, body h3 a');
+                const seenContainers = new Set();
+                headingLinks.forEach(hl => {
+                    const cont = hl.closest('article, [class*="card"], [class*="item"], [class*="listing"], [class*="result"], li, div');
+                    if (cont && !seenContainers.has(cont) && cont !== document.body && cont !== document.documentElement) {
+                        seenContainers.add(cont);
+                        cards.push(cont);
                     }
                 });
+            }
 
-                return results;
-            }""")
-
-            # 4. Filter, Match & Populate Directory
-            best_match = None
-            if extracted_listings and isinstance(extracted_listings, list):
-                # Save top discovered listings into platform directory
-                for cand in extracted_listings[:6]:
-                    c_title = cand.get("title", "")
-                    if not c_title:
-                        continue
-                    is_match = (
-                        verify_company_name_match(core_brand, c_title) or 
-                        verify_company_name_match(name, c_title) or
-                        (core_brand.lower() in c_title.lower() and len(core_brand) >= 3)
-                    )
-                    cand_lead_id = lead_id if is_match else None
-                    cand_data = {
-                        "lead_id": cand_lead_id,
-                        "platform": p_name,
-                        "title": c_title,
-                        "clean_brand": clean_brand_tokens(c_title, city=city),
-                        "url": cand.get("url", target_url),
-                        "booking_url": cand.get("url", target_url),
-                        "rating": cand.get("rating", 0.0),
-                        "reviews_count": cand.get("reviews_count", 0),
-                        "price_info": cand.get("price_info", ""),
-                        "address": f"{city}, Area Radius" if city else address,
-                        "verified": 1 if is_match else 0
+            cards.forEach((card, c_idx) => {
+                card.setAttribute('data-mavon-card', c_idx.toString());
+                // Determine direct listing URL
+                let linkEl = null;
+                if (card.matches('a')) {
+                    linkEl = card;
+                } else {
+                    if (isAirbnb) {
+                        linkEl = card.querySelector('a[href*="/rooms/"]');
+                    } else if (isFresha) {
+                        linkEl = card.querySelector('a[href*="/a/"], a[data-qa="venue-name-link"]');
+                    } else if (isYelp) {
+                        linkEl = card.querySelector('a[href*="/biz/"]');
+                    } else if (isTripAdvisor) {
+                        linkEl = card.querySelector('a[href*="_Review-"], a[href*="/Restaurant_Review"], a[href*="/Hotel_Review"]');
                     }
-                    save_platform_listing(cand_data)
-                    if is_match and not best_match:
-                        best_match = cand
+                    if (!linkEl) {
+                        // Prioritize heading or dedicated entity links so we don't accidentally grab category or share links
+                        linkEl = card.querySelector('h2 a, h3 a, h4 a, [data-testid*="title"] a, a[class*="title"], [class*="title"] a, a[href*="/place/"], a[href*="/biz/"], a[href*="/venue/"], a[href*="/hotel/"], a[href*="/restaurant/"], a[href*="/detail/"], a[href*="/item/"]');
+                    }
+                    if (!linkEl) {
+                        linkEl = card.querySelector('a[href^="http"], a[href^="/"]');
+                    }
+                }
 
-            if best_match:
-                emit_event("platform_listing_found", {
-                    "lead_id": lead_id,
-                    "company_name": name,
-                    "platform": p_name,
-                    "rating": best_match.get("rating", 0.0),
-                    "review_count": best_match.get("reviews_count", 0),
-                    "listing_url": best_match.get("url", target_url),
-                    "booking_url": best_match.get("url", target_url),
-                    "price_range": best_match.get("price_info", ""),
-                    "verified": True
-                })
-                emit_event("log", f"🟣 [Tab 4 Finished: #{idx} {name}] Verified on {p_name}: {best_match.get('rating')} ★ ({best_match.get('reviews_count')} reviews) | 💰 {best_match.get('price_info')} | 🔗 {best_match.get('url')}")
-            elif extracted_listings:
-                top_cand = extracted_listings[0]
-                emit_event("platform_listing_found", {
-                    "lead_id": lead_id,
-                    "company_name": name,
-                    "platform": p_name,
-                    "rating": top_cand.get("rating", 0.0),
-                    "review_count": top_cand.get("reviews_count", 0),
-                    "listing_url": top_cand.get("url", target_url),
-                    "booking_url": top_cand.get("url", target_url),
-                    "price_range": top_cand.get("price_info", ""),
-                    "verified": False
-                })
-                emit_event("log", f"🟣 [Tab 4] Stored {len(extracted_listings[:6])} {p_name} listings in directory for area '{city}'. Top listing: '{top_cand.get('title')}' ({top_cand.get('rating')} ★, {top_cand.get('price_info')})")
-            else:
-                emit_event("log", f"ℹ️ [Tab 4] No listings returned on {p_name} for '{name}' ({city})")
+                if (!linkEl || !linkEl.href) return;
+                let href = linkEl.href.split('?')[0].replace(/\/+$/, '');
 
-        except Exception as err:
-            emit_event("log", f"⚠️ Error scanning {p_name} for #{idx} {name}: {str(err)[:60]}")
-        finally:
-            queue.task_done()
+                // Strict platform-specific listing URL validation
+                if (isAirbnb && !href.includes('/rooms/')) return;
+                if (isFresha && !href.includes('/a/') && !card.querySelector('[data-qa="venue-card"]')) return;
+                if (isYelp && !href.includes('/biz/')) return;
+                if (isTripAdvisor && !href.includes('_Review-') && !href.includes('/Hotel_Review') && !href.includes('/Restaurant_Review')) return;
+
+                // Universal rejection of non-listing URLs, search pages, utility & auth pages
+                if (href === currUrl.split('?')[0] || href.match(/\/search(?:results)?\b/i) || href.match(/\/find\b/i)) return;
+                if (isAirbnb && (href.includes('/s/') || href.includes('/homes'))) return;
+                if (href.match(/\/(?:login|signin|signup|register|auth|terms|privacy|cookie|about|contact|help|faq)\b/i)) return;
+                if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+                if (seenUrls.has(href)) return;
+
+                // Title extraction
+                let title = '';
+                let titleEl = card.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4, .title, a.booking-link, [class*="t1jqs7"]');
+                if (titleEl) {
+                    title = (titleEl.innerText || titleEl.textContent || '').trim();
+                }
+
+                const aria = (linkEl.getAttribute('aria-label') || card.getAttribute('aria-label') || '').trim();
+                if ((!title || junkRegex.test(title)) && aria) {
+                    title = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
+                }
+
+                if (!title || junkRegex.test(title)) {
+                    const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(s => s.length >= 3 && !junkRegex.test(s));
+                    if (lines.length > 0) title = lines[0];
+                }
+
+                if (!title || title.length < 3 || junkRegex.test(title)) return;
+
+                // 1. High-Precision Subtitle & Neighborhood Address extraction
+                let address = '';
+                const subEls = Array.from(card.querySelectorAll('[data-testid="listing-card-subtitle"], [data-qa="venue-address"], .subtitle, [class*="subtitle"], address, [class*="address"], [class*="locality"], [class*="location"]'));
+                for (const el of subEls) {
+                    const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+                    // Exclude non-location clutter (distance: '15 km away', dates: '9-14 Nov', host tags)
+                    if (txt && !txt.match(/\b\d+\s*(?:km|kilometres?|miles?)\s*away\b/i) &&
+                        !txt.match(/\b\d+[-–]\d+\s+[A-Za-z]+\b/) &&
+                        !txt.match(/^(?:individual host|superhost|entire\s+|private\s+room)/i) &&
+                        txt.length >= 3) {
+                        address = txt;
+                        break;
+                    }
+                }
+                // If address is still blank, extract neighborhood from title pattern 'in <Neighborhood>'
+                if (!address && title) {
+                    const inMatch = title.match(/\bin\s+([A-Za-z0-9\s,\.\-]+)$/i);
+                    if (inMatch && inMatch[1].trim().length >= 3) {
+                        address = inMatch[1].trim();
+                    }
+                }
+
+                // 2. High-Precision Rating & Reviews Count extraction (Avoids false matching '4 BHK' or '2 bedrooms')
+                let ratingVal = 0.0;
+                let revCount = 0;
+                const rBadge = card.querySelector('[data-qa="rating-badge"], [aria-label*="rating"], [aria-label*="star"], [class*="rating"], span.r1dxllyb, span.ceNzKf');
+                const rBadgeText = rBadge ? (rBadge.getAttribute('aria-label') || rBadge.innerText || '') : '';
+                const textToScan = (rBadgeText + ' ' + aria + ' ' + (card.innerText || '')).replace(/\s+/g, ' ');
+
+                // A. Explicit keyword or symbol prefix: 'Rated 4.92', '★ 4.9', 'Score 8.5'
+                let mRate = textToScan.match(/(?:rated\s+|rating:?\s*|score:?\s*|★\s*)([0-5](?:\.\d+)?)/i);
+                if (!mRate) {
+                    // B. Suffix with star, /5, or out of 5: '4.92 stars', '5/5', '4.8 out of 5'
+                    mRate = textToScan.match(/\b([0-5](?:\.\d+)?)\s*(?:★|\/5\b|out of 5\b|\bstar(?:s)?\b)/i);
+                }
+                if (!mRate) {
+                    // C. Floating point number between 1.0 and 5.0 (NEVER bare integer to avoid '4 BHK')
+                    mRate = textToScan.match(/\b([1-5]\.\d{1,2})\b/);
+                }
+                if (mRate) {
+                    ratingVal = parseFloat(mRate[1]);
+                }
+
+                // Reviews count parsing
+                const revEl = card.querySelector('[data-qa="reviews-count"], .review-count, [class*="review"], [class*="count"]');
+                const revText = revEl ? (revEl.innerText || revEl.getAttribute('aria-label') || '') : '';
+                const revScan = (revText + ' ' + textToScan);
+
+                const mk = revScan.match(/\(?\s*(\d+(?:\.\d+)?)\s*k\s*(?:reviews?|ratings?|votes?)?\s*\)?/i);
+                if (mk && (revScan.toLowerCase().includes('k review') || revScan.toLowerCase().includes('k rating') || mk[0].includes('('))) {
+                    revCount = Math.round(parseFloat(mk[1]) * 1000);
+                } else {
+                    const mRev = revScan.match(/(?:from\s*|\(|\b)(\d[\d,]*)\s*(?:reviews?|ratings?|votes?)\b/i) ||
+                                 revScan.match(/[0-5](?:\.\d+)?\s*\(\s*(\d[\d,]*)\s*\)/) ||
+                                 revScan.match(/(?:average\s*rating,?\s*|from\s*)(\d[\d,]*)/i);
+                    if (mRev) {
+                        revCount = parseInt(mRev[1].replace(/,/g, ''), 10);
+                    }
+                }
+
+                // 3. High-Precision Price extraction
+                let priceText = '';
+                const priceEl = card.querySelector('[data-testid*="price"], [data-qa="price"], .price, [class*="_11jcbg2"], [class*="price"]');
+                if (priceEl) {
+                    priceText = (priceEl.innerText || '').replace(/[\r\n]+/g, ' ').trim();
+                }
+                if (!priceText) {
+                    const pMatch = textToScan.match(/(?:[\$£€₹]|Rs\.?)\s*[\d,]+(?:\s*(?:\/|\s+per\s+)?(?:night|total|person|stay))?/i);
+                    if (pMatch) priceText = pMatch[0];
+                }
+                if (priceText && !priceText.toLowerCase().includes('night') && !priceText.toLowerCase().includes('total')) {
+                    if (textToScan.toLowerCase().includes('night')) {
+                        priceText = priceText + ' / night';
+                    }
+                }
+
+                // Do NOT take photo images of property/venue; we capture platform details
+                seenUrls.add(href);
+                results.push({
+                    card_index: c_idx,
+                    title: title.replace(/[\r\n]+/g, ' ').trim(),
+                    url: href,
+                    address: address,
+                    rating: ratingVal,
+                    reviews_count: revCount,
+                    price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
+                    screenshot: ""
+                });
+            });
+
+            return results;
+        }""")
+
+        emit_event("log", f"🟣 [Tab 4 - {p_name}] Harvested {len(extracted_listings)} area listings for '{category}' in '{location_name}'.")
+
+        # Capture crisp screenshot of platform details for discovered listing cards (NOT room/venue photos)
+        ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
+        os.makedirs(ss_dir, exist_ok=True)
+        for cand in extracted_listings[:max_results]:
+            c_idx = cand.get("card_index", 0)
+            c_title = cand.get("title", "")
+            clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', c_title or p_name)[:25]
+            ss_file = f"{p_name}_{clean_fn}_{c_idx}_{int(time.time())}.jpg"
+            ss_full = os.path.join(ss_dir, ss_file)
+            try:
+                card_loc = platform_page.locator(f'[data-mavon-card="{c_idx}"]').first
+                if await card_loc.count() > 0:
+                    # Hide photo carousel/images within card so the screenshot captures ONLY details and things on the platform
+                    await card_loc.evaluate("""el => {
+                        const mediaBox = el.querySelector('picture, [data-testid="card-media-carousel"], [class*="media"], [class*="image"], [class*="carousel"], [class*="photo"], img');
+                        if (mediaBox) mediaBox.style.display = 'none';
+                    }""")
+                    await card_loc.screenshot(path=ss_full, quality=80, type="jpeg")
+                    if os.path.exists(ss_full):
+                        cand["screenshot"] = f"/screenshots/{ss_file}"
+            except Exception:
+                pass
+
+        # Save discovered listings into database with PRE-CHECK DEDUPLICATION
+        saved_count = 0
+        for cand in extracted_listings[:max_results]:
+            c_title = cand.get("title", "")
+            if not c_title:
+                continue
+            c_url = cand.get("url", target_url)
+
+            # Pre-check if listing is already indexed in database
+            if is_platform_listing_already_scraped(p_name, c_title, c_url, dedup_cache):
+                plat_skipped += 1
+                emit_event("lead_skipped", {
+                    "platform": p_name,
+                    "name": c_title,
+                    "reason": "Already in database",
+                    "scraped": plat_scraped,
+                    "skipped": plat_skipped,
+                    "total": plat_total
+                })
+                emit_event("platform_progress", {
+                    "platform": p_name,
+                    "scraped": plat_scraped,
+                    "skipped": plat_skipped,
+                    "total": plat_total,
+                    "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
+                })
+                continue
+            c_addr = cand.get("address")
+            if not c_addr or len(c_addr) < 3:
+                c_addr = f"{location_name}, Proximity Radius"
+            elif location_name.lower() not in c_addr.lower():
+                c_addr = f"{c_addr}, {location_name}"
+
+            cand_data = {
+                "platform": p_name,
+                "title": c_title,
+                "clean_brand": extract_core_brand_name(c_title, city=location_name),
+                "url": cand.get("url", target_url),
+                "booking_url": cand.get("booking_url", cand.get("url", target_url)),
+                "rating": cand.get("rating", 0.0),
+                "reviews_count": cand.get("reviews_count", 0),
+                "price_info": cand.get("price_info", ""),
+                "address": c_addr,
+                "screenshot": cand.get("screenshot", ""),
+                "verified": 0
+            }
+            save_platform_listing(cand_data)
+            saved_count += 1
+            plat_scraped += 1
+            if dedup_cache:
+                dedup_cache["listings_titles"].add(c_title.strip().lower())
+                dedup_cache["listings_urls"].add(c_url.split('?')[0].rstrip('/'))
+            emit_event("platform_progress", {
+                "platform": p_name,
+                "scraped": plat_scraped,
+                "skipped": plat_skipped,
+                "total": plat_total,
+                "percent": min(100, round(((plat_scraped + plat_skipped) / max(1, plat_total)) * 100))
+            })
+            emit_event("platform_listing_found", {
+                "lead_id": None,
+                "company_name": c_title,
+                "platform": p_name,
+                "rating": cand.get("rating", 0.0),
+                "review_count": cand.get("reviews_count", 0),
+                "listing_url": cand.get("url", target_url),
+                "booking_url": cand.get("url", target_url),
+                "price_range": cand.get("price_info", ""),
+                "verified": False
+            })
+
+        emit_event("log", f"🟣 [Tab 4 - {p_name}] Stored {saved_count} listings in database for '{location_name}'.")
+
+        # Deep detail inspection for top 2 listings
+        for deep_cand in extracted_listings[:2]:
+            deep_url = deep_cand.get("url")
+            if deep_url and deep_url.startswith("http") and deep_url != target_url:
+                try:
+                    emit_event("log", f"🔍 [Tab 4 Deep Details] Inspecting: {deep_cand.get('title')[:30]}...")
+                    await platform_page.goto(deep_url, wait_until="domcontentloaded", timeout=12000)
+                    await platform_page.wait_for_timeout(1000)
+
+                    # Scroll past hero photo gallery directly to the details, specs, amenities & booking section
+                    try:
+                        await platform_page.evaluate("""() => {
+                            // Minimize/hide giant photo gallery banner so details take center stage
+                            const gallery = document.querySelector('[data-section-id="OVERVIEW_DEFAULT"], [data-testid="pdp-gallery-container"], .photo-gallery-banner');
+                            if (gallery) {
+                                gallery.style.maxHeight = '120px';
+                                gallery.style.overflow = 'hidden';
+                                gallery.style.opacity = '0.3';
+                            }
+                            // Scroll to listing details, description, amenities, and price section
+                            const detailsTarget = document.querySelector(
+                                '[data-section-id="DESCRIPTION_DEFAULT"], ' +
+                                '[data-section-id="OVERVIEW_DEFAULT_V2"], ' +
+                                '[data-section-id="TITLE_DEFAULT"], ' +
+                                '[data-testid="pdp-overview-default"], ' +
+                                '#site-content, main, [data-qa="venue-services"], ' +
+                                '#reviews, .overview-section, .listing-details, #property-details'
+                            );
+                            if (detailsTarget) {
+                                detailsTarget.scrollIntoView({ block: 'start' });
+                            } else {
+                                window.scrollBy({ top: 480 });
+                            }
+                        }""")
+                        await platform_page.wait_for_timeout(600)
+                    except Exception:
+                        pass
+
+                    # Capture crisp screenshot of directory listing details (NOT room/venue photos)
+                    ss_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "screenshots"))
+                    os.makedirs(ss_dir, exist_ok=True)
+                    clean_fn = re.sub(r'[^a-zA-Z0-9]', '_', deep_cand.get("title", p_name))[:25]
+                    ss_file = f"{p_name}_{clean_fn}_{int(time.time())}.jpg"
+                    ss_full = os.path.join(ss_dir, ss_file)
+                    try:
+                        await platform_page.screenshot(path=ss_full, quality=80, type="jpeg")
+                    except Exception:
+                        pass
+
+                    deep_specs = await platform_page.evaluate(r"""() => {
+                        const out = { phone: '', address: '', booking_url: window.location.href, price_info: '' };
+                        const tel = document.querySelector('a[href^="tel:"]');
+                        if (tel) out.phone = (tel.innerText || tel.href.replace('tel:', '')).trim();
+                        const addrEl = document.querySelector('[data-qa="venue-address"], address, [itemprop="address"], .venue-address, .address');
+                        if (addrEl) out.address = (addrEl.innerText || '').replace(/\s+/g, ' ').trim();
+                        const bookBtn = document.querySelector('button[data-qa="book-now"], a[href*="book"], button.book-button, .booking-btn');
+                        if (bookBtn && bookBtn.href) out.booking_url = bookBtn.href;
+                        return out;
+                    }""")
+                    if deep_specs.get("phone") or deep_specs.get("address") or os.path.exists(ss_full):
+                        deep_cand_update = {
+                            "platform": p_name,
+                            "title": deep_cand.get("title"),
+                            "clean_brand": extract_core_brand_name(deep_cand.get("title"), city=location_name),
+                            "url": deep_url,
+                            "booking_url": deep_specs.get("booking_url", deep_url),
+                            "rating": deep_cand.get("rating", 0.0),
+                            "reviews_count": deep_cand.get("reviews_count", 0),
+                            "price_info": deep_cand.get("price_info", ""),
+                            "address": deep_specs.get("address") or f"{location_name}, Proximity Radius",
+                            "screenshot": f"/screenshots/{ss_file}" if os.path.exists(ss_full) else deep_cand.get("screenshot", ""),
+                            "verified": 0
+                        }
+                        save_platform_listing(deep_cand_update)
+                except Exception:
+                    pass
+
 
 async def run_scraper(
     query: str,
@@ -1362,6 +1782,7 @@ async def run_scraper(
     enable_linkedin: bool = True,
     enable_platform: bool = False,
     platform_name: str = "Fresha",
+    platforms: Optional[str] = None,
     platform_custom_url: Optional[str] = None,
     dedup_area: bool = True,
     skip_existing_db: bool = False,
@@ -1370,6 +1791,9 @@ async def run_scraper(
     cleaned_query = query.strip() if query else ""
     if not cleaned_query or cleaned_query.lower() in ["all", "all shops", "all shops in area"]:
         cleaned_query = "shops"
+
+    search_category, search_location = parse_search_query_and_location(cleaned_query, lat=lat, lon=lon)
+    selected_platforms_list = [p.strip() for p in (platforms or platform_name).split(",") if p.strip()] if enable_platform else []
 
     emit_event("status", "Launching Google Chrome on your screen...")
     emit_event("log", f"Starting Desktop Chrome (Visible: {visible_browser})...")
@@ -1387,6 +1811,8 @@ async def run_scraper(
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
             "--hide-crash-restore-bubble",
+            "--disk-cache-size=33554432",
+            "--media-cache-size=16777216",
         ]
 
         # Load Custom Mavon Scraper Chrome Extension
@@ -1505,7 +1931,7 @@ async def run_scraper(
         # STANDALONE ENTERPRISE / COMPANY SEARCH MODE
         # (Direct LinkedIn Intelligence without Google Maps)
         # =============================================================
-        if standalone_companies or not enable_maps:
+        if standalone_companies or (not enable_maps and enable_linkedin and not enable_platform and not enable_website):
             if standalone_companies:
                 comp_list = [c.strip() for c in standalone_companies.split(",") if c.strip()]
             elif cleaned_query and cleaned_query != "shops":
@@ -1587,22 +2013,43 @@ async def run_scraper(
         # =============================================================
         # By default, open ONLY 2 tabs on startup: Tab 1 (Maps) and Tab 2 (LinkedIn)
         # Tab 3 (Shop Website) opens dynamically based on shop website
-        pages_dict = {"website": None, "linkedin": None, "platform": None}
+        # Dedicated 4-Agent Tab Architecture:
+        # Tab 1: maps_page (Agent 1 - Google Maps)
+        # Tab 2: website_page (Agent 2 - Shop Website, Anti-bot, Cookies, Emails)
+        # Tab 3: linkedin_page (Agent 3 - LinkedIn Corporate & People Extraction)
+        # Tab 4: platform_page (Agent 4 - Platform Directory Scout: Fresha, Airbnb, Yelp, TripAdvisor)
+        pages_dict = {"maps": None, "website": None, "linkedin": None, "platform": None}
+        maps_page = None
+        website_page = None
+        linkedin_page = None
+        platform_page = None
+
         if cdp_connected:
             existing_maps = [p for p in context.pages if "google.com/maps" in p.url]
             existing_li = [p for p in context.pages if "linkedin.com" in p.url]
+            known_plat_domains = ["fresha.com", "airbnb.com", "yelp.com", "tripadvisor.com", "booking.com", "zomato.com", "justdial.com", "treatwell", "opentable.com", "yellowpages.com"]
+            if platform_name and "." in platform_name:
+                known_plat_domains.append(platform_name.lower())
+            if platform_custom_url and "http" in platform_custom_url:
+                try:
+                    host = urllib.parse.urlparse(platform_custom_url).hostname
+                    if host:
+                        known_plat_domains.append(host.lower())
+                except Exception:
+                    pass
+            existing_plat = [p for p in context.pages if any(d in p.url.lower() for d in known_plat_domains)]
+            
             maps_page = existing_maps[0] if (existing_maps and enable_maps) else (await context.new_page() if enable_maps else None)
-            if existing_li and enable_linkedin:
-                linkedin_page = existing_li[0]
-            elif enable_linkedin:
-                linkedin_page = await context.new_page()
-            else:
-                linkedin_page = None
+            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else (await context.new_page() if enable_linkedin else None)
+            platform_page = existing_plat[0] if (existing_plat and enable_platform) else (await context.new_page() if enable_platform else None)
+            website_page = await context.new_page() if (enable_website and extract_emails) else None
         else:
             pages_avail = list(context.pages)
             maps_page = pages_avail.pop(0) if (enable_maps and pages_avail) else (await context.new_page() if enable_maps else None)
+            website_page = pages_avail.pop(0) if (enable_website and extract_emails and pages_avail) else (await context.new_page() if (enable_website and extract_emails) else None)
             linkedin_page = pages_avail.pop(0) if (enable_linkedin and pages_avail) else (await context.new_page() if enable_linkedin else None)
-            # Close any leftover stray tabs so exactly 2 tabs exist at startup
+            platform_page = pages_avail.pop(0) if (enable_platform and pages_avail) else (await context.new_page() if enable_platform else None)
+            # Close any leftover stray tabs
             for stray in pages_avail:
                 try:
                     await stray.close()
@@ -1610,17 +2057,61 @@ async def run_scraper(
                     pass
 
         if maps_page:
+            pages_dict["maps"] = maps_page
             await clear_fixed_viewport(maps_page)
+        if website_page:
+            pages_dict["website"] = website_page
+            await clear_fixed_viewport(website_page)
         if linkedin_page:
             pages_dict["linkedin"] = linkedin_page
             await clear_fixed_viewport(linkedin_page)
-
-    
-        if visible_browser and maps_page:
+        if platform_page:
+            pages_dict["platform"] = platform_page
+            await clear_fixed_viewport(platform_page)
+            p_target = (platform_name or "Fresha").lower().strip()
+            if "airbnb" in p_target:
+                p_home = "https://www.airbnb.com/"
+            elif "yelp" in p_target:
+                p_home = "https://www.yelp.com/"
+            elif "tripadvisor" in p_target:
+                p_home = "https://www.tripadvisor.com/"
+            elif "booking" in p_target:
+                p_home = "https://www.booking.com/"
+            elif "zomato" in p_target:
+                p_home = "https://www.zomato.com/"
+            elif "justdial" in p_target:
+                p_home = "https://www.justdial.com/"
+            elif "treatwell" in p_target:
+                p_home = "https://www.treatwell.com/"
+            elif "yellowpages" in p_target:
+                p_home = "https://www.yellowpages.com/"
+            elif "opentable" in p_target:
+                p_home = "https://www.opentable.com/"
+            elif platform_custom_url and "http" in platform_custom_url:
+                p_home = platform_custom_url.split("?")[0]
+            elif "." in p_target and " " not in p_target:
+                p_home = f"https://www.{p_target.replace('www.', '')}" if not p_target.startswith("http") else p_target
+            else:
+                p_home = "https://www.fresha.com/"
+            emit_event("log", f"Navigating Tab 4 ({platform_name}): {p_home}")
+            emit_event("platform_navigated", {"url": p_home, "title": f"Directory: {platform_name}", "platform": platform_name})
             try:
-                await maps_page.bring_to_front()
+                await platform_page.goto(p_home, wait_until="domcontentloaded", timeout=14000)
+                await platform_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Platform Scout: {platform_name}', 'Tab 4 Live on Chrome', '#a855f7')")
             except Exception:
                 pass
+
+    
+        if visible_browser:
+            if maps_page and not maps_page.is_closed():
+                try: await maps_page.bring_to_front()
+                except Exception: pass
+            elif platform_page and not platform_page.is_closed():
+                try: await platform_page.bring_to_front()
+                except Exception: pass
+            elif linkedin_page and not linkedin_page.is_closed():
+                try: await linkedin_page.bring_to_front()
+                except Exception: pass
 
         # Navigate Tab 2 (LinkedIn) on startup so both Maps and LinkedIn tabs are open by default
         if linkedin_page:
@@ -1640,65 +2131,71 @@ async def run_scraper(
 
         worker_task = None
         if website_queue:
-            worker_task = asyncio.create_task(website_worker(context, website_queue, website_done_event, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict, cdp_connected=cdp_connected))
+            worker_task = asyncio.create_task(website_worker(context, website_queue, website_done_event, website_page=website_page, maps_page=maps_page, linkedin_queue=linkedin_queue, pages_dict=pages_dict, cdp_connected=cdp_connected))
 
         linkedin_task = None
         if linkedin_page and linkedin_queue:
             linkedin_task = asyncio.create_task(linkedin_worker(linkedin_page, linkedin_queue, linkedin_done_event))
 
+        scraped_places = []
+        skipped_count = 0
+        dedup_cache = load_proximity_dedup_cache(search_location)
+
         platform_task = None
-        if enable_platform and platform_queue:
-            platform_task = asyncio.create_task(platform_worker(
+        if enable_platform and platform_page:
+            platform_task = asyncio.create_task(platform_area_search_worker(
                 context=context,
-                queue=platform_queue,
-                done_event=platform_done_event,
-                pages_dict=pages_dict,
-                platform_name=platform_name,
+                platform_page=platform_page,
+                selected_platforms=selected_platforms_list,
+                category=search_category,
+                location_name=search_location,
+                radius_km=radius_km,
+                max_results=max_results,
                 custom_url_pattern=platform_custom_url or "",
-                cdp_connected=cdp_connected,
-                maps_page=maps_page,
-                linkedin_page=linkedin_page,
-                general_location=cleaned_query
+                visible_browser=visible_browser,
+                dedup_cache=dedup_cache
             ))
+        proximity_total_estimated = max_results if not scrape_all else 120
+        emit_event("proximity_total", {"platform": "Google Maps", "query": cleaned_query, "location": search_location, "total": proximity_total_estimated})
+        emit_event("log", f"⚡ Loaded proximity deduplication cache ({dedup_cache['total_existing_leads']} leads, {dedup_cache['total_existing_listings']} directory listings in DB).")
 
-        # Dynamic zoom from radius_km
-        effective_zoom = radius_to_zoom(radius_km) if radius_km else zoom
-        encoded_query = urllib.parse.quote_plus(cleaned_query)
-        if lat is not None and lon is not None:
-            search_url = f"https://www.google.com/maps/search/{encoded_query}/@{lat},{lon},{effective_zoom}z?hl=en"
-        else:
-            search_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
-
-        emit_event("log", f"Navigating Tab 1 (Google Maps): {search_url}")
-        emit_event("status", f"Searching Google Maps: {cleaned_query}")
-        await maps_page.goto(search_url, wait_until="domcontentloaded")
-        force_foreground_window()
-
-        # Handle Cookie Consent on Google Maps
-        try:
-            consent_btn = maps_page.locator('button:has-text("Reject all"), button:has-text("Accept all"), form[action*="consent"] button').first
-            if await consent_btn.is_visible(timeout=2000):
-                emit_event("log", "Accepting cookie consent...")
-                await consent_btn.click()
-                await maps_page.wait_for_timeout(1000)
-        except Exception:
-            pass
-
-        # Wait for results feed
-        feed_selector = 'div[role="feed"]'
-        try:
-            await maps_page.wait_for_selector(feed_selector, timeout=12000)
-            emit_event("log", "Google Maps results feed loaded.")
-        except Exception:
-            emit_event("log", "Results feed container detected.")
-
-        # Start live screen streaming across all 3 viewports
+        # Start live screen streaming across all active agent viewports
         stop_stream_event.clear()
         stream_task = asyncio.create_task(frame_streamer_loop(maps_page, linkedin_page, pages_dict))
 
-        await maps_page.wait_for_timeout(1000)
+        if enable_maps and maps_page:
+            # Dynamic zoom from radius_km
+            effective_zoom = radius_to_zoom(radius_km) if radius_km else zoom
+            encoded_query = urllib.parse.quote_plus(cleaned_query)
+            if lat is not None and lon is not None:
+                search_url = f"https://www.google.com/maps/search/{encoded_query}/@{lat},{lon},{effective_zoom}z?hl=en"
+            else:
+                search_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
 
-        scraped_places = []
+            emit_event("log", f"Navigating Tab 1 (Google Maps): {search_url}")
+            emit_event("status", f"Searching Google Maps: {cleaned_query}")
+            await maps_page.goto(search_url, wait_until="domcontentloaded")
+            force_foreground_window()
+
+            # Handle Cookie Consent on Google Maps
+            try:
+                consent_btn = maps_page.locator('button:has-text("Reject all"), button:has-text("Accept all"), form[action*="consent"] button').first
+                if await consent_btn.is_visible(timeout=2000):
+                    emit_event("log", "Accepting cookie consent...")
+                    await consent_btn.click()
+                    await maps_page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            # Wait for results feed
+            feed_selector = 'div[role="feed"]'
+            try:
+                await maps_page.wait_for_selector(feed_selector, timeout=12000)
+                emit_event("log", "Google Maps results feed loaded.")
+            except Exception:
+                emit_event("log", "Results feed container detected.")
+
+            await maps_page.wait_for_timeout(1000)
         seen_titles = set()
         seen_signatures = set()
         seen_phones = set()
@@ -1710,7 +2207,7 @@ async def run_scraper(
 
         emit_event("status", "Extracting places from feed...")
 
-        while len(scraped_places) < target_max and scroll_attempts < max_scroll_attempts:
+        while (enable_maps and maps_page) and len(scraped_places) < target_max and scroll_attempts < max_scroll_attempts:
             links = maps_page.locator('div[role="feed"] a.hfpxzc, div[role="feed"] a[href*="/maps/place/"]')
             count = await links.count()
             if count == 0:
@@ -1732,6 +2229,40 @@ async def run_scraper(
                         continue
 
                     seen_titles.add(title)
+
+                    # PRE-CLICK FAST DEDUPLICATION CHECK (Bypasses click & crawl if in DB)
+                    preview_text = ""
+                    try:
+                        parent_el = elem.locator("xpath=..")
+                        preview_text = clean_text(await parent_el.inner_text())
+                    except Exception:
+                        pass
+
+                    if is_place_already_scraped(title, preview_text, dedup_cache):
+                        skipped_count += 1
+                        time_saved = skipped_count * 3.5
+                        emit_event("lead_skipped", {
+                            "name": title,
+                            "address": preview_text[:60] if preview_text else "In Database",
+                            "reason": "Already exists in database",
+                            "scraped": len(scraped_places),
+                            "skipped": skipped_count,
+                            "total": proximity_total_estimated,
+                            "time_saved_sec": round(time_saved, 1)
+                        })
+                        emit_event("proximity_progress", {
+                            "scraped": len(scraped_places),
+                            "skipped": skipped_count,
+                            "total": proximity_total_estimated,
+                            "percent": min(100, round(((len(scraped_places) + skipped_count) / max(1, proximity_total_estimated)) * 100))
+                        })
+                        emit_event("log", f"⏭️ [Skipped In DB] '{title}' already verified in database. Bypassing detail pane.")
+                        try:
+                            await elem.evaluate("el => window.MavonScraper && window.MavonScraper.highlight(el, 'Skipped (In DB)', '#f59e0b')")
+                        except Exception:
+                            pass
+                        continue
+
                     new_found_this_scroll += 1
                     idx = len(scraped_places) + 1
 
@@ -1747,20 +2278,20 @@ async def run_scraper(
                     # Click place card in Tab 1 and wait for detail panel
                     await elem.click()
                     try:
-                        await maps_page.wait_for_selector('h1.DUwDvf', timeout=3500)
+                        await maps_page.wait_for_selector('h1.DUwDvf', timeout=3000)
                     except Exception:
                         pass
-                    await maps_page.wait_for_timeout(800)
+                    await maps_page.wait_for_timeout(350)
 
-                    # Smoothly scroll detail panel down to trigger lazy loading of address/phone/website
+                    # Scroll detail panel down to trigger lazy loading of address/phone/website
                     try:
                         await maps_page.evaluate("""() => {
                             const main = document.querySelector('div[role="main"]') || document.querySelector('div.m6QErb.DxyBCb');
                             if (main) {
-                                main.scrollBy(0, 400);
+                                main.scrollBy(0, 500);
                             }
                         }""")
-                        await maps_page.wait_for_timeout(500)
+                        await maps_page.wait_for_timeout(250)
                     except Exception:
                         pass
 
@@ -1796,37 +2327,83 @@ async def run_scraper(
                     except Exception:
                         pass
 
-                    # Extract Rating and Reviews Count
+                    # Extract Rating and Reviews Count with multi-selector fallback
                     rating = ""
                     reviews = ""
                     try:
-                        rating_el = maps_page.locator('div.F7nice span[aria-hidden="true"]').first
-                        if await rating_el.is_visible(timeout=300):
-                            rating = clean_text(await rating_el.inner_text())
-                        reviews_el = maps_page.locator('div.F7nice span[aria-label*="reviews"]').first
-                        if await reviews_el.is_visible(timeout=300):
-                            r_aria = await reviews_el.get_attribute("aria-label") or ""
-                            r_digits = re.findall(r"[\d,]+", r_aria)
-                            if r_digits:
-                                reviews = r_digits[0].replace(",", "")
+                        rating_selectors = [
+                            'div.F7nice span[aria-hidden="true"]',
+                            'span.ceNzKf',
+                            'div.fontDisplayLarge',
+                            'span[aria-label*="stars"]',
+                            'span.MW4etd'
+                        ]
+                        for r_sel in rating_selectors:
+                            r_el = maps_page.locator(r_sel).first
+                            if await r_el.count() > 0:
+                                val = clean_text(await r_el.inner_text() or await r_el.get_attribute("aria-label") or "")
+                                m_r = re.search(r'\b([0-5]\.\d+)\b', val)
+                                if m_r:
+                                    rating = m_r.group(1)
+                                    break
+
+                        reviews_selectors = [
+                            'div.F7nice span[aria-label*="reviews"]',
+                            'span.mgr77e',
+                            'button[aria-label*="reviews"]',
+                            'span[aria-label*="reviews"]',
+                            'span.UY7F9',
+                            'div.F7nice button'
+                        ]
+                        for rev_sel in reviews_selectors:
+                            rv_el = maps_page.locator(rev_sel).first
+                            if await rv_el.count() > 0:
+                                rv_text = await rv_el.get_attribute("aria-label") or await rv_el.inner_text() or ""
+                                r_digits = re.findall(r"[\d,]+", rv_text)
+                                if r_digits:
+                                    clean_digits = r_digits[0].replace(",", "")
+                                    if len(clean_digits) > 0 and clean_digits != "0":
+                                        reviews = clean_digits
+                                        break
                     except Exception:
                         pass
 
-                    # Extract Address
+                    # Extract Address with multi-selector fallback
                     address = ""
                     try:
-                        addr_el = maps_page.locator('button[data-item-id="address"], button[aria-label*="Address:"]').first
-                        if await addr_el.is_visible(timeout=400):
-                            address = clean_text(await addr_el.inner_text())
+                        addr_selectors = [
+                            'button[data-item-id="address"]',
+                            'button[aria-label*="Address:"]',
+                            'div[data-item-id="address"]',
+                            'button[data-tooltip*="Copy address"]',
+                            '[data-item-id*="address"]'
+                        ]
+                        for a_sel in addr_selectors:
+                            a_el = maps_page.locator(a_sel).first
+                            if await a_el.count() > 0:
+                                a_val = clean_text(await a_el.inner_text() or await a_el.get_attribute("aria-label") or "")
+                                if a_val:
+                                    address = re.sub(r'^Address:\s*', '', a_val).strip()
+                                    break
                     except Exception:
                         pass
 
-                    # Extract Phone Number
+                    # Extract Phone Number with multi-selector fallback
                     phone = ""
                     try:
-                        phone_el = maps_page.locator('button[data-item-id*="phone:"], button[aria-label*="Phone:"]').first
-                        if await phone_el.is_visible(timeout=400):
-                            phone = clean_text(await phone_el.inner_text())
+                        phone_selectors = [
+                            'button[data-item-id*="phone:"]',
+                            'button[aria-label*="Phone:"]',
+                            'button[data-tooltip*="Copy phone"]',
+                            'a[href^="tel:"]'
+                        ]
+                        for ph_sel in phone_selectors:
+                            ph_el = maps_page.locator(ph_sel).first
+                            if await ph_el.count() > 0:
+                                ph_val = clean_text(await ph_el.inner_text() or await ph_el.get_attribute("aria-label") or "")
+                                if ph_val:
+                                    phone = re.sub(r'^Phone:\s*', '', ph_val).strip()
+                                    break
                     except Exception:
                         pass
 
@@ -1870,18 +2447,82 @@ async def run_scraper(
                     except Exception:
                         pass
 
-                    # Extract GPS Coordinates (Lat, Lon) from Google Maps URL
+                    # Extract Direct Social Profiles from Google Maps Panel (Instagram, Facebook, LinkedIn, Twitter)
+                    maps_ig = ""
+                    maps_fb = ""
+                    maps_li = ""
+                    maps_tw = ""
+                    try:
+                        maps_soc = await maps_page.evaluate("""() => {
+                            const res = { ig: '', fb: '', li: '', tw: '' };
+                            document.querySelectorAll('a[href*="instagram.com"], a[href*="facebook.com"], a[href*="linkedin.com"], a[href*="twitter.com"], a[href*="x.com"]').forEach(a => {
+                                const h = (a.href || '').split('?')[0];
+                                if (h.includes('instagram.com') && !res.ig && !h.includes('/p/')) res.ig = h;
+                                else if (h.includes('facebook.com') && !res.fb && !h.includes('sharer')) res.fb = h;
+                                else if (h.includes('linkedin.com') && !res.li) res.li = h;
+                                else if ((h.includes('twitter.com') || h.includes('x.com')) && !res.tw) res.tw = h;
+                            });
+                            return res;
+                        }""")
+                        if maps_soc:
+                            maps_ig = maps_soc.get("ig", "")
+                            maps_fb = maps_soc.get("fb", "")
+                            maps_li = maps_soc.get("li", "")
+                            maps_tw = maps_soc.get("tw", "")
+                    except Exception:
+                        pass
+
+                    if website:
+                        w_low = website.lower()
+                        if "instagram.com/" in w_low and not maps_ig: maps_ig = website
+                        elif "facebook.com/" in w_low and not maps_fb: maps_fb = website
+                        elif "linkedin.com/" in w_low and not maps_li: maps_li = website
+                        elif ("twitter.com/" in w_low or "x.com/" in w_low) and not maps_tw: maps_tw = website
+
+                    # Extract Exact GPS Coordinates (Lat, Lon) of the Place
                     lat_val = None
                     lon_val = None
-                    url_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", maps_page.url)
-                    if url_match:
-                        lat_val = float(url_match.group(1))
-                        lon_val = float(url_match.group(2))
-                    else:
-                        data_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", maps_page.url)
-                        if data_match:
-                            lat_val = float(data_match.group(1))
-                            lon_val = float(data_match.group(2))
+                    cur_maps_url = maps_page.url or ""
+                    
+                    # 1. Exact coordinates from URL !3d<lat>!4d<lon> (Google Maps place pinpoint)
+                    d_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", cur_maps_url)
+                    if d_match:
+                        lat_val = float(d_match.group(1))
+                        lon_val = float(d_match.group(2))
+
+                    # 2. Check Directions link / DOM elements if not found in URL yet
+                    if lat_val is None or lon_val is None:
+                        try:
+                            dom_coords = await maps_page.evaluate(r"""() => {
+                                const dirLink = document.querySelector('a[href*="destination="], a[data-value="Directions"], a[href*="maps/dir/"]');
+                                if (dirLink && dirLink.href) {
+                                    const m = dirLink.href.match(/destination=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
+                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+                                }
+                                const metaImg = document.querySelector('meta[itemprop="image"]');
+                                if (metaImg && metaImg.content) {
+                                    const m = metaImg.content.match(/center=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/i);
+                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+                                }
+                                const anyCoord = document.querySelector('a[href*="!3d"]');
+                                if (anyCoord && anyCoord.href) {
+                                    const m = anyCoord.href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+                                    if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+                                }
+                                return null;
+                            }""")
+                            if dom_coords and len(dom_coords) == 2:
+                                lat_val = float(dom_coords[0])
+                                lon_val = float(dom_coords[1])
+                        except Exception:
+                            pass
+
+                    # 3. Fallback to /place/ URL @lat,lon (only if viewing a single place, not search view)
+                    if (lat_val is None or lon_val is None) and "/place/" in cur_maps_url:
+                        url_match = re.search(r"/place/[^/]+/@(-?\d+\.\d+),(-?\d+\.\d+)", cur_maps_url)
+                        if url_match:
+                            lat_val = float(url_match.group(1))
+                            lon_val = float(url_match.group(2))
 
                     # --- RADIUS FILTERING (Strict Haversine Distance Check) ---
                     if lat is not None and lon is not None and radius_km is not None and lat_val is not None and lon_val is not None:
@@ -1929,10 +2570,10 @@ async def run_scraper(
                         "plus_code": plus_code or "N/A",
                         "emails": [],
                         "email": "N/A",
-                        "instagram": "",
-                        "facebook": "",
-                        "linkedin": "",
-                        "twitter": "",
+                        "instagram": maps_ig,
+                        "facebook": maps_fb,
+                        "linkedin": maps_li,
+                        "twitter": maps_tw,
                         "screenshot": "",
                         "bot_protection": "Inspecting..." if (enable_website and extract_emails and website) else "N/A",
                         "cookie_status": "Inspecting..." if (enable_website and extract_emails and website) else "None",
@@ -1952,6 +2593,16 @@ async def run_scraper(
                     scraped_places.append(place_info)
                     emit_event("place_scraped", place_info)
                     emit_event("log", f"✅ Added: {place_title} | 🏷️ {category or 'Business'} | 📞 {phone or 'N/A'}")
+                    dedup_cache["leads_names"].add(place_title.lower().strip())
+                    if address and address != 'N/A':
+                        dedup_cache["leads_name_addr"].add((place_title.lower().strip(), address.lower().strip()))
+                    emit_event("proximity_progress", {
+                        "scraped": len(scraped_places),
+                        "skipped": skipped_count,
+                        "total": proximity_total_estimated,
+                        "percent": min(100, round(((len(scraped_places) + skipped_count) / max(1, proximity_total_estimated)) * 100)),
+                        "time_saved_sec": round(skipped_count * 3.5, 1)
+                    })
 
                     # -----------------------------------------------------------------
                     # PARALLEL PIPELINE: Send website job to Tab 2 simultaneously!
@@ -1973,15 +2624,7 @@ async def run_scraper(
                             "linkedin_url": "",
                         })
 
-                    if enable_platform and platform_queue:
-                        platform_queue.put_nowait({
-                            "index": idx,
-                            "name": place_title,
-                            "address": address or "N/A",
-                            "lat": lat_val,
-                            "lon": lon_val,
-                            "id": lead_db_id,
-                        })
+                    # Platform area search operates independently by location & proximity
 
                 except Exception as e:
                     emit_event("log", f"⚠️ Card error: {type(e).__name__} - {e}")
@@ -1996,7 +2639,9 @@ async def run_scraper(
                 end_banner = maps_page.locator('div:has-text("You\'ve reached the end of the list"), div.W275Fa, div.HlvSq').first
                 if await end_banner.is_visible(timeout=500):
                     end_reached = True
-                    emit_event("log", "🏁 Reached the end of Google Maps results!")
+                    proximity_total_estimated = max(1, len(scraped_places) + skipped_count)
+                    emit_event("proximity_total", {"platform": "Google Maps", "query": cleaned_query, "location": search_location, "total": proximity_total_estimated, "is_final": True})
+                    emit_event("log", f"🏁 Reached the end of Google Maps results! Total shops in proximity: {proximity_total_estimated}")
             except Exception:
                 pass
 
@@ -2023,7 +2668,10 @@ async def run_scraper(
                 await maps_page.mouse.wheel(0, 1200)
                 await maps_page.wait_for_timeout(1800)
 
-        emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
+        if enable_maps and maps_page:
+            emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
+        else:
+            emit_event("status", f"Platform & Intelligence harvesting in progress ({', '.join(selected_platforms_list)})...")
 
         # Signal website worker that no more places will be added from Maps
         website_done_event.set()
@@ -2043,14 +2691,24 @@ async def run_scraper(
                 pass
             linkedin_task.cancel()
 
-        # Signal Platform worker that all places have been pushed and wait for directory scan to complete
-        platform_done_event.set()
-        if platform_task and platform_queue:
+        # Wait for Platform Scout Area & Proximity Harvester to finish
+        if platform_task:
             try:
-                await asyncio.wait_for(platform_queue.join(), timeout=60.0)
+                await asyncio.wait_for(platform_task, timeout=120.0)
             except Exception:
                 pass
-            platform_task.cancel()
+
+        # -------------------------------------------------------------
+        # STEP 5: CROSS-PLATFORM ENTITY NORMALIZATION
+        # Matches Google Maps leads against harvested platform listings
+        # (Fresha, Airbnb, Yelp, TripAdvisor) and partitions 3 tables
+        # -------------------------------------------------------------
+        if enable_platform or get_tables_split_data()["counts"]["total_listings"] > 0:
+            emit_event("status", "Running Cross-Platform Normalization...")
+            emit_event("log", f"🔄 [Cross-Platform Normalization] Normalizing Google Maps leads with harvested Platform listings ({', '.join(selected_platforms_list)})...")
+            norm_stats = normalize_all_platform_listings(city_context=search_location)
+            emit_event("log", f"✅ [Cross-Platform Normalization] Finished! Merged {norm_stats.get('newly_matched', 0)} verified leads into Master Table ({norm_stats['counts']['master']} Master, {norm_stats['counts']['maps']} Maps Only, {norm_stats['counts']['platform']} Platform Only).")
+            emit_event("tables_split", get_tables_split_data())
 
         stop_stream_event.set()
         if stream_task:
@@ -2103,6 +2761,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable-platform", dest="enable_platform", action="store_true", default=False)
     parser.add_argument("--no-platform", dest="enable_platform", action="store_false")
     parser.add_argument("--platform-name", type=str, default="Fresha")
+    parser.add_argument("--platforms", type=str, default="Fresha")
     parser.add_argument("--platform-custom-url", type=str, default="")
     parser.add_argument("--dedup-area", dest="dedup_area", action="store_true", default=True)
     parser.add_argument("--no-dedup-area", dest="dedup_area", action="store_false")
@@ -2125,6 +2784,7 @@ if __name__ == "__main__":
         enable_linkedin=args.enable_linkedin,
         enable_platform=args.enable_platform,
         platform_name=args.platform_name,
+        platforms=args.platforms,
         platform_custom_url=args.platform_custom_url,
         dedup_area=args.dedup_area,
         skip_existing_db=args.skip_existing_db,

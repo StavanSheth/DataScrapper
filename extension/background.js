@@ -16,6 +16,7 @@ let isConnecting = false;
 let mapsTabId = null;
 let linkedinTabId = null;
 let shopTabId = null;
+let platformTabId = null;
 let lastStartHarvesterTime = 0;
 const attachedDebuggerTabs = new Set();
 
@@ -244,6 +245,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === mapsTabId) mapsTabId = null;
   if (tabId === linkedinTabId) linkedinTabId = null;
   if (tabId === shopTabId) shopTabId = null;
+  if (tabId === platformTabId) platformTabId = null;
 });
 
 // Listen for messages from content scripts (e.g. dashboard page)
@@ -351,14 +353,56 @@ async function handleCommand(msg) {
     }
 
     // Attach screencast
+    // Tab 4: Platform Directory Scout (Strictly 1 tab in user's current window)
+    if (payload.platform_url) {
+      const platformUrl = payload.platform_url;
+      let platTab = null;
+      if (platformTabId) {
+        platTab = await chrome.tabs.get(platformTabId).catch(() => null);
+      }
+      if (platTab) {
+        await chrome.tabs.update(platTab.id, { url: platformUrl, active: false });
+        platformTabId = platTab.id;
+      } else {
+        const createOpts = targetWinId ? { windowId: targetWinId, url: platformUrl, active: false } : { url: platformUrl, active: false };
+        const t3 = await chrome.tabs.create(createOpts);
+        platformTabId = t3.id;
+      }
+      ensureScreencastForTab(platformTabId, "platform").catch(() => {});
+    }
+
     ensureScreencastForTab(mapsTabId, "maps").catch(() => {});
     ensureScreencastForTab(linkedinTabId, "linkedin").catch(() => {});
+    if (platformTabId) {
+      ensureScreencastForTab(platformTabId, "platform").catch(() => {});
+    }
 
     return {
       success: true,
       maps_tab_id: mapsTabId,
       linkedin_tab_id: linkedinTabId
     };
+  }
+
+  // 2B. NAVIGATE PLATFORM: Updates the Platform Directory tab in the user's active Chrome live
+  if (action === "NAVIGATE_PLATFORM") {
+    const targetUrl = payload.url;
+    if (targetUrl) {
+      let platTab = null;
+      if (platformTabId) {
+        platTab = await chrome.tabs.get(platformTabId).catch(() => null);
+      }
+      if (platTab) {
+        await chrome.tabs.update(platTab.id, { url: targetUrl });
+        platformTabId = platTab.id;
+      } else {
+        const createOpts = targetWinId ? { windowId: targetWinId, url: targetUrl, active: false } : { url: targetUrl, active: false };
+        const t3 = await chrome.tabs.create(createOpts);
+        platformTabId = t3.id;
+      }
+      ensureScreencastForTab(platformTabId, "platform").catch(() => {});
+    }
+    return { success: true, platform_tab_id: platformTabId };
   }
 
   // 2. NAVIGATE LINKEDIN: Updates the LinkedIn tab in the user's active Chrome live
@@ -421,6 +465,7 @@ async function handleCommand(msg) {
     if (tabName === "maps") targetId = mapsTabId;
     else if (tabName === "website") targetId = shopTabId;
     else if (tabName === "linkedin") targetId = linkedinTabId;
+    else if (tabName === "platform") targetId = platformTabId;
 
     if (targetId) {
       try {

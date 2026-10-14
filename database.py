@@ -1,8 +1,8 @@
+import urllib.parse
 import json
 import os
 import re
 import sqlite3
-import urllib.parse
 from typing import Dict, Any, List, Optional
 
 JUNK_EMAIL_PATTERNS = [
@@ -79,6 +79,9 @@ def get_connection():
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA cache_size = -32000;")
+    conn.execute("PRAGMA temp_store = MEMORY;")
+    conn.execute("PRAGMA mmap_size = 268435456;")
     return conn
 
 def init_db():
@@ -150,6 +153,29 @@ def init_db():
             except Exception:
                 pass
 
+        # Create platforms_config table to manage Platform Directory targets dynamically
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS platforms_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                url_template TEXT NOT NULL,
+                category TEXT DEFAULT 'General',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Seed default directory platforms if empty
+        conn.execute("""
+            INSERT OR IGNORE INTO platforms_config (name, url_template, category, is_active) VALUES
+            ('Fresha', 'https://www.fresha.com/search?query={query}&address={city}', 'Salons & Wellness', 1),
+            ('Airbnb', 'https://www.airbnb.com/s/{city}/homes?query={query}', 'Stays & Hospitality', 1),
+            ('Yelp', 'https://www.yelp.com/search?find_desc={query}&find_loc={city}', 'Local Businesses', 1),
+            ('TripAdvisor', 'https://www.tripadvisor.com/Search?q={query}+{city}', 'Attractions & Venues', 1),
+            ('Treatwell', 'https://www.treatwell.co.uk/places/in-{city}/?q={query}', 'Beauty & Spas', 1),
+            ('Justdial', 'https://www.justdial.com/{city}/{query}', 'Local Directory', 1);
+        """)
+
         # Create platform_listings directory table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS platform_listings (
@@ -171,6 +197,7 @@ def init_db():
                 verified INTEGER DEFAULT 0,
                 services_json TEXT,
                 raw_metadata_json TEXT,
+                screenshot TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE SET NULL,
                 UNIQUE(platform, url)
@@ -186,6 +213,11 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_brand ON platform_listings(clean_brand);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_lead ON platform_listings(lead_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_platform ON platform_listings(platform);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_name ON leads(name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_verified ON platform_listings(verified);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_title ON platform_listings(title);")
+            conn.execute("ALTER TABLE platform_listings ADD COLUMN screenshot TEXT DEFAULT '';")
         except Exception:
             pass
 
@@ -224,7 +256,7 @@ def clean_domain(url: str) -> str:
         if not clean.startswith(("http://", "https://")):
             clean = "http://" + clean
         parsed = urllib.parse.urlparse(clean)
-        dom = parsed.netloc.lower()
+        dom = parsed.netloc.lower().split(":")[0]
         if dom.startswith("www."):
             dom = dom[4:]
         return dom
@@ -280,6 +312,107 @@ def is_lead_in_db(name: str, address: str = "") -> bool:
         row = conn.execute("SELECT id, email, website FROM leads WHERE LOWER(name) = LOWER(?)", (clean_n,)).fetchone()
         if row and (row["email"] not in ("N/A", "") or row["website"] not in ("N/A", "")):
             return True
+    return False
+
+def load_proximity_dedup_cache(location_name: str = "") -> Dict[str, Any]:
+    """
+    Pre-caches existing leads and directory listings in memory for O(1) microsecond
+    deduplication during live proximity search. Prevents redundant clicks and crawls.
+    """
+    cache = {
+        "leads_names": set(),
+        "leads_name_addr": set(),
+        "leads_phones": set(),
+        "listings_urls": set(),
+        "listings_titles": set(),
+        "total_existing_leads": 0,
+        "total_existing_listings": 0
+    }
+    with get_connection() as conn:
+        leads = conn.execute("SELECT name, address, phone FROM leads").fetchall()
+        for l in leads:
+            n = (l["name"] or "").strip().lower()
+            a = (l["address"] or "").strip().lower()
+            p = re.sub(r'\D', '', l["phone"] or "")
+            if n:
+                cache["leads_names"].add(n)
+                if a and a != 'n/a':
+                    cache["leads_name_addr"].add((n, a))
+            if len(p) >= 8:
+                cache["leads_phones"].add(p)
+        cache["total_existing_leads"] = len(leads)
+
+        listings = conn.execute("SELECT platform, title, url FROM platform_listings").fetchall()
+        for lst in listings:
+            t = (lst["title"] or "").strip().lower()
+            u = (lst["url"] or "").split('?')[0].rstrip('/')
+            if t:
+                cache["listings_titles"].add(t)
+            if u:
+                cache["listings_urls"].add(u)
+        cache["total_existing_listings"] = len(listings)
+
+    return cache
+
+def is_place_already_scraped(name: str, address_snippet: str = "", dedup_cache: Dict[str, Any] = None) -> bool:
+    """
+    Fast pre-click deduplication check.
+    If dedup_cache is provided, performs an instantaneous in-memory check in O(1) time.
+    Distinguishes franchise branches (e.g. Starbucks Bandra vs Starbucks Colaba).
+    """
+    if not name:
+        return False
+    clean_n = name.strip().lower()
+    clean_a = address_snippet.strip().lower()
+
+    if dedup_cache is not None:
+        matched_name = False
+        has_addr = bool(clean_a and clean_a != 'n/a')
+        
+        # 1. Check Name & Address in memory
+        for ex_n, ex_a in dedup_cache.get("leads_name_addr", set()):
+            if ex_n == clean_n:
+                matched_name = True
+                if has_addr and ex_a and ex_a != 'n/a':
+                    # Substring match on address snippet
+                    if ex_a in clean_a or clean_a in ex_a:
+                        return True
+        
+        # If address snippet was provided and did not match any existing branch, it's a distinct franchise branch!
+        if matched_name and has_addr:
+            return False
+
+        # 2. Unique Business Name match ONLY when address snippet is missing/N/A
+        if clean_n in dedup_cache.get("leads_names", set()):
+            if not has_addr:
+                return True
+        return False
+
+    # Fallback to direct DB check if cache is omitted
+    return is_lead_in_db(name, address_snippet)
+
+def is_platform_listing_already_scraped(platform: str, title: str, url: str = "", dedup_cache: Dict[str, Any] = None) -> bool:
+    """
+    Fast deduplication check for platform directory listings.
+    """
+    clean_t = (title or "").strip().lower()
+    clean_u = (url or "").split('?')[0].rstrip('/')
+
+    if dedup_cache:
+        if clean_u and clean_u in dedup_cache.get("listings_urls", set()):
+            return True
+        if clean_t and clean_t in dedup_cache.get("listings_titles", set()):
+            return True
+
+    with get_connection() as conn:
+        if clean_u:
+            row = conn.execute("SELECT id FROM platform_listings WHERE url = ?", (clean_u,)).fetchone()
+            if row:
+                return True
+        if clean_t:
+            row = conn.execute("SELECT id FROM platform_listings WHERE LOWER(title) = ? AND platform = ?", (clean_t, platform)).fetchone()
+            if row:
+                return True
     return False
 
 def save_lead(lead: Dict[str, Any]) -> bool:
@@ -922,6 +1055,7 @@ def save_platform_listing(listing: Dict[str, Any]) -> int:
     lat = listing.get("latitude")
     lon = listing.get("longitude")
     verified = 1 if listing.get("verified") else 0
+    screenshot = str(listing.get("screenshot", "")).strip()
     services_json = json.dumps(listing.get("services", [])) if isinstance(listing.get("services"), list) else str(listing.get("services", ""))
     raw_metadata = json.dumps(listing.get("metadata", {})) if isinstance(listing.get("metadata"), dict) else "{}"
     lead_id = listing.get("lead_id")
@@ -938,8 +1072,8 @@ def save_platform_listing(listing: Dict[str, Any]) -> int:
             INSERT INTO platform_listings (
                 lead_id, platform, listing_id, title, clean_brand, category, url, booking_url,
                 rating, reviews_count, price_info, address, latitude, longitude, verified,
-                services_json, raw_metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                screenshot, services_json, raw_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(platform, url) DO UPDATE SET
                 lead_id = COALESCE(excluded.lead_id, platform_listings.lead_id),
                 title = excluded.title,
@@ -949,12 +1083,13 @@ def save_platform_listing(listing: Dict[str, Any]) -> int:
                 price_info = excluded.price_info,
                 booking_url = excluded.booking_url,
                 verified = excluded.verified,
+                screenshot = CASE WHEN excluded.screenshot != '' THEN excluded.screenshot ELSE platform_listings.screenshot END,
                 services_json = excluded.services_json
             RETURNING id;
         """, (
             lead_id, platform, str(listing.get("listing_id", "")), title, clean_brand, category, url, booking_url,
             rating, reviews_count, price_info, address, lat, lon, verified,
-            services_json, raw_metadata
+            screenshot, services_json, raw_metadata
         ))
         row = cursor.fetchone()
         inserted_id = row[0] if row else 0
@@ -993,4 +1128,200 @@ def get_platform_listings(platform: Optional[str] = None, lead_id: Optional[int]
         query += " ORDER BY id DESC"
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+
+
+def get_platforms_config() -> List[Dict[str, Any]]:
+    """Retrieves all configured directory platform templates."""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM platforms_config ORDER BY is_active DESC, id ASC").fetchall()
+        return [dict(r) for r in rows]
+
+def save_platform_config(name: str, url_template: str, category: str = "General", is_active: int = 1) -> int:
+    """Creates or updates a platform directory template in the database."""
+    clean_n = name.strip()
+    clean_u = url_template.strip()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO platforms_config (name, url_template, category, is_active)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                url_template = excluded.url_template,
+                category = excluded.category,
+                is_active = excluded.is_active
+            RETURNING id;
+        """, (clean_n, clean_u, category.strip(), is_active))
+        row = cursor.fetchone()
+        conn.commit()
+        return row[0] if row else 0
+
+def delete_platform_config(platform_id: int) -> bool:
+    """Deletes a directory platform template by ID."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM platforms_config WHERE id = ?", (platform_id,))
+        conn.commit()
+        return True
+
+def get_tables_split_data() -> Dict[str, Any]:
+    """
+    Returns 3 distinct datasets:
+    1. master_leads: Leads with normalized data from both Google Maps and verified Platform Directory.
+    2. unmatched_maps: Google Maps leads (kept intact ditto as it is, retaining all leads).
+    3. unmatched_platform: Platform directory listings (kept intact ditto as it is, retaining all listings).
+    """
+    all_leads = get_all_leads()
+    all_listings = get_platform_listings()
+
+    master_leads = [
+        lead for lead in all_leads
+        if (lead.get("platform_verified") == 1 or (lead.get("platform_name") and lead.get("platform_name") != "N/A"))
+    ]
+
+    # In accordance with requirement: when normalization occurs, keep the remaining 2 tables same ditto as they are
+    unmatched_maps = all_leads
+    unmatched_platform = all_listings
+
+    return {
+        "master_leads": master_leads,
+        "unmatched_maps": unmatched_maps,
+        "unmatched_platform": unmatched_platform,
+        "counts": {
+            "master": len(master_leads),
+            "maps": len(unmatched_maps),
+            "platform": len(unmatched_platform),
+            "total_leads": len(all_leads),
+            "total_listings": len(all_listings)
+        }
+    }
+
+def extract_core_brand_name(name: str, city: str = "") -> str:
+    """Extracts base brand name by stripping legal, retail, and location clutter."""
+    if not name:
+        return ""
+    base = re.split(r'\s*[-–—|@]\s*|[(\[]', name)[0].strip()
+    if not base or len(base) < 2:
+        base = name.strip()
+    base = re.sub(r'[\.,\-_;:\'\"]+$', '', base).strip()
+    legal_pat = r'\s+\b(?:pvt\.?\s*ltd\.?|private\s+limited|ltd\.?|llc|inc\.?|corp\.?|co\.?|corporation)\b\.?'
+    base = re.sub(legal_pat, '', base, flags=re.I).strip()
+    mall_pat = r'\s+\b[A-Za-z0-9]+\s+(?:mall|plaza|centre|center|galleria|arcade)\b'
+    base = re.sub(mall_pat, '', base, flags=re.I).strip()
+    retail_pat = r'\s+\b(?:factory\s+store|factory\s+outlet|flagship\s+store|retail\s+store|salon|spa|wellness|beauty)\b'
+    base = re.sub(retail_pat, '', base, flags=re.I).strip()
+    if city and len(city) >= 3:
+        city_esc = re.escape(city.strip())
+        base = re.sub(rf'\s+\b{city_esc}\b.*$', '', base, flags=re.I).strip()
+    end_suffix_pat = r'\s+\b(?:outlet|showroom|branch|mall|bazaar|supermarket|hypermarket)\b$'
+    base = re.sub(end_suffix_pat, '', base, flags=re.I).strip()
+    return base if len(base) >= 2 else name
+
+def jaccard_similarity(s1: str, s2: str) -> float:
+    t1 = set(re.findall(r'[a-zA-Z0-9]+', s1.lower()))
+    t2 = set(re.findall(r'[a-zA-Z0-9]+', s2.lower()))
+    if not t1 or not t2:
+        return 0.0
+    return len(t1 & t2) / len(t1 | t2)
+
+def normalize_all_platform_listings(city_context: str = "") -> Dict[str, Any]:
+    """
+    Cross-platform Normalization Engine:
+    Compares all Google Maps leads in leads.db against all directory platform listings (Fresha, Airbnb, Yelp, TripAdvisor).
+    Fuzzy matches entities by:
+      1. Exact name match
+      2. Clean brand token match
+      3. Token Jaccard similarity >= 0.55
+      4. Phone digit match
+      5. Domain match
+    Enriches matching leads with verified platform metadata, links lead_id,
+    and updates the 3-table split partition.
+    """
+    newly_matched = 0
+    with get_connection() as conn:
+        leads = [dict(r) for r in conn.execute("SELECT id, name, address, website, phone, platform_verified, lat, lon FROM leads").fetchall()]
+        listings = [dict(r) for r in conn.execute("SELECT * FROM platform_listings WHERE lead_id IS NULL OR verified = 0").fetchall()]
+
+        for lst in listings:
+            l_id = lst["id"]
+            l_title = (lst["title"] or "").strip()
+            l_brand = extract_core_brand_name(l_title, city=city_context).lower()
+            l_addr = (lst["address"] or "").lower()
+            l_phone = re.sub(r'\D', '', lst.get("address", "") or "")
+            l_plat = lst.get("platform", "Platform")
+            l_url = lst.get("url", "")
+            l_book = lst.get("booking_url", "") or l_url
+            l_rating = lst.get("rating", 0.0)
+            l_reviews = lst.get("reviews_count", 0)
+            l_price = lst.get("price_info", "")
+
+            best_lead = None
+            for lead in leads:
+                lead_name = (lead["name"] or "").strip()
+                lead_brand = extract_core_brand_name(lead_name, city=city_context).lower()
+                lead_addr = (lead["address"] or "").lower()
+                lead_phone = re.sub(r'\D', '', lead.get("phone", "") or "")
+
+                # 1. Exact match
+                if lead_name.lower() == l_title.lower():
+                    best_lead = lead
+                    break
+
+                # 2. Clean brand match (with generic term stop-word protection)
+                GENERIC_STOP_WORDS = {
+                    'flat', 'apartment', 'villa', 'hotel', 'salon', 'spa', 'house', 'home', 
+                    'shop', 'room', 'rooms', 'suite', 'suites', 'stay', 'stays', 'resort',
+                    'resorts', 'clinic', 'store', 'centre', 'center', 'bazaar', 'retail'
+                }
+                if l_brand and lead_brand:
+                    if l_brand == lead_brand:
+                        best_lead = lead
+                        break
+                    # Prevent generic accommodation/retail terms from matching indiscriminately via substring
+                    if l_brand not in GENERIC_STOP_WORDS and lead_brand not in GENERIC_STOP_WORDS:
+                        if (len(l_brand) >= 5 and l_brand in lead_brand) or (len(lead_brand) >= 5 and lead_brand in l_brand):
+                            best_lead = lead
+                            break
+
+                # 3. Phone digit match (>= 8 digits)
+                if len(lead_phone) >= 8 and len(l_phone) >= 8 and (lead_phone in l_phone or l_phone in lead_phone):
+                    best_lead = lead
+                    break
+
+                # 4. Token Jaccard similarity >= 0.55
+                sim = jaccard_similarity(lead_name, l_title)
+                if sim >= 0.55:
+                    best_lead = lead
+                    break
+
+            if best_lead:
+                lead_id = best_lead["id"]
+                conn.execute("UPDATE platform_listings SET lead_id = ?, verified = 1 WHERE id = ?", (lead_id, l_id))
+                conn.execute("""
+                    UPDATE leads SET
+                        platform_name = ?,
+                        platform_url = ?,
+                        platform_rating = ?,
+                        platform_reviews = ?,
+                        booking_url = ?,
+                        platform_price = CASE WHEN ? != '' THEN ? ELSE platform_price END,
+                        phone = CASE WHEN (phone IS NULL OR phone = 'N/A' OR phone = '') AND ? != '' THEN ? ELSE phone END,
+                        screenshot = CASE WHEN (screenshot IS NULL OR screenshot = '' OR screenshot = 'N/A') AND ? != '' THEN ? ELSE screenshot END,
+                        platform_verified = 1
+                    WHERE id = ?;
+                """, (
+                    l_plat, l_url, str(l_rating) if l_rating > 0 else "N/A",
+                    str(l_reviews), l_book, l_price, l_price,
+                    lst.get("phone", "") or (lst.get("address") if lst.get("address", "").startswith("+") else ""),
+                    lst.get("phone", "") or (lst.get("address") if lst.get("address", "").startswith("+") else ""),
+                    lst.get("screenshot", ""), lst.get("screenshot", ""),
+                    lead_id
+                ))
+                newly_matched += 1
+
+        conn.commit()
+
+    return {
+        "newly_matched": newly_matched,
+        "counts": get_tables_split_data()["counts"]
+    }
 

@@ -71,12 +71,15 @@ Data Scrapper/
 │   ├── content_script.js      # DOM assistant & dashboard message bridge
 │   ├── injected_bridge.js     # Page-level anti-detection & DOM inspection HUD
 │   └── manifest.json          # Extension configuration & permissions
+├── scrapers/                  # Bot protection detection & evasions
+│   └── antibot.py             # Cloudflare, Captcha, & Turnstile handler
 ├── static/                    # Web Dashboard frontend
-│   ├── index.html             # Dashboard UI
-│   ├── css/app.css            # Stylesheet
-│   ├── js/app.js              # Frontend logic, Leaflet map, & WebSocket client
-│   └── screenshots/           # Saved store landing page screenshots
-└── google-maps-scraper/       # Core Go engine & scraper components
+│   ├── index.html             # Quad-agent split dashboard UI
+│   ├── css/app.css            # Cyberpunk glassmorphism design system
+│   ├── js/app.js              # Map, WebSocket, and quad-agent streams
+│   ├── js/table_ext.js        # Tabbed 3-table split views & modals
+│   └── screenshots/           # Store & platform landing screenshots
+└── tests/                     # Automated platform & database tests
 ```
 
 ---

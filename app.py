@@ -1,3 +1,5 @@
+import urllib.parse
+import urllib.request
 import asyncio
 import csv
 import io
@@ -6,7 +8,6 @@ import logging
 import os
 import subprocess
 import sys
-import urllib.request
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,11 @@ from database import (
     deduplicate_database,
     renumber_and_clean_database,
     get_platform_listings,
+    get_platforms_config,
+    save_platform_config,
+    delete_platform_config,
+    get_tables_split_data,
+    normalize_all_platform_listings,
 )
 
 # Force UTF-8 encoding on Windows
@@ -72,6 +78,17 @@ last_live_frame_linkedin: Optional[Dict[str, Any]] = None
 last_live_frame_platform: Optional[Dict[str, Any]] = None
 extension_ws: Optional[WebSocket] = None
 
+proximity_metrics: Dict[str, Any] = {
+    "location": "",
+    "query": "",
+    "total_estimated": 0,
+    "scraped_count": 0,
+    "skipped_count": 0,
+    "time_saved_sec": 0.0,
+    "percent": 0,
+    "platforms": {}
+}
+
 def add_log(message: str):
     global recent_logs
     recent_logs.append({"time": "", "message": message})
@@ -92,7 +109,7 @@ async def health_check():
 
 @app.websocket("/ws/extension")
 async def extension_ws_endpoint(websocket: WebSocket):
-    global extension_ws, last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin
+    global extension_ws, last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     await websocket.accept()
     extension_ws = websocket
     logger.info("🔌 Chrome Extension connected to /ws/extension")
@@ -115,6 +132,9 @@ async def extension_ws_endpoint(websocket: WebSocket):
                     elif st == "linkedin":
                         last_live_frame_linkedin = {"stream_type": "linkedin", "image_base64": b64, "tab": "linkedin", "image": f"data:image/jpeg;base64,{b64}"}
                         await broadcast({"type": "live_frame", "data": last_live_frame_linkedin})
+                    elif st == "platform":
+                        last_live_frame_platform = {"stream_type": "platform", "image_base64": b64, "tab": "platform", "image": f"data:image/jpeg;base64,{b64}"}
+                        await broadcast({"type": "live_frame", "data": last_live_frame_platform})
                 elif data.get("type") == "SYNC_COOKIES":
                     cookies = data.get("cookies", [])
                     if cookies:
@@ -140,10 +160,13 @@ async def websocket_endpoint(websocket: WebSocket):
     active_websockets.append(websocket)
     try:
         all_leads = get_all_leads()
+        tables_data = get_tables_split_data()
         await websocket.send_json({
             "type": "init",
+            "tables_split": tables_data,
             "is_scraping": is_scraping,
             "status": current_status,
+            "proximity_metrics": proximity_metrics,
             "places": all_leads,
             "logs": recent_logs,
             "frame_maps": last_live_frame_maps,
@@ -200,9 +223,72 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     elif etype == "platform_listing_found":
                         # Emitted when Tab 4 discovers/matches a platform directory listing
                         add_log(f"🟣 [Platform Directory] Verified {edata.get('platform', '')} listing for {edata.get('name', '')}: {edata.get('rating', '')} ★")
+                    elif etype == "proximity_total":
+                        p = edata.get("platform", "Google Maps")
+                        tot = int(edata.get("total", 0))
+                        if "platforms" not in proximity_metrics:
+                            proximity_metrics["platforms"] = {}
+                        if p not in proximity_metrics["platforms"]:
+                            proximity_metrics["platforms"][p] = {"total": tot, "scraped": 0, "skipped": 0, "percent": 0}
+                        else:
+                            proximity_metrics["platforms"][p]["total"] = tot
+                        if edata.get("location"):
+                            proximity_metrics["location"] = edata.get("location")
+                        if edata.get("query"):
+                            proximity_metrics["query"] = edata.get("query")
+                        proximity_metrics["total_estimated"] = max(1, sum(x["total"] for x in proximity_metrics["platforms"].values()))
+
+                    elif etype == "platform_progress":
+                        p = edata.get("platform", "Platform Scout")
+                        if "platforms" not in proximity_metrics:
+                            proximity_metrics["platforms"] = {}
+                        if p not in proximity_metrics["platforms"]:
+                            proximity_metrics["platforms"][p] = {"total": edata.get("total", 0), "scraped": 0, "skipped": 0, "percent": 0}
+                        proximity_metrics["platforms"][p]["scraped"] = edata.get("scraped", 0)
+                        proximity_metrics["platforms"][p]["skipped"] = edata.get("skipped", 0)
+                        proximity_metrics["platforms"][p]["total"] = max(edata.get("total", 0), proximity_metrics["platforms"][p]["total"])
+                        proximity_metrics["platforms"][p]["percent"] = edata.get("percent", 0)
+
+                        # Recalculate area rollup metrics
+                        proximity_metrics["scraped_count"] = sum(x["scraped"] for x in proximity_metrics["platforms"].values())
+                        proximity_metrics["skipped_count"] = sum(x["skipped"] for x in proximity_metrics["platforms"].values())
+                        proximity_metrics["total_estimated"] = max(1, sum(x["total"] for x in proximity_metrics["platforms"].values()))
+                        done = proximity_metrics["scraped_count"] + proximity_metrics["skipped_count"]
+                        proximity_metrics["percent"] = min(100, round((done / proximity_metrics["total_estimated"]) * 100))
+                        proximity_metrics["time_saved_sec"] = round(proximity_metrics["skipped_count"] * 3.5, 1)
+
+                    elif etype == "proximity_progress":
+                        p = "Google Maps"
+                        if "platforms" not in proximity_metrics:
+                            proximity_metrics["platforms"] = {}
+                        if p not in proximity_metrics["platforms"]:
+                            proximity_metrics["platforms"][p] = {"total": edata.get("total", 0), "scraped": 0, "skipped": 0, "percent": 0}
+                        proximity_metrics["platforms"][p]["scraped"] = edata.get("scraped", 0)
+                        proximity_metrics["platforms"][p]["skipped"] = edata.get("skipped", 0)
+                        proximity_metrics["platforms"][p]["total"] = max(edata.get("total", 0), proximity_metrics["platforms"][p]["total"])
+                        proximity_metrics["platforms"][p]["percent"] = edata.get("percent", 0)
+
+                        # Recalculate area rollup metrics
+                        proximity_metrics["scraped_count"] = sum(x["scraped"] for x in proximity_metrics["platforms"].values())
+                        proximity_metrics["skipped_count"] = sum(x["skipped"] for x in proximity_metrics["platforms"].values())
+                        proximity_metrics["total_estimated"] = max(1, sum(x["total"] for x in proximity_metrics["platforms"].values()))
+                        done = proximity_metrics["scraped_count"] + proximity_metrics["skipped_count"]
+                        proximity_metrics["percent"] = min(100, round((done / proximity_metrics["total_estimated"]) * 100))
+                        proximity_metrics["time_saved_sec"] = round(proximity_metrics["skipped_count"] * 3.5, 1)
+
+                    elif etype == "lead_skipped":
+                        p = edata.get("platform", "Google Maps")
+                        if "platforms" in proximity_metrics and p in proximity_metrics["platforms"]:
+                            proximity_metrics["platforms"][p]["skipped"] += 1
+                        proximity_metrics["skipped_count"] += 1
+                        proximity_metrics["time_saved_sec"] = round(proximity_metrics["skipped_count"] * 3.5, 1)
+                        add_log(f"⏭️ [Skipped In DB] {edata.get('name', 'Shop')} already in DB. Bypassed crawl ({proximity_metrics['time_saved_sec']}s saved).")
                     elif etype == "linkedin_navigated":
                         if extension_ws and edata.get("url"):
                             asyncio.create_task(extension_ws.send_json({"action": "NAVIGATE_LINKEDIN", "payload": edata}))
+                    elif etype == "platform_navigated":
+                        if extension_ws and edata.get("url"):
+                            asyncio.create_task(extension_ws.send_json({"action": "NAVIGATE_PLATFORM", "payload": edata}))
                     elif etype == "status":
                         current_status = str(edata)
                     elif etype == "log":
@@ -218,6 +304,9 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         else:
                             last_live_frame_maps = edata
                     await broadcast(event)
+                    if etype in ["place_scraped", "place_updated", "org_updated", "platform_listing_found"]:
+                        tables_split_fresh = get_tables_split_data()
+                        await broadcast({"type": "tables_split", "data": tables_split_fresh})
                 except Exception:
                     add_log(line_str)
             else:
@@ -233,10 +322,26 @@ async def read_process_output(proc: asyncio.subprocess.Process):
         await broadcast({"type": "status", "data": "Finished"})
         await broadcast({"type": "job_finished", "data": {"total": get_lead_count()}})
 
+
+@app.get("/api/proximity-stats")
+async def get_proximity_stats():
+    return {
+        "status": "running" if is_scraping else "idle",
+        **proximity_metrics
+    }
+
+@app.post("/api/normalize")
+async def manual_normalize_endpoint():
+    stats = normalize_all_platform_listings()
+    tables_fresh = get_tables_split_data()
+    await broadcast({"type": "tables_split", "data": tables_fresh})
+    await broadcast({"type": "log", "data": f"🔄 [Cross-Platform Normalization] Merged {stats.get('newly_matched', 0)} verified leads into Master Table ({stats['counts']['master']} Master, {stats['counts']['maps']} Maps Only, {stats['counts']['platform']} Platform Only)."})
+    return {"status": "ok", "stats": stats, "tables_split": tables_fresh}
+
 @app.post("/api/start")
 async def start_scraping(payload: Dict[str, Any]):
     global active_process, is_scraping, recent_logs, current_status
-    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin
+    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
 
@@ -244,6 +349,22 @@ async def start_scraping(payload: Dict[str, Any]):
     scrape_all = bool(payload.get("scrape_all", False))
     if not query:
         query = "shops"
+
+    init_plats = {}
+    if enable_maps:
+        init_plats["Google Maps"] = {"total": max_results if not scrape_all else 120, "scraped": 0, "skipped": 0, "percent": 0}
+    if enable_platform:
+        for p in platforms_list:
+            init_plats[p] = {"total": 0, "scraped": 0, "skipped": 0, "percent": 0}
+
+    proximity_metrics["location"] = payload.get("location", "") or query
+    proximity_metrics["query"] = query
+    proximity_metrics["platforms"] = init_plats
+    proximity_metrics["total_estimated"] = sum(x["total"] for x in init_plats.values()) if init_plats else (max_results if not scrape_all else 120)
+    proximity_metrics["scraped_count"] = 0
+    proximity_metrics["skipped_count"] = 0
+    proximity_metrics["time_saved_sec"] = 0.0
+    proximity_metrics["percent"] = 0
 
     max_results = int(payload.get("max_results", 20))
     visible_browser = bool(payload.get("visible_browser", True))
@@ -255,8 +376,14 @@ async def start_scraping(payload: Dict[str, Any]):
     enable_maps = bool(payload.get("enable_maps", True))
     enable_website = bool(payload.get("enable_website", True))
     enable_linkedin = bool(payload.get("enable_linkedin", True))
-    enable_platform = bool(payload.get("enable_platform", False))
-    platform_name = str(payload.get("platform_name", "Fresha")).strip()
+    enable_platform = bool(payload.get("enable_platform", True))
+    raw_platforms = payload.get("platforms", [])
+    if isinstance(raw_platforms, list) and raw_platforms:
+        platforms_list = [str(p).strip() for p in raw_platforms if str(p).strip()]
+    else:
+        platforms_list = [str(payload.get("platform_name", "Fresha")).strip()]
+    platform_name = platforms_list[0] if platforms_list else "Fresha"
+    platforms_str = ",".join(platforms_list)
     platform_custom_url = str(payload.get("platform_custom_url", "")).strip()
     dedup_area = bool(payload.get("dedup_area", True))
     skip_existing_db = bool(payload.get("skip_existing_db", False))
@@ -314,6 +441,7 @@ async def start_scraping(payload: Dict[str, Any]):
     if enable_platform:
         cmd.append("--enable-platform")
         cmd.extend(["--platform-name", platform_name])
+        cmd.extend(["--platforms", platforms_str])
         if platform_custom_url:
             cmd.extend(["--platform-custom-url", platform_custom_url])
     else:
@@ -334,12 +462,41 @@ async def start_scraping(payload: Dict[str, Any]):
             if lat is not None and lon is not None:
                 search_u = f"https://www.google.com/maps/search/{encoded_q}/@{lat},{lon},{zoom}z?hl=en"
             try:
+                start_payload = {}
+                if enable_maps:
+                    start_payload["maps_url"] = search_u
+                if enable_linkedin:
+                    start_payload["linkedin_url"] = "https://www.linkedin.com/"
+                if enable_platform:
+                    p_target = (platform_name or "Fresha").lower().strip()
+                    if "airbnb" in p_target:
+                        start_payload["platform_url"] = "https://www.airbnb.com/"
+                    elif "yelp" in p_target:
+                        start_payload["platform_url"] = "https://www.yelp.com/"
+                    elif "tripadvisor" in p_target:
+                        start_payload["platform_url"] = "https://www.tripadvisor.com/"
+                    elif "booking" in p_target:
+                        start_payload["platform_url"] = "https://www.booking.com/"
+                    elif "zomato" in p_target:
+                        start_payload["platform_url"] = "https://www.zomato.com/"
+                    elif "justdial" in p_target:
+                        start_payload["platform_url"] = "https://www.justdial.com/"
+                    elif "treatwell" in p_target:
+                        start_payload["platform_url"] = "https://www.treatwell.com/"
+                    elif "yellowpages" in p_target:
+                        start_payload["platform_url"] = "https://www.yellowpages.com/"
+                    elif "opentable" in p_target:
+                        start_payload["platform_url"] = "https://www.opentable.com/"
+                    elif platform_custom_url and "http" in platform_custom_url:
+                        start_payload["platform_url"] = platform_custom_url.split("?")[0]
+                    elif "." in p_target and " " not in p_target:
+                        start_payload["platform_url"] = f"https://www.{p_target.replace('www.', '')}" if not p_target.startswith("http") else p_target
+                    else:
+                        start_payload["platform_url"] = "https://www.fresha.com/"
+
                 await extension_ws.send_json({
                     "action": "START_HARVESTER",
-                    "payload": {
-                        "maps_url": search_u,
-                        "linkedin_url": "https://www.linkedin.com/"
-                    }
+                    "payload": start_payload
                 })
                 add_log("🔌 Chrome Extension: opened Tab 1 (Maps) and Tab 2 (LinkedIn) in active Chrome.")
             except Exception:
@@ -363,7 +520,7 @@ async def start_scraping(payload: Dict[str, Any]):
 @app.post("/api/start-companies")
 async def start_companies_scraping(payload: Dict[str, Any]):
     global active_process, is_scraping, recent_logs, current_status
-    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin
+    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
 
@@ -426,16 +583,19 @@ async def stop_scraping():
 @app.get("/api/status")
 async def get_status():
     leads = get_all_leads()
+    tables_data = get_tables_split_data()
     return {
         "is_scraping": is_scraping,
         "status": current_status,
         "count": len(leads),
         "places": leads,
+        "tables_split": tables_data,
         "logs": recent_logs,
         "frame_maps": last_live_frame_maps,
         "frame_website": last_live_frame_website,
         "frame_linkedin": last_live_frame_linkedin,
-        "live_frame": last_live_frame_maps or last_live_frame_website or last_live_frame_linkedin,
+        "frame_platform": last_live_frame_platform,
+        "live_frame": last_live_frame_maps or last_live_frame_website or last_live_frame_linkedin or last_live_frame_platform,
     }
 
 @app.get("/api/leads")
@@ -638,6 +798,35 @@ async def export_json(request: Request):
         content=leads,
         headers={"Content-Disposition": "attachment; filename=leads_with_hierarchy.json"},
     )
+
+
+@app.get("/api/platforms")
+async def list_platforms():
+    return get_platforms_config()
+
+@app.post("/api/platforms")
+async def save_platform(payload: Dict[str, Any]):
+    name = str(payload.get("name", "")).strip()
+    url_template = str(payload.get("url_template", "")).strip()
+    category = str(payload.get("category", "General")).strip()
+    is_active = int(payload.get("is_active", 1))
+    if not name or not url_template:
+        raise HTTPException(status_code=400, detail="Name and URL Template are required.")
+    pid = save_platform_config(name=name, url_template=url_template, category=category, is_active=is_active)
+    add_log(f"⚙️ Directory Platform '{name}' saved.")
+    await broadcast({"type": "platform_config_updated", "platforms": get_platforms_config()})
+    return {"status": "success", "id": pid, "platforms": get_platforms_config()}
+
+@app.delete("/api/platforms/{platform_id}")
+async def delete_platform(platform_id: int):
+    delete_platform_config(platform_id)
+    add_log(f"🗑️ Directory Platform #{platform_id} deleted.")
+    await broadcast({"type": "platform_config_updated", "platforms": get_platforms_config()})
+    return {"status": "success", "platforms": get_platforms_config()}
+
+@app.get("/api/tables-split")
+async def get_tables_split_endpoint():
+    return get_tables_split_data()
 
 @app.get("/", response_class=FileResponse)
 async def serve_index():

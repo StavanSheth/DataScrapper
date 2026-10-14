@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mavon Leads & Org Intelligence - Tri-Tab Live Harvester</title>
+  <title>Mavon Leads & Org Intelligence - 4-Agent Live Harvester</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -16,7 +16,7 @@
       <div class="brand-icon">⚡</div>
       <div class="brand-text">
         <h1>Mavon Leads & Org Intelligence</h1>
-        <p>Tri-Tab Live Chrome Agent: Maps Harvester, Website Inspector & LinkedIn Org Hierarchy</p>
+        <p>4-Agent Live Chrome Suite: Maps Harvester, Website Inspector, LinkedIn Org & Platform Scout</p>
       </div>
     </div>
     <div style="display:flex; align-items:center; gap:12px;">
@@ -74,9 +74,14 @@
         <div class="form-group">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
             <label style="margin:0;">📍 Target Location & Interactive Map</label>
-            <button type="button" id="locate-me-btn" class="btn" style="padding:4px 10px; font-size:0.75rem; background:rgba(6,182,212,0.15); border:1px solid var(--cyan); color:var(--cyan); border-radius:6px; cursor:pointer;" onclick="locateUserPosition()">
-              🎯 My Location
-            </button>
+            <div style="display:flex; gap:6px;">
+              <button type="button" id="fit-pins-btn" class="btn" style="padding:4px 9px; font-size:0.75rem; background:rgba(99,102,241,0.2); border:1px solid #6366f1; color:#c7d2fe; border-radius:6px; cursor:pointer; font-weight:600;" onclick="fitMapToPins()" title="Zoom to show all plotted business leads on map">
+                🗺️ Fit All Pins
+              </button>
+              <button type="button" id="locate-me-btn" class="btn" style="padding:4px 9px; font-size:0.75rem; background:rgba(6,182,212,0.15); border:1px solid var(--cyan); color:var(--cyan); border-radius:6px; cursor:pointer;" onclick="locateUserPosition()">
+                🎯 My Location
+              </button>
+            </div>
           </div>
 
           <!-- Location Search Bar for Map -->
@@ -181,25 +186,45 @@
               <small>Tab 4: Searches platform listings (Fresha, Airbnb, Yelp, TripAdvisor) & normalizes data</small>
             </div>
             <label class="switch">
-              <input type="checkbox" id="agent-platform-toggle" onchange="handlePlatformToggleChange()">
+              <input type="checkbox" id="agent-platform-toggle" checked onchange="handlePlatformToggleChange()">
               <span class="slider"></span>
             </label>
           </div>
 
-          <div id="platform-config-panel" style="display:none; margin: 4px 8px 8px; padding: 10px; background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 8px;">
-            <div style="display:flex; flex-direction:column; gap:6px;">
-              <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600;">Directory / Platform Target:</label>
-              <select id="platform-preset-select" class="form-input" style="padding:4px 8px; font-size:0.8rem; background:#0f172a; color:#f8fafc; border:1px solid #334155; border-radius:6px;" onchange="handlePlatformPresetChange()">
-                <option value="Fresha">Fresha (Salons, Spas & Wellness)</option>
-                <option value="Airbnb">Airbnb (Stays & Experiences)</option>
-                <option value="Yelp">Yelp (Local Businesses & Restaurants)</option>
-                <option value="TripAdvisor">TripAdvisor (Attractions & Venues)</option>
-                <option value="Custom">Custom Platform / Directory</option>
-              </select>
-              <div id="platform-custom-input-group" style="display:none; margin-top:4px;">
-                <label style="font-size:0.7rem; color:#94a3b8;">Custom Search Domain or URL Pattern:</label>
-                <input type="text" id="platform-custom-url" class="form-input" placeholder="e.g. justdial.com or https://custom.com/search?q={query}+{city}" style="font-size:0.75rem; padding:4px 8px; width:100%;" />
+          <div id="platform-config-panel" style="display:block; margin: 4px 8px 8px; padding: 10px; background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 8px;">
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600;">Platforms (Simultaneous Area & Proximity Search):</label>
+                <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:0.68rem; background:rgba(168,85,247,0.25); border:1px solid rgba(168,85,247,0.5); color:#e9d5ff; border-radius:4px;" onclick="runManualNormalize()" title="Run Cross-Platform Normalization on current database">🔄 Normalize Now</button>
               </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Fresha" checked onchange="handlePlatformPresetChange()">
+                  <span>🟣 Fresha</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Airbnb" checked onchange="handlePlatformPresetChange()">
+                  <span>🔴 Airbnb</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Yelp" onchange="handlePlatformPresetChange()">
+                  <span>🟠 Yelp</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="TripAdvisor" onchange="handlePlatformPresetChange()">
+                  <span>🟢 TripAdvisor</span>
+                </label>
+              </div>
+              <div style="margin-top:2px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#cbd5e1; cursor:pointer;">
+                  <input type="checkbox" class="platform-src-cb" id="platform-src-custom" value="Custom" onchange="handlePlatformPresetChange()">
+                  <span>⚙️ Custom Platform / Directory URL</span>
+                </label>
+                <div id="platform-custom-input-group" style="display:none; margin-top:4px;">
+                  <input type="text" id="platform-custom-url" class="form-input" placeholder="e.g. https://custom.com/search?q={query}&loc={location}" style="font-size:0.75rem; padding:4px 8px; width:100%;" />
+                </div>
+              </div>
+              <select id="platform-preset-select" style="display:none;"><option value="Fresha">Fresha</option></select>
             </div>
           </div>
         </div>
@@ -306,10 +331,17 @@
             <div class="stat-label">Plotted on Map</div>
           </div>
         </div>
+        <div class="stat-card clickable-kpi" onclick="openDirectoryModal()" title="Click to manage platform directory templates & target URLs">
+          <div class="stat-icon" style="background:rgba(168,85,247,0.2); color:#c084fc;">🟣</div>
+          <div>
+            <div class="stat-val" id="stat-platform-count">0</div>
+            <div class="stat-label">Directory Listings (Manage ⚙️)</div>
+          </div>
+        </div>
       </div>
 
       <div class="live-activity-grid">
-        <!-- TRI-TAB CONCURRENT LIVE VIEWPORTS (3-COLUMN SPLIT VIEW) -->
+        <!-- 4-AGENT CONCURRENT LIVE VIEWPORTS (4-COLUMN SPLIT VIEW) -->
         <div class="tri-stream-container">
           <!-- Card 1: Google Maps (Tab 1) -->
           <div class="stream-card" id="card-maps">
@@ -378,7 +410,7 @@
           </div>
 
           <!-- Card 4: Platform Directory (Tab 4) -->
-          <div class="stream-card" id="card-platform" style="display:none;">
+          <div class="stream-card" id="card-platform">
             <div class="stream-header">
               <div class="stream-header-left">
                 <span class="live-indicator platform" id="stream-indicator-platform">⚪ PLATFORM IDLE</span>
@@ -406,10 +438,61 @@
         </div>
       </div>
 
+      <!-- Real-Time Proximity Yield & Smart Deduplication Progress Bar -->
+      <div class="proximity-tracker-panel" id="proximity-tracker-panel">
+        <div class="tracker-header">
+          <div class="tracker-title">
+            <span class="pulse-icon">📍</span>
+            <span id="proximity-location-tag">Proximity Yield: <strong>Ready to scan area</strong></span>
+          </div>
+          <div class="tracker-badges">
+            <span class="badge-yield badge-yield-scraped" id="yield-badge-scraped">✅ 0 Scraped</span>
+            <span class="badge-yield badge-yield-skipped" id="yield-badge-skipped">⏭️ 0 Skipped (In DB)</span>
+            <span class="badge-yield badge-yield-total" id="yield-badge-total">🎯 ~0 Total in Area</span>
+          </div>
+        </div>
+
+        <div class="segmented-progress-bar">
+          <div class="bar-segment bar-segment-scraped" id="bar-scraped" style="width: 0%;" title="Newly Scraped"></div>
+          <div class="bar-segment bar-segment-skipped" id="bar-skipped" style="width: 0%;" title="Skipped (Already in DB)"></div>
+        </div>
+
+        <!-- Individual Multi-Platform Progress Bars Grid -->
+        <div class="platform-bars-grid" id="platform-bars-grid"></div>
+        
+        <div class="tracker-footer">
+          <small id="tracker-status-text">Smart pre-click deduplication active. Redundant shops are bypassed in ~2ms.</small>
+          <small id="tracker-efficiency-text" style="color: #34d399; font-weight: 700;">⚡ Time Saved: 0.0s</small>
+        </div>
+      </div>
+
       <div class="table-container">
+        <div class="table-switcher-bar">
+          <div class="table-tab-group">
+            <button class="table-tab-btn active" id="btn-tab-master" onclick="switchTableTab('master')">
+              <span>🌟 Master Normalized Leads</span>
+              <span class="tab-badge" id="badge-count-master">0</span>
+            </button>
+            <button class="table-tab-btn" id="btn-tab-maps" onclick="switchTableTab('maps')">
+              <span>🗺️ Google Maps Leads</span>
+              <span class="tab-badge" id="badge-count-maps">0</span>
+            </button>
+            <button class="table-tab-btn" id="btn-tab-platform" onclick="switchTableTab('platform')">
+              <span>🟣 Platform Directory Listings</span>
+              <span class="tab-badge" id="badge-count-platform">0</span>
+            </button>
+          </div>
+          <div class="table-action-group">
+            <button class="btn btn-normalize" id="btn-normalize-action" onclick="triggerManualNormalization()" title="Execute Cross-Platform Normalization to produce Master Normalized Leads">
+              <span class="btn-icon">🔄</span>
+              <span>Normalize Leads</span>
+            </button>
+          </div>
+        </div>
+
         <div class="table-header">
           <div class="panel-title">
-            <span>📋 Leads & Organization Database</span>
+            <span id="current-table-title">🌟 Master Normalized Leads</span>
             <span id="places-count-badge" class="badge" style="background:rgba(255,255,255,0.08); color:#cbd5e1;">0 places</span>
           </div>
           <div class="export-btns">
@@ -417,6 +500,93 @@
             <button class="btn btn-secondary" onclick="exportCSV()">📥 Download CSV</button>
             <button class="btn btn-secondary" onclick="exportJSON()">📥 Download JSON</button>
             <button class="btn btn-secondary" onclick="clearDb()" style="color:#fca5a5;">🗑️ Clear DB</button>
+          </div>
+        </div>
+
+        <!-- Column-Specific Dynamic Filters Toolbar -->
+        <div class="table-filter-bar" id="table-filter-bar">
+          <div class="filter-left">
+            <!-- Universal Search (Matches Title/Name, Address, Phone, Email) -->
+            <div class="filter-input-wrapper">
+              <span class="filter-icon">🔍</span>
+              <input type="text" id="filter-search-input" class="filter-input" placeholder="Search by name, address, phone..." oninput="onFilterChange()" />
+              <button class="filter-clear-btn" id="filter-search-clear" onclick="clearSearchInput()" title="Clear search">✕</button>
+            </div>
+
+            <!-- Column Filter: Category -->
+            <div class="filter-select-wrapper" id="filter-wrapper-category" title="Filter by Category column">
+              <select id="filter-category-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🏷️ All Categories</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Platform Directory (Master & Platform Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-platform" title="Filter by Platform column">
+              <select id="filter-platform-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🟣 All Platforms</option>
+                <option value="Google Maps">Google Maps</option>
+                <option value="Airbnb">Airbnb</option>
+                <option value="Fresha">Fresha</option>
+                <option value="Yelp">Yelp</option>
+                <option value="TripAdvisor">TripAdvisor</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Rating & Reviews -->
+            <div class="filter-select-wrapper" id="filter-wrapper-rating" title="Filter by Rating column">
+              <select id="filter-rating-select" class="filter-select" onchange="onFilterChange()">
+                <option value="0">⭐ All Ratings</option>
+                <option value="4.0">⭐ 4.0 & above</option>
+                <option value="4.5">⭐ 4.5 & above</option>
+                <option value="4.8">⭐ 4.8 & above</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Bot Security (Maps & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-bot" title="Filter by Bot Security column">
+              <select id="filter-bot-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🛡️ All Bot Security</option>
+                <option value="clean">🛡️ Clean / None</option>
+                <option value="cloudflare">🛡️ Cloudflare</option>
+                <option value="turnstile">🛡️ Turnstile Solved</option>
+                <option value="access denied">🚫 Access Denied</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Cookie Consent (Maps & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-cookie" title="Filter by Cookies column">
+              <select id="filter-cookie-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🍪 All Cookie Statuses</option>
+                <option value="accepted">🍪 Accepted</option>
+                <option value="detected">🍪 Detected</option>
+                <option value="none">🍪 None</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Pricing Tier (Platform & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-price" title="Filter by Pricing column">
+              <select id="filter-price-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">💰 All Pricing</option>
+                <option value="has_price">💰 Has Price Info</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="filter-right">
+            <!-- Quick Column Toggles (Filtered by Columns Present in Active Table) -->
+            <div class="filter-pill-group">
+              <button type="button" class="filter-pill" id="filter-pill-hasEmail" onclick="toggleFilterPill('hasEmail')" title="Has Email Address">✉️ Email</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasPhone" onclick="toggleFilterPill('hasPhone')" title="Has Phone Number">📞 Phone</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasWebsite" onclick="toggleFilterPill('hasWebsite')" title="Has Website URL">🌐 Website</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasScreenshot" onclick="toggleFilterPill('hasScreenshot')" title="Has Screenshot / Photo">📸 Photo</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasSocial" onclick="toggleFilterPill('hasSocial')" title="Has Social Media Profiles">🔗 Socials</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasTeam" onclick="toggleFilterPill('hasTeam')" title="Has Staff / Org Chart">👥 Team</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasBooking" onclick="toggleFilterPill('hasBooking')" title="Has Direct Booking URL">📅 Booking</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasAddress" onclick="toggleFilterPill('hasAddress')" title="Has Physical Address">📍 Address</button>
+            </div>
+            <button class="btn btn-filter-reset" id="btn-filter-reset" onclick="resetTableFilters()" title="Reset all column filters">
+              <span>↺</span> Reset
+            </button>
           </div>
         </div>
 
@@ -621,11 +791,117 @@
             </div>
           </div>
         </div>
+
+        <!-- Card 4: Platform Directory Scout -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(168, 85, 247, 0.35); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🟣</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 4: Platform Directory Scout</div>
+              <div style="font-size:0.72rem; color:#c084fc;">Cross-Platform Directory Matching & Deep Booking Intel</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#c084fc;">Step 1: Category & Proximity Resolution</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Extracts the search category and geographic area / proximity context from your query or GPS coordinates, exactly mirroring Google Maps area searches.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 2: Multi-Source Simultaneous Live Navigation</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Dispatches area searches across all enabled platforms (Fresha, Airbnb, Yelp, TripAdvisor) live in Chrome Tab 4, allowing simultaneous multi-directory scouting.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 3: Area Proximity Discovery & Card Harvest</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Progressively scrolls directory results in the area to discover listing cards, ratings, review counts, pricing tiers, and direct booking links across the locality.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 4: Deep Listing & Contact Detail Extraction</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Navigates Tab 4 into individual listing profiles to extract direct telephone / WhatsApp numbers, full street addresses, and verified booking portals.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 5: Post-Search Cross-Platform Normalization</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Once all searches are complete, normalizes and cross-references Google Maps leads with harvested directory listings, merging matches into the Master Table and keeping separate tables for unmatched records.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/js/app.js"></script>
+  <script src="/static/js/table_ext.js"></script>
+
+  <!-- PLATFORM DIRECTORY MANAGEMENT MODAL (Triggered by KPI Card) -->
+  <div class="modal-overlay" id="platform-modal" style="display:none;" onclick="if(event.target===this)closeDirectoryModal()">
+    <div class="modal-content" style="max-width:780px; max-height:88vh; display:flex; flex-direction:column; overflow:hidden;">
+      <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding:16px 20px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.5rem;">🟣</span>
+          <div>
+            <h3 style="margin:0; font-size:1.15rem; color:#fff; font-weight:700;">Platform Directory Manager</h3>
+            <small style="color:#94a3b8; font-size:0.75rem;">Manage active platforms & search URL link templates (Agent opens these URLs with {query} & {city} tags)</small>
+          </div>
+        </div>
+        <button class="btn-close" onclick="closeDirectoryModal()" style="background:none; border:none; color:#cbd5e1; font-size:1.5rem; cursor:pointer;">&times;</button>
+      </div>
+
+      <div style="padding:16px 20px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:18px;">
+        <!-- Add / Edit Form -->
+        <div style="background:rgba(168,85,247,0.08); border:1px solid rgba(168,85,247,0.25); border-radius:12px; padding:14px 16px;">
+          <h4 id="platform-form-title" style="margin:0 0 10px; font-size:0.85rem; color:#e2e8f0; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">
+            ➕ Add / Edit Platform Directory
+          </h4>
+          <input type="hidden" id="edit-platform-id" value="">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:10px;">
+            <div>
+              <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">Platform Name *</label>
+              <input type="text" id="modal-platform-name" class="form-input" placeholder="e.g. Treatwell, Airbnb, Yelp, Justdial" style="width:100%; padding:7px 10px; font-size:0.82rem;" />
+            </div>
+            <div>
+              <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">Category / Industry</label>
+              <input type="text" id="modal-platform-cat" class="form-input" placeholder="e.g. Salons, Hospitality, Directory" style="width:100%; padding:7px 10px; font-size:0.82rem;" />
+            </div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">
+              Target Search Link Template * <span style="font-weight:normal; color:#94a3b8;">(Agent opens this URL in Tab 4)</span>
+            </label>
+            <input type="text" id="modal-platform-url" class="form-input" placeholder="e.g. https://www.fresha.com/search?query={query}&address={city}" style="width:100%; padding:7px 10px; font-size:0.82rem; font-family:monospace;" />
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <small style="color:#c084fc; font-size:0.72rem;">💡 Dynamic Tags: <code>{query}</code> = brand/keyword, <code>{city}</code> = city/location.</small>
+            <div style="display:flex; gap:8px;">
+              <button type="button" class="btn btn-secondary" onclick="resetPlatformForm()" style="padding:6px 12px; font-size:0.78rem;">Reset</button>
+              <button type="button" class="btn btn-primary" onclick="submitPlatformForm()" style="padding:6px 16px; font-size:0.78rem; background:#a855f7; border-color:#9333ea;">💾 Save Platform</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Current Directories Table -->
+        <div>
+          <h4 style="margin:0 0 8px; font-size:0.85rem; color:#e2e8f0; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">
+            📋 Configured Platforms
+          </h4>
+          <div style="border:1px solid rgba(255,255,255,0.08); border-radius:10px; overflow:hidden;">
+            <table style="width:100%; border-collapse:collapse; font-size:0.8rem; text-align:left;">
+              <thead style="background:rgba(15,23,42,0.95); border-bottom:1px solid rgba(255,255,255,0.1); color:#94a3b8;">
+                <tr>
+                  <th style="padding:8px 12px;">Platform</th>
+                  <th style="padding:8px 12px;">Category</th>
+                  <th style="padding:8px 12px;">URL Link Template</th>
+                  <th style="padding:8px 12px; text-align:center;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="modal-platforms-tbody" style="background:#080b12;">
+                <!-- Populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>

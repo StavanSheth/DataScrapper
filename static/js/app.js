@@ -67,7 +67,13 @@ let placesData = [];
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(leafletMap);
 
-      searchMarker = L.marker([lat, lon], { draggable: true, title: "Search Center Pin" }).addTo(leafletMap);
+      const centerPinIcon = L.divIcon({
+        className: "custom-center-pin-wrapper",
+        html: '<div class="custom-center-pin" title="Search Center & Radius Focus"></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+      searchMarker = L.marker([lat, lon], { draggable: true, icon: centerPinIcon, title: "Search Center Pin" }).addTo(leafletMap);
       radiusCircle = L.circle([lat, lon], {
         radius: 5000,
         color: '#06b6d4',
@@ -211,13 +217,39 @@ let placesData = [];
       handleAgentToggleChange();
     }
 
+    function getSelectedPlatforms() {
+      const cbs = document.querySelectorAll('.platform-src-cb:checked');
+      const plats = [];
+      cbs.forEach(cb => {
+        if (cb.value && cb.value !== 'Custom') plats.push(cb.value);
+      });
+      const customCb = document.getElementById('platform-src-custom');
+      if (customCb && customCb.checked) plats.push('Custom');
+      return plats.length > 0 ? plats : ["Fresha"];
+    }
+
     function handlePlatformPresetChange() {
-      const preset = document.getElementById('platform-preset-select').value;
+      const customCb = document.getElementById('platform-src-custom');
       const customGroup = document.getElementById('platform-custom-input-group');
       if (customGroup) {
-        customGroup.style.display = (preset === 'Custom') ? 'block' : 'none';
+        customGroup.style.display = (customCb && customCb.checked) ? 'block' : 'none';
       }
       handleAgentToggleChange();
+    }
+
+    async function runManualNormalize() {
+      try {
+        logMessage("🔄 Running Cross-Platform Entity Normalization...");
+        const resp = await fetch('/api/normalize', { method: 'POST' });
+        const res = await resp.json();
+        if (res.status === 'ok') {
+          logMessage(`✅ Normalization finished: ${res.stats.newly_matched} matched leads merged into Master Table.`);
+          if (window.updateSplitData) window.updateSplitData(res.tables_split);
+          if (window.refreshTablesSplit) window.refreshTablesSplit();
+        }
+      } catch (e) {
+        alert("Error normalizing: " + e.message);
+      }
     }
 
     function handleAgentToggleChange() {
@@ -238,8 +270,8 @@ let placesData = [];
       if (siteOn) parts.push("Website");
       if (liOn) parts.push("LinkedIn");
       if (platOn) {
-        const pPreset = document.getElementById('platform-preset-select')?.value || "Platform";
-        parts.push(pPreset);
+        const plats = getSelectedPlatforms();
+        parts.push(plats.join(' & '));
       }
 
       if (startBtn && currentMode === 'maps') {
@@ -316,45 +348,100 @@ let placesData = [];
       return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    let hasAutoCenteredMap = false;
+
+    window.fitMapToPins = function() {
+      if (!leafletMap || !placesLayer) return;
+      const validPoints = [];
+      placesData.forEach(p => {
+        const lat = parseFloat(p.lat);
+        const lon = parseFloat(p.lon);
+        if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && (lat !== 0 || lon !== 0)) {
+          validPoints.push([lat, lon]);
+        }
+      });
+      if (validPoints.length > 0) {
+        const bounds = L.latLngBounds(validPoints);
+        leafletMap.fitBounds(bounds, { padding: [35, 35], maxZoom: 16 });
+      } else {
+        alert("No places with valid GPS coordinates in database yet.");
+      }
+    };
+
     function plotShopsOnMap() {
       if (!leafletMap || !placesLayer) return;
       placesLayer.clearLayers();
       markersMap = {};
       let plottedCount = 0;
+      const validPoints = [];
 
       placesData.forEach((place, index) => {
-        if (place.lat && place.lon) {
+        const lat = parseFloat(place.lat);
+        const lon = parseFloat(place.lon);
+        if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && (lat !== 0 || lon !== 0)) {
           plottedCount++;
+          validPoints.push([lat, lon]);
+          const rowId = place.id || (index + 1);
+
           const popupContent = `
-            <div style="font-family:'Inter',sans-serif; min-width:220px; line-height:1.4;">
-              <strong style="color:#6366f1; font-size:1.05rem; display:block; margin-bottom:2px;">${escapeHtml(place.name)}</strong>
-              <span style="font-size:0.8rem; background:rgba(99,102,241,0.15); color:#a5b4fc; padding:2px 6px; border-radius:4px; font-weight:600;">${escapeHtml(place.category || 'Business')}</span>
-              ${place.rating && place.rating !== 'N/A' ? `<div style="margin-top:4px; font-size:0.85rem; color:#fbbf24; font-weight:600;">⭐ ${place.rating} (${place.reviews || '0'} reviews)</div>` : ''}
-              ${place.address && place.address !== 'N/A' ? `<div style="margin-top:4px; font-size:0.8rem; color:#cbd5e1;">📍 ${escapeHtml(place.address)}</div>` : ''}
-              ${place.phone && place.phone !== 'N/A' ? `<div style="font-size:0.8rem; color:#cbd5e1;">📞 <a href="tel:${place.phone}" style="color:#06b6d4; text-decoration:none;">${escapeHtml(place.phone)}</a></div>` : ''}
-              ${place.email && place.email !== 'N/A' ? `<div style="font-size:0.8rem; color:#6ee7b7; font-weight:600; margin-top:2px;">✉️ ${escapeHtml(place.email)}</div>` : ''}
+            <div style="font-family:'Inter',sans-serif; min-width:230px; line-height:1.4;">
+              <strong style="color:#6366f1; font-size:1.02rem; display:block; margin-bottom:2px;">${escapeHtml(place.name)}</strong>
+              <span style="font-size:0.75rem; background:rgba(99,102,241,0.15); color:#a5b4fc; padding:2px 6px; border-radius:4px; font-weight:600;">${escapeHtml(place.category || 'Business')}</span>
+              ${place.rating && place.rating !== 'N/A' ? `<div style="margin-top:4px; font-size:0.82rem; color:#fbbf24; font-weight:600;">⭐ ${place.rating} (${place.reviews || '0'} reviews)</div>` : ''}
+              ${place.address && place.address !== 'N/A' ? `<div style="margin-top:4px; font-size:0.78rem; color:#cbd5e1;">📍 ${escapeHtml(place.address)}</div>` : ''}
+              ${place.phone && place.phone !== 'N/A' ? `<div style="font-size:0.78rem; color:#cbd5e1;">📞 <a href="tel:${place.phone}" style="color:#06b6d4; text-decoration:none;">${escapeHtml(place.phone)}</a></div>` : ''}
+              ${place.email && place.email !== 'N/A' ? `<div style="font-size:0.78rem; color:#6ee7b7; font-weight:600; margin-top:2px;">✉️ ${escapeHtml(place.email)}</div>` : ''}
+              ${place.platform_name && place.platform_name !== 'N/A' ? `<div style="font-size:0.76rem; color:#c084fc; margin-top:3px;">🟣 <strong>${escapeHtml(place.platform_name)}</strong> ${place.platform_rating ? `(${place.platform_rating}★)` : ''}</div>` : ''}
               <div style="margin-top:8px; display:flex; gap:10px; border-top:1px solid rgba(255,255,255,0.1); padding-top:6px;">
-                ${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" style="color:#06b6d4; font-size:0.8rem; font-weight:600; text-decoration:none;">🌐 Website</a>` : ''}
-                <button onclick="openOrgModal('${escapeHtml(place.name)}')" style="background:none; border:none; color:#a855f7; font-size:0.8rem; font-weight:600; cursor:pointer;">🌳 Org Tree</button>
+                ${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" style="color:#06b6d4; font-size:0.78rem; font-weight:600; text-decoration:none;">🌐 Website</a>` : ''}
+                <button onclick="openOrgModal('${escapeHtml(place.name)}')" style="background:none; border:none; color:#a855f7; font-size:0.78rem; font-weight:600; cursor:pointer;">🌳 Org Tree</button>
               </div>
             </div>
           `;
 
-          const m = L.marker([place.lat, place.lon]).bindPopup(popupContent);
+          const pinIcon = L.divIcon({
+            className: "custom-lead-pin-wrapper",
+            html: `<div class="custom-lead-pin" title="${escapeHtml(place.name)}"><span>${rowId}</span></div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 28],
+            popupAnchor: [0, -28]
+          });
+
+          const m = L.marker([lat, lon], { icon: pinIcon }).bindPopup(popupContent);
           m.addTo(placesLayer);
-          markersMap[place.id || index] = m;
-          m.on('click', () => { highlightTableRow(place.id || index); });
+          markersMap[rowId] = m;
+          markersMap[place.id] = m;
+          markersMap[index] = m;
+          m.on('click', () => { highlightTableRow(rowId); });
         }
       });
 
       document.getElementById('stat-plotted').innerText = plottedCount;
+
+      // Auto-fit bounds on initial load if valid leads exist and haven't auto-centered yet
+      if (!hasAutoCenteredMap && validPoints.length > 0) {
+        hasAutoCenteredMap = true;
+        try {
+          const bounds = L.latLngBounds(validPoints);
+          leafletMap.fitBounds(bounds, { padding: [35, 35], maxZoom: 15 });
+        } catch (e) {}
+      }
     }
 
     function focusShop(idOrIdx) {
+      const mapEl = document.getElementById('picker-map');
       if (markersMap[idOrIdx]) {
         const m = markersMap[idOrIdx];
+        if (mapEl) {
+          mapEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
         leafletMap.setView(m.getLatLng(), 16);
-        m.openPopup();
+        setTimeout(() => m.openPopup(), 200);
+      } else {
+        const p = placesData.find((item, idx) => item.id == idOrIdx || idx == idOrIdx);
+        if (p) {
+          logMessage(`ℹ️ Place '${p.name}' does not have GPS coordinates to plot.`);
+        }
       }
     }
 
@@ -384,6 +471,10 @@ let placesData = [];
     }
 
     function renderTable() {
+      if (typeof window.renderTable === 'function' && window.renderTable !== renderTable) {
+        window.renderTable();
+        return;
+      }
       const tbody = document.getElementById('places-tbody');
       if (placesData.length === 0) {
         tbody.innerHTML = `
@@ -804,6 +895,140 @@ let placesData = [];
     }
 
     let ws = null;
+    
+    // -----------------------------------------------------------------
+    // Proximity Yield & Deduplication Progress State
+    // -----------------------------------------------------------------
+    let proximityStats = {
+      scraped: 0,
+      skipped: 0,
+      total: 0,
+      timeSaved: 0.0,
+      location: ''
+    };
+
+    function updateProximityUI(data) {
+      if (!data) return;
+      if (!proximityStats.platforms) proximityStats.platforms = {};
+
+      if (data.total !== undefined) proximityStats.total = data.total;
+      if (data.total_estimated !== undefined) proximityStats.total = data.total_estimated;
+      if (data.scraped !== undefined) proximityStats.scraped = data.scraped;
+      if (data.scraped_count !== undefined) proximityStats.scraped = data.scraped_count;
+      if (data.skipped !== undefined) proximityStats.skipped = data.skipped;
+      if (data.skipped_count !== undefined) proximityStats.skipped = data.skipped_count;
+      if (data.time_saved_sec !== undefined) proximityStats.timeSaved = data.time_saved_sec;
+      if (data.location) proximityStats.location = data.location;
+
+      // Handle single platform update
+      if (data.platform) {
+        const p = data.platform;
+        if (!proximityStats.platforms[p]) {
+          proximityStats.platforms[p] = { total: data.total || 15, scraped: data.scraped || 0, skipped: data.skipped || 0, percent: data.percent || 0 };
+        } else {
+          if (data.total !== undefined) proximityStats.platforms[p].total = data.total;
+          if (data.scraped !== undefined) proximityStats.platforms[p].scraped = data.scraped;
+          if (data.skipped !== undefined) proximityStats.platforms[p].skipped = data.skipped;
+          if (data.percent !== undefined) proximityStats.platforms[p].percent = data.percent;
+        }
+      }
+
+      // Handle platforms dictionary in data
+      if (data.platforms && typeof data.platforms === 'object') {
+        Object.assign(proximityStats.platforms, data.platforms);
+      }
+
+      // Roll up overall metrics from platforms if available
+      const platKeys = Object.keys(proximityStats.platforms);
+      if (platKeys.length > 0) {
+        let rolledScraped = 0, rolledSkipped = 0, rolledTotal = 0;
+        platKeys.forEach(k => {
+          rolledScraped += proximityStats.platforms[k].scraped || 0;
+          rolledSkipped += proximityStats.platforms[k].skipped || 0;
+          rolledTotal += proximityStats.platforms[k].total || 0;
+        });
+        proximityStats.scraped = rolledScraped;
+        proximityStats.skipped = rolledSkipped;
+        proximityStats.total = Math.max(rolledTotal, rolledScraped + rolledSkipped, 1);
+        proximityStats.timeSaved = rolledSkipped * 3.5;
+      }
+
+      const total = Math.max(proximityStats.total || 0, proximityStats.scraped + proximityStats.skipped, 1);
+      const scrapedPct = Math.min(100, (proximityStats.scraped / total) * 100);
+      const skippedPct = Math.min(100 - scrapedPct, (proximityStats.skipped / total) * 100);
+
+      const barScraped = document.getElementById("bar-scraped");
+      const barSkipped = document.getElementById("bar-skipped");
+      if (barScraped) barScraped.style.width = scrapedPct.toFixed(1) + "%";
+      if (barSkipped) barSkipped.style.width = skippedPct.toFixed(1) + "%";
+
+      const bScraped = document.getElementById("yield-badge-scraped");
+      const bSkipped = document.getElementById("yield-badge-skipped");
+      const bTotal = document.getElementById("yield-badge-total");
+      const locTag = document.getElementById("proximity-location-tag");
+      const timeSavedText = document.getElementById("tracker-efficiency-text");
+      const statusText = document.getElementById("tracker-status-text");
+
+      if (bScraped) bScraped.innerText = `✅ ${proximityStats.scraped} Scraped`;
+      if (bSkipped) bSkipped.innerText = `⏭️ ${proximityStats.skipped} Skipped (In DB)`;
+      if (bTotal) bTotal.innerText = `🎯 ~${proximityStats.total} Total in Area`;
+      if (timeSavedText) timeSavedText.innerText = `⚡ Time Saved: ${proximityStats.timeSaved.toFixed(1)}s`;
+      if (locTag && proximityStats.location) {
+        locTag.innerHTML = `Proximity Yield: <strong>${proximityStats.location}</strong>`;
+      }
+      if (statusText) {
+        statusText.innerText = `Scanned ${proximityStats.scraped + proximityStats.skipped} of ~${total} places in proximity feed across active platforms.`;
+      }
+
+      // Render Individual Multi-Platform Rows
+      renderPlatformBarsGrid();
+    }
+
+    function renderPlatformBarsGrid() {
+      const grid = document.getElementById("platform-bars-grid");
+      if (!grid) return;
+      const plats = proximityStats.platforms || {};
+      const keys = Object.keys(plats);
+      if (keys.length === 0) {
+        grid.style.display = "none";
+        return;
+      }
+      grid.style.display = "grid";
+
+      const icons = {
+        "Google Maps": "🗺️",
+        "Fresha": "🟣",
+        "Airbnb": "🔴",
+        "Yelp": "🟠",
+        "TripAdvisor": "🟢"
+      };
+
+      let html = "";
+      keys.forEach(k => {
+        const item = plats[k];
+        const pTotal = Math.max(item.total || 0, (item.scraped || 0) + (item.skipped || 0), 1);
+        const pScraped = item.scraped || 0;
+        const pSkipped = item.skipped || 0;
+        const sPct = Math.min(100, (pScraped / pTotal) * 100);
+        const kPct = Math.min(100 - sPct, (pSkipped / pTotal) * 100);
+        const icon = icons[k] || "📍";
+
+        html += `
+          <div class="platform-bar-row">
+            <div class="plat-row-meta">
+              <span class="plat-name">${icon} ${k}</span>
+              <span class="plat-counts">${pScraped} done, ${pSkipped} skipped / ~${pTotal} total</span>
+            </div>
+            <div class="segmented-progress-bar sub-bar">
+              <div class="bar-segment bar-segment-scraped" style="width: ${sPct.toFixed(1)}%;" title="${pScraped} Scraped"></div>
+              <div class="bar-segment bar-segment-skipped" style="width: ${kPct.toFixed(1)}%;" title="${pSkipped} Skipped"></div>
+            </div>
+          </div>
+        `;
+      });
+      grid.innerHTML = html;
+    }
+
     function connectWebSocket() {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       try {
@@ -816,6 +1041,15 @@ let placesData = [];
               if (msg.frame_website) updateLiveStream(msg.frame_website);
               if (msg.frame_linkedin) updateLiveStream(msg.frame_linkedin);
               if (msg.frame_platform) updateLiveStream(msg.frame_platform);
+              if (msg.proximity_metrics) updateProximityUI(msg.proximity_metrics);
+            } else if (msg.type === 'proximity_total') {
+              updateProximityUI(msg.data || msg);
+            } else if (msg.type === 'platform_progress') {
+              updateProximityUI(msg.data || msg);
+            } else if (msg.type === 'proximity_progress') {
+              updateProximityUI(msg.data || msg);
+            } else if (msg.type === 'lead_skipped') {
+              updateProximityUI(msg.data || msg);
             } else if (msg.type === 'live_frame') {
               updateLiveStream(msg.data);
             } else if (msg.type === 'place_scraped') {
@@ -878,7 +1112,11 @@ let placesData = [];
 
         setScrapingState(data.is_scraping, data.status);
 
-        if (data.live_frame) {
+        if (data.frame_maps) updateLiveStream(data.frame_maps);
+        if (data.frame_website) updateLiveStream(data.frame_website);
+        if (data.frame_linkedin) updateLiveStream(data.frame_linkedin);
+        if (data.frame_platform) updateLiveStream(data.frame_platform);
+        else if (data.live_frame) {
           updateLiveStream(data.live_frame);
         }
         if (!data.is_scraping && (data.status === 'Finished' || data.status === 'Ready')) {
@@ -979,7 +1217,8 @@ let placesData = [];
       const agentWebsite = document.getElementById('agent-website-toggle').checked;
       const agentLinkedin = document.getElementById('agent-linkedin-toggle').checked;
       const agentPlatform = document.getElementById('agent-platform-toggle')?.checked || false;
-      const platformName = document.getElementById('platform-preset-select')?.value || "Fresha";
+      const selectedPlatforms = getSelectedPlatforms();
+      const platformName = selectedPlatforms[0] || "Fresha";
       const platformCustomUrl = document.getElementById('platform-custom-url')?.value.trim() || "";
       const dedupArea = document.getElementById('dedup-area-toggle').checked;
       const skipExisting = document.getElementById('skip-existing-toggle').checked;
@@ -998,22 +1237,24 @@ let placesData = [];
       logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
 
       // Trigger Extension to open tab live in this exact Chrome window if installed
-      try {
-        const encoded = encodeURIComponent(query);
-        const mapsUrl = (lat && lon)
-          ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
-          : `https://www.google.com/maps/search/${encoded}?hl=en`;
+      if (agentMaps) {
+        try {
+          const encoded = encodeURIComponent(query);
+          const mapsUrl = (lat && lon)
+            ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
+            : `https://www.google.com/maps/search/${encoded}?hl=en`;
 
-        window.postMessage({
-          source: "mavon_dashboard",
-          action: "START_LIVE_BROWSER_SCRAPING",
-          url: mapsUrl,
-          query: query,
-          max: maxResults,
-          scrapeWebsites: agentWebsite,
-          radiusKm: radiusKm
-        }, "*");
-      } catch (e) {}
+          window.postMessage({
+            source: "mavon_dashboard",
+            action: "START_LIVE_BROWSER_SCRAPING",
+            url: mapsUrl,
+            query: query,
+            max: maxResults,
+            scrapeWebsites: agentWebsite,
+            radiusKm: radiusKm
+          }, "*");
+        } catch (e) {}
+      }
 
       try {
         const resp = await fetch('/api/start', {
@@ -1033,6 +1274,7 @@ let placesData = [];
             enable_website: agentWebsite,
             enable_linkedin: agentLinkedin,
             enable_platform: agentPlatform,
+            platforms: selectedPlatforms,
             platform_name: platformName,
             platform_custom_url: platformCustomUrl,
             dedup_area: dedupArea,
@@ -1149,6 +1391,8 @@ let placesData = [];
 
     window.addEventListener('DOMContentLoaded', () => {
       initMap();
+      handlePlatformToggleChange();
+      handleAgentToggleChange();
       connectWebSocket();
       pollStatus();
       pollInterval = setInterval(pollStatus, 1200);
