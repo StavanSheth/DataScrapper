@@ -1561,34 +1561,6 @@ let placesData = [];
 
       } catch (e) {}
 
-      // If user wants visible browser, check if active Chrome port 9222 is available
-      if (visibleBrowser) {
-        let isCdpReady = false;
-        try {
-          const cdpCheck = await fetch('/api/chrome/status');
-          const cdpJson = await cdpCheck.json();
-          isCdpReady = Boolean(cdpJson && cdpJson.active);
-        } catch (_) {}
-
-        if (!isCdpReady) {
-          const wantAttach = confirm(
-            "Notice: Scraper is not yet attached to your active Chrome browser (Port 9222).\n\n" +
-            "• Click OK to attach your active Chrome browser (restores all tabs & logins and runs the scraper live inside your existing window).\n" +
-            "• Click Cancel to run in a separate dedicated Chrome window."
-          );
-          if (wantAttach) {
-            try {
-              const launchRes = await fetch('/api/chrome/launch', { method: 'POST' });
-              const launchData = await launchRes.json();
-              logMessage("🔗 " + (launchData.message || "Launching Chrome on port 9222 with session restore..."));
-              await new Promise(r => setTimeout(r, 2000));
-              await checkChromeDebugStatus();
-            } catch (err) {
-              console.warn("Could not launch Chrome on port 9222:", err);
-            }
-          }
-        }
-      }
 
       try {
         const resp = await fetch('/api/start', {

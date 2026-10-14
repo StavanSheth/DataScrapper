@@ -2064,89 +2064,16 @@ async def run_scraper(
                     return c
             return None
 
-        async def launch_chrome_with_cdp() -> bool:
-            import socket
-            def is_cdp_listening():
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(0.25)
-                    res = s.connect_ex(("127.0.0.1", 9222))
-                    s.close()
-                    return res == 0
-                except Exception:
-                    return False
-
-            if is_cdp_listening():
-                return True
-
-            chrome_exe = get_chrome_executable_path()
-            if not chrome_exe:
-                return False
-
-            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
-            for _ in range(15):
-                await asyncio.sleep(0.2)
-                chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True)
-                if "chrome.exe" not in chk.stdout:
-                    break
-            await asyncio.sleep(0.5)
-
-            user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-            pref_path = os.path.join(user_data_path, "Default", "Preferences")
-            if os.path.exists(pref_path):
-                try:
-                    with open(pref_path, "r", encoding="utf-8", errors="ignore") as f:
-                        pref_data = json.load(f)
-                    if "profile" in pref_data:
-                        pref_data["profile"]["exit_type"] = "Normal"
-                        pref_data["profile"]["exited_cleanly"] = True
-                    with open(pref_path, "w", encoding="utf-8") as f:
-                        json.dump(pref_data, f)
-                except Exception:
-                    pass
-
-            launch_args_cdp = [
-                chrome_exe,
-                "--remote-debugging-port=9222",
-                f"--user-data-dir={user_data_path}",
-                "--remote-allow-origins=*",
-                "--restore-last-session",
-                "--disable-session-crashed-bubble",
-                "--hide-crash-restore-bubble",
-                "--start-maximized",
-                "http://localhost:8080"
-            ]
-            try:
-                subprocess.Popen(launch_args_cdp)
-            except Exception as ex:
-                logger.warning(f"Error launching Chrome: {ex}")
-                return False
-
-            for _ in range(30):
-                await asyncio.sleep(0.2)
-                if is_cdp_listening():
-                    return True
-            return False
-
         if visible_browser:
-            # First priority: connect directly to user's active Chrome browser via CDP port 9222
+            # First priority: connect directly to active Chrome browser if Remote Debugging (port 9222) is enabled
             try:
-                emit_event("log", "🔗 Connecting to your active Google Chrome browser (CDP :9222)...")
-                browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=2000)
+                emit_event("log", "🔗 Checking for active Google Chrome with Remote Debugging (Port 9222)...")
+                browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=1200)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
                 cdp_connected = True
-                emit_event("log", "✅ Successfully attached to your active Google Chrome window! All logins, extensions and active accounts are preserved.")
+                emit_event("log", "✅ Successfully attached to your active Google Chrome window (Port 9222)! All logins, tabs and accounts preserved.")
             except Exception:
-                emit_event("log", "🔄 Chrome port 9222 not yet open. Auto-launching your Google Chrome on port 9222 with tabs and logins restored...")
-                started_cdp = await launch_chrome_with_cdp()
-                if started_cdp:
-                    try:
-                        browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=4000)
-                        context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
-                        cdp_connected = True
-                        emit_event("log", "✅ Successfully attached to your active Google Chrome window! All logins, extensions and active accounts are preserved.")
-                    except Exception as re_err:
-                        logger.warning(f"CDP retry connect error: {re_err}")
+                emit_event("log", "🌐 Opening visible Google Chrome agent window for live scraping...")
 
             if cdp_connected and context:
                 force_foreground_window()

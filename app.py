@@ -721,19 +721,15 @@ async def launch_chrome_debug():
     if await asyncio.to_thread(check_cdp_port_live):
         return {"status": "success", "message": "Chrome Port 9222 is already connected!"}
 
+    # Check if Chrome is already running
+    chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True)
+    if "chrome.exe" in chk.stdout:
+        return {
+            "status": "info",
+            "message": "Chrome is currently running. The scraper will launch its dedicated visible agent window without disturbing your current browser session!"
+        }
+
     try:
-        # 1. Terminate running chrome processes to release profile lock
-        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
-
-        # 2. Wait until processes have exited cleanly
-        for _ in range(15):
-            await asyncio.sleep(0.2)
-            chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True)
-            if "chrome.exe" not in chk.stdout:
-                break
-        await asyncio.sleep(0.5)
-
-        # 3. Clean up crash flags so Chrome never hangs on invisible crash dialogs
         user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
         pref_path = os.path.join(user_data_path, "Default", "Preferences")
         if os.path.exists(pref_path):
@@ -761,9 +757,8 @@ async def launch_chrome_debug():
         ]
         subprocess.Popen(launch_args)
 
-        # 4. Wait up to 6 seconds for port 9222 to be ready
         connected = False
-        for _ in range(25):
+        for _ in range(20):
             await asyncio.sleep(0.25)
             if await asyncio.to_thread(check_cdp_port_live):
                 connected = True
@@ -776,8 +771,8 @@ async def launch_chrome_debug():
             }
         else:
             return {
-                "status": "warning",
-                "message": "Chrome launched. Port 9222 is binding... Please wait a moment."
+                "status": "info",
+                "message": "Chrome launched. Ready for scraping."
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch Chrome: {e}")
