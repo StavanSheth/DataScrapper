@@ -2509,12 +2509,23 @@ async def run_scraper(
                     except Exception:
                         pass
 
-                    # FAST CLICK & BATCH IN-PAGE EXTRACTION (Zero-CDP lag)
+                    # FAST CLICK & BATCH IN-PAGE EXTRACTION (Detail Panel)
                     await elem.click()
                     try:
-                        await maps_page.wait_for_selector('h1.DUwDvf', timeout=1000)
+                        # Wait for the detail panel header (h1.DUwDvf) to update with the clicked place
+                        await maps_page.wait_for_function(
+                            """(targetTitle) => {
+                                const h1 = document.querySelector('h1.DUwDvf');
+                                if (!h1) return false;
+                                const hText = (h1.innerText || '').trim().toLowerCase();
+                                if (!targetTitle) return hText.length > 0;
+                                return hText.includes(targetTitle.toLowerCase()) || targetTitle.toLowerCase().includes(hText);
+                            }""",
+                            arg=title[:25],
+                            timeout=2500
+                        )
                     except Exception:
-                        pass
+                        await maps_page.wait_for_timeout(400)
 
                     # Single ultra-fast evaluation in browser V8 (Extracts all details in <10ms)
                     detail_data = {}
@@ -2649,6 +2660,23 @@ async def run_scraper(
                     maps_fb = detail_data.get("fb") or ""
                     maps_li = detail_data.get("li") or ""
                     maps_tw = detail_data.get("tw") or "" 
+
+                    # FALLBACK: If right-side detail pane had missing address or phone, extract from small feed card preview_text
+                    if preview_text:
+                        if not address or address == "N/A":
+                            dot_parts = [p.strip() for p in preview_text.split("·") if p.strip()]
+                            for dp in dot_parts[1:]:
+                                if not any(x in dp.lower() for x in ["closed", "open", "reviews", "stars", "delivery"]):
+                                    address = dp
+                                    break
+                        if not phone or phone == "N/A":
+                            ph_match = re.search(r'\b(?:\+?\d{1,4}[ -]?)?(?:\d{5}[ -]?\d{5}|\d{3,5}[ -]?\d{6,8})\b', preview_text)
+                            if ph_match:
+                                phone = ph_match.group(0).strip()
+                        if not rating or rating == "N/A":
+                            r_match = re.search(r'\b([1-5]\.\d)\b', preview_text)
+                            if r_match:
+                                rating = r_match.group(1) 
 
                     if website:
                         w_low = website.lower()

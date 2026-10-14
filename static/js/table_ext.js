@@ -1125,8 +1125,9 @@ window.renderTable = function() {
 
       tr.innerHTML = `
         ${checkTd}
-        <td style="color:#64748b; font-weight:600;">${item.id || (index + 1)}</td>
+        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${item.id || ''}">${index + 1}</td>
         <td>${platformColHtml}</td>
+        <td><span class="badge badge-verified" style="background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3);">🟣 Listed</span></td>
         <td class="shop-title">${escapeHtml(item.title || item.name || item.company_name || 'Listing')}</td>
         <td><span class="badge badge-category">${escapeHtml(item.category || 'Listing')}</span></td>
         <td>${screenHtml}</td>
@@ -1237,35 +1238,6 @@ window.renderTable = function() {
       </button>
     `;
 
-    // Table 2 (Maps Only) Platform Column rendering
-    let platformMapsHtml = '<span class="badge badge-none">—</span>';
-    if (place.platform_name && place.platform_name !== 'N/A') {
-      const pName = escapeHtml(place.platform_name);
-      const pUrl = place.platform_url || place.booking_url || '';
-      const badgeBtn = pUrl
-        ? `<a href="${encodeURI(pUrl)}" target="_blank" class="badge-platform-btn" title="Open on ${pName}: ${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span></a>`
-        : `<span class="badge badge-platform">🟣 ${pName}</span>`;
-      const directLink = pUrl
-        ? `<a href="${encodeURI(pUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🔗 ${cleanDisplayUrl(pUrl)}</a>`
-        : '';
-      platformMapsHtml = `
-        <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
-          ${badgeBtn}
-          ${directLink}
-        </div>
-      `;
-    } else {
-      const searchQ = encodeURIComponent((place.name || '') + ' ' + (place.category || '') + ' ' + (place.address || '') + ' directory');
-      platformMapsHtml = `
-        <div style="display:flex; flex-direction:column; gap:3px;" onclick="event.stopPropagation();">
-          <span class="badge badge-none" style="opacity:0.65;" title="Not yet matched on Platform Directory">Unmatched</span>
-          <a href="https://www.google.com/search?q=${searchQ}" target="_blank" class="platform-direct-link" style="color:#94a3b8; font-size:0.7rem;" title="Find '${escapeHtml(place.name)}' on directory platforms" onclick="event.stopPropagation();">
-            🔍 Find Directory
-          </a>
-        </div>
-      `;
-    }
-
     const isSelected = window.selectedRowIds && window.selectedRowIds.has(place.id);
     if (isSelected) tr.classList.add('row-selected');
 
@@ -1281,22 +1253,54 @@ window.renderTable = function() {
     if (window.currentTableTab === 'maps') {
       tr.innerHTML = `
         ${checkTd}
-        <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
+        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
         <td class="shop-title">${escapeHtml(place.name)}</td>
         <td>${categoryHtml}</td>
+        <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+        <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
+        <td>${ratingHtml}</td>
+        <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+        <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
+        <td><span class="badge badge-verified" style="background:rgba(34,197,94,0.15); color:#4ade80; border:1px solid rgba(34,197,94,0.3);">✓ Captured</span></td>
+        <td>${formatDateTime(place.created_at)}</td>
+        ${actionsTd}
+      `;
+    } else if (window.currentTableTab === 'website') {
+      let wStatusBadge = '<span class="badge badge-none">Pending</span>';
+      if (place.website_status === 'emails_found') wStatusBadge = '<span class="badge badge-email">✉️ Emails Found</span>';
+      else if (place.website_status === 'clean') wStatusBadge = '<span class="badge badge-verified">✓ Clean</span>';
+      else if (place.website_status === 'social') wStatusBadge = '<span class="badge badge-social">📸 Social Profile</span>';
+      else if (place.website_status === 'failed') wStatusBadge = '<span class="badge badge-bot-denied">⚠️ Failed / Blocked</span>';
+      else if (place.website_status === 'no_website') wStatusBadge = '<span class="badge badge-none">No Website</span>';
+
+      tr.innerHTML = `
+        ${checkTd}
+        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+        <td class="shop-title">${escapeHtml(place.name)}</td>
+        <td>${wStatusBadge}</td>
+        <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
         <td>${emailHtml}</td>
         <td>${socialsHtml}</td>
         <td>${botHtml}</td>
         <td>${cookieHtml}</td>
-        <td>${employeeBadgeHtml}</td>
-        <td>${orgChartBtn}</td>
         <td>${screenHtml}</td>
-        <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
-        <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
-        <td>${ratingHtml}</td>
-        <td>${platformMapsHtml}</td>
-        <td>${linksHtml}</td>
-        <td>${formatDateTime(place.created_at)}</td>
+        ${actionsTd}
+      `;
+    } else if (window.currentTableTab === 'linkedin') {
+      let liStatusBadge = '<span class="badge badge-none">Pending</span>';
+      if (empCount > 0) liStatusBadge = '<span class="badge badge-verified">🌳 Mapped</span>';
+      else if (place.linkedin && place.linkedin !== 'N/A') liStatusBadge = '<span class="badge badge-category">Company Verified</span>';
+      else if (place.linkedin_status === 'not_found') liStatusBadge = '<span class="badge badge-none">Not Found</span>';
+
+      tr.innerHTML = `
+        ${checkTd}
+        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+        <td class="shop-title">${escapeHtml(place.name)}</td>
+        <td>${liStatusBadge}</td>
+        <td>${place.linkedin && place.linkedin !== 'N/A' ? `<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" style="text-decoration:none; padding:4px 8px; width:auto; border-radius:6px;" title="${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼 LinkedIn Page</a>` : '<span class="badge badge-none">—</span>'}</td>
+        <td>${employeeBadgeHtml}</td>
+        <td style="font-size:0.8rem; color:#cbd5e1;">${empCount > 0 ? `<span style="color:#38bdf8; font-weight:600;">${empCount} members</span> extracted` : '<span style="color:#64748b;">—</span>'}</td>
+        <td>${orgChartBtn}</td>
         ${actionsTd}
       `;
     } else {
@@ -1333,7 +1337,7 @@ window.renderTable = function() {
 
       tr.innerHTML = `
         ${checkTd}
-        <td style="color:#64748b; font-weight:600;">${place.id || (index + 1)}</td>
+        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
         <td class="shop-title">${escapeHtml(place.name)}</td>
         <td>${categoryHtml}</td>
         <td>${emailHtml}</td>
