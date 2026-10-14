@@ -1159,8 +1159,8 @@ async def delete_platform(platform_id: int):
     return {"status": "success", "platforms": get_platforms_config()}
 
 @app.get("/api/tables-split")
-async def get_tables_split_endpoint():
-    data = get_tables_split_data()
+async def get_tables_split_endpoint(limit: Optional[int] = None, offset: int = 0):
+    data = get_tables_split_data(limit=limit, offset=offset)
     # Merge active real-time proximity metrics if scraper is running
     if "platforms" in proximity_metrics and proximity_metrics["platforms"]:
         if "queue_progress" not in data:
@@ -1186,6 +1186,36 @@ async def get_tables_split_endpoint():
             "percent": proximity_metrics.get("percent", 0)
         }
     return data
+
+@app.get("/api/leads/view/{table_type}")
+async def get_table_view(table_type: str, limit: int = 100, offset: int = 0, search: Optional[str] = None):
+    """
+    Dedicated high-speed modular endpoint for querying individual table views:
+    table_type: 'master' | 'maps' | 'website' | 'linkedin' | 'platform'
+    """
+    data = get_tables_split_data()
+    key_map = {
+        "master": "master_leads",
+        "maps": "unmatched_maps",
+        "website": "website_leads",
+        "linkedin": "linkedin_leads",
+        "platform": "unmatched_platform"
+    }
+    target_key = key_map.get(table_type.lower(), "unmatched_maps")
+    rows = data.get(target_key, [])
+    if search:
+        s_lower = search.strip().lower()
+        rows = [r for r in rows if s_lower in str(r.get("name", "") or r.get("title", "")).lower() or s_lower in str(r.get("address", "")).lower() or s_lower in str(r.get("category", "")).lower()]
+    total_count = len(rows)
+    paginated_rows = rows[offset:offset + limit]
+    return {
+        "status": "success",
+        "table": table_type,
+        "total": total_count,
+        "limit": limit,
+        "offset": offset,
+        "rows": paginated_rows
+    }
 
 @app.get("/", response_class=FileResponse)
 async def serve_index():

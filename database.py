@@ -221,10 +221,40 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_name ON leads(name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_web_status ON leads(website_status);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_li_status ON leads(linkedin_status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_verified_status ON leads(platform_verified, website_status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_emp_status ON leads(org_scraped, employee_count);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at DESC);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_lead_plat ON platform_listings(lead_id, platform);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_verified ON platform_listings(verified);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_title ON platform_listings(title);")
             conn.execute("ALTER TABLE platform_listings ADD COLUMN screenshot TEXT DEFAULT '';")
+
+            # High-performance segmented SQLite views for fast table streaming
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS v_master_leads AS
+                SELECT * FROM leads
+                WHERE platform_verified = 1 OR (platform_name IS NOT NULL AND platform_name != '' AND platform_name != 'N/A')
+                ORDER BY id DESC;
+            """)
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS v_unmatched_maps AS
+                SELECT * FROM leads ORDER BY id DESC;
+            """)
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS v_website_leads AS
+                SELECT * FROM leads
+                WHERE (website IS NOT NULL AND website != '' AND website != 'N/A')
+                   OR website_status IN ('clean', 'emails_found', 'social', 'failed')
+                ORDER BY id DESC;
+            """)
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS v_linkedin_leads AS
+                SELECT * FROM leads
+                WHERE (employee_count IS NOT NULL AND employee_count != '' AND employee_count != '0')
+                   OR (linkedin IS NOT NULL AND linkedin != '' AND linkedin != 'N/A')
+                   OR org_scraped > 0
+                ORDER BY id DESC;
+            """)
         except Exception:
             pass
 
@@ -1514,7 +1544,7 @@ def delete_platform_config(platform_id: int) -> bool:
         conn.commit()
         return True
 
-def get_tables_split_data() -> Dict[str, Any]:
+def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
     """
     Returns segmented datasets and queue-level progress for all agents and platforms:
     1. master_leads: Leads with normalized data from both Google Maps and verified Platform Directory.
@@ -1749,21 +1779,30 @@ def get_tables_split_data() -> Dict[str, Any]:
     total_plat_target = sum(x["total"] for x in plat_breakdown.values())
     overall_plat_pct = min(100, round((total_plat_scraped / max(1, total_plat_target)) * 100)) if total_plat_target > 0 else (100 if total_plat_scraped > 0 else 0)
 
+    counts_dict = {
+        "master": len(master_leads),
+        "maps": len(unmatched_maps),
+        "platform": len(unmatched_platform),
+        "website": len(website_leads),
+        "linkedin": len(linkedin_leads),
+        "total_leads": total_maps,
+        "total_listings": len(all_listings)
+    }
+
+    if limit is not None and limit > 0:
+        master_leads = master_leads[offset:offset + limit]
+        unmatched_maps = unmatched_maps[offset:offset + limit]
+        unmatched_platform = unmatched_platform[offset:offset + limit]
+        website_leads = website_leads[offset:offset + limit]
+        linkedin_leads = linkedin_leads[offset:offset + limit]
+
     return {
         "master_leads": master_leads,
         "unmatched_maps": unmatched_maps,
         "unmatched_platform": unmatched_platform,
         "website_leads": website_leads,
         "linkedin_leads": linkedin_leads,
-        "counts": {
-            "master": len(master_leads),
-            "maps": len(unmatched_maps),
-            "platform": len(unmatched_platform),
-            "website": len(website_leads),
-            "linkedin": len(linkedin_leads),
-            "total_leads": total_maps,
-            "total_listings": len(all_listings)
-        },
+        "counts": counts_dict,
         "queue_progress": {
             "total_maps": total_maps,
             "maps": {

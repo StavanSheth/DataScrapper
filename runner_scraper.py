@@ -1991,8 +1991,8 @@ async def run_scraper(
     standalone_companies: Optional[str] = None,
 ):
     cleaned_query = query.strip() if query else ""
-    if not cleaned_query or cleaned_query.lower() in ["all", "all shops", "all shops in area"]:
-        cleaned_query = "shops"
+    if not cleaned_query or cleaned_query.lower() in ["all", "all businesses", "all shops", "all shops in area", "*"]:
+        cleaned_query = "places"
 
     search_category, search_location = parse_search_query_and_location(cleaned_query, lat=lat, lon=lon)
     selected_platforms_list = [p.strip() for p in (platforms or platform_name).split(",") if p.strip()] if enable_platform else []
@@ -2139,7 +2139,7 @@ async def run_scraper(
         if standalone_companies or (not enable_maps and enable_linkedin and not enable_platform and not enable_website):
             if standalone_companies:
                 comp_list = [c.strip() for c in standalone_companies.split(",") if c.strip()]
-            elif cleaned_query and cleaned_query != "shops":
+            elif cleaned_query and cleaned_query not in ["shops", "places"]:
                 comp_list = [c.strip() for c in cleaned_query.split(",") if c.strip()]
             else:
                 from database import get_all_leads

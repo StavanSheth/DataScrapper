@@ -49,9 +49,10 @@
       <!-- Mode 1: Maps Harvester Controls -->
       <div id="controls-maps" style="display:flex; flex-direction:column; gap:16px;">
         <div class="form-group" id="query-group">
-          <label id="query-label">Business Type / Keyword <span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">(Optional if All Shops checked)</span></label>
-          <input type="text" id="query-input" placeholder="e.g. Barber, Bakery, Dentist (or leave empty for all)" value="">
+          <label id="query-label">Business Type / Keyword <span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">(Optional - leave empty to harvest all businesses in area)</span></label>
+          <input type="text" id="query-input" placeholder="e.g. Barber, Bakery, Dentist (or leave empty for all businesses)" value="">
           <div class="chips">
+            <div class="chip" onclick="setQuery('')" style="background:rgba(99,102,241,0.25); border:1px solid #6366f1; color:#c7d2fe; font-weight:600;">🌐 All Businesses (Broad)</div>
             <div class="chip" onclick="setQuery('Bakery London')">🥐 Bakeries</div>
             <div class="chip" onclick="setQuery('Barber London')">💈 Barbers</div>
             <div class="chip" onclick="setQuery('Dentist London')">🦷 Dentists</div>
@@ -62,8 +63,8 @@
 
         <div class="toggle-row">
           <div class="toggle-info">
-            <span>🔄 Scrape ALL Shops (Continuous)</span>
-            <small>Scrolls Google Maps until all area shops are harvested</small>
+            <span>🔄 Continuous Harvesting (All Leads)</span>
+            <small>Scrolls Google Maps until all area businesses and locations are harvested</small>
           </div>
           <label class="switch">
             <input type="checkbox" id="scrape-all-toggle" checked>
