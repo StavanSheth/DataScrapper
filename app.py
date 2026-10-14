@@ -733,14 +733,29 @@ async def launch_chrome_debug():
                 break
         await asyncio.sleep(0.5)
 
-        # 3. Launch Chrome with CDP port 9222 and session restore so all open tabs and accounts return
+        # 3. Clean up crash flags so Chrome never hangs on invisible crash dialogs
         user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+        pref_path = os.path.join(user_data_path, "Default", "Preferences")
+        if os.path.exists(pref_path):
+            try:
+                with open(pref_path, "r", encoding="utf-8", errors="ignore") as f:
+                    pref_data = json.load(f)
+                if "profile" in pref_data:
+                    pref_data["profile"]["exit_type"] = "Normal"
+                    pref_data["profile"]["exited_cleanly"] = True
+                with open(pref_path, "w", encoding="utf-8") as f:
+                    json.dump(pref_data, f)
+            except Exception:
+                pass
+
         launch_args = [
             chrome_exe,
             "--remote-debugging-port=9222",
             f"--user-data-dir={user_data_path}",
             "--remote-allow-origins=*",
             "--restore-last-session",
+            "--disable-session-crashed-bubble",
+            "--hide-crash-restore-bubble",
             "--start-maximized",
             "http://localhost:8080"
         ]
