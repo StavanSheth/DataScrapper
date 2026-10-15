@@ -429,14 +429,164 @@ let placesData = [];
       }
     }
 
-    function logMessage(msg) {
+    const seenLogSignatures = new Set();
+
+    const agentLogCounts = { maps: 0, website: 0, linkedin: 0, platform: 0 };
+
+    function classifyAgent(rawText, explicitAgent) {
+      if (explicitAgent && ['maps', 'website', 'linkedin', 'platform'].includes(explicitAgent)) {
+        return explicitAgent;
+      }
+      const low = String(rawText || '').toLowerCase();
+      if (low.includes('[maps]') || low.includes('[agent 1:') || low.includes('maps feed') || low.includes('panning') || low.includes('radius filter') || low.includes('area dedup') || low.includes('db dedup')) return 'maps';
+      if (low.includes('[website]') || low.includes('[agent 2:') || low.includes('website') || low.includes('cloudflare') || low.includes('turnstile') || low.includes('anti-bot') || low.includes('email extraction')) return 'website';
+      if (low.includes('[linkedin]') || low.includes('[agent 3:') || low.includes('[org intelligence]') || low.includes('linkedin') || low.includes('employee') || low.includes('personnel')) return 'linkedin';
+      if (low.includes('[platform') || low.includes('[agent 4:') || low.includes('[tab 4') || low.includes('fresha') || low.includes('airbnb') || low.includes('yelp') || low.includes('tripadvisor') || low.includes('directory')) return 'platform';
+      return null;
+    }
+
+    function appendAgentLog(agent, rawText, timeStr) {
+      if (!agent || !['maps', 'website', 'linkedin', 'platform'].includes(agent)) return;
+      const box = document.getElementById(`console-box-${agent}`);
+      if (!box) return;
+
+      const time = timeStr || new Date().toLocaleTimeString();
+      const line = document.createElement('div');
+      line.className = `agent-log-line ${agent}`;
+      line.innerHTML = `<span class="agent-log-time">[${time}]</span> <span>${escapeHtml(rawText)}</span>`;
+      box.appendChild(line);
+
+      while (box.children.length > 200) {
+        box.removeChild(box.firstChild);
+      }
+
+      agentLogCounts[agent] = (agentLogCounts[agent] || 0) + 1;
+      const badge = document.getElementById(`badge-log-${agent}`);
+      if (badge) {
+        badge.innerText = `${agentLogCounts[agent]} logs`;
+      }
+      box.scrollTop = box.scrollHeight;
+    }
+
+    window.clearAgentConsole = function(agent) {
+      if (!agent) return;
+      const box = document.getElementById(`console-box-${agent}`);
+      if (box) {
+        box.innerHTML = `<div class="agent-log-line ${agent}"><span class="agent-log-time">[${new Date().toLocaleTimeString()}]</span> <span>Console cleared. Ready for next activity.</span></div>`;
+      }
+      agentLogCounts[agent] = 0;
+      const badge = document.getElementById(`badge-log-${agent}`);
+      if (badge) badge.innerText = '0 logs';
+    };
+
+    function clearAllAgentConsoles() {
+      ['maps', 'website', 'linkedin', 'platform'].forEach(ag => {
+        const box = document.getElementById(`console-box-${ag}`);
+        if (box) box.innerHTML = '';
+        agentLogCounts[ag] = 0;
+        const badge = document.getElementById(`badge-log-${ag}`);
+        if (badge) badge.innerText = '0 logs';
+      });
+    }
+
+    function clearTerminalBox() {
       const box = document.getElementById('terminal-box');
-      const time = new Date().toLocaleTimeString();
+      if (box) {
+        box.innerHTML = '';
+        seenLogSignatures.clear();
+        updateLogCountBadge();
+      }
+      clearAllAgentConsoles();
+    }
+
+    window.clearTerminalLogs = function() {
+      clearTerminalBox();
+      logMessage("ℹ️ Terminal logs view cleared.");
+    };
+
+    function updateLogCountBadge() {
+      const box = document.getElementById('terminal-box');
+      const badge = document.getElementById('log-count-badge');
+      if (box && badge) {
+        const count = box.querySelectorAll('.log-line').length;
+        badge.innerText = `${count} ${count === 1 ? 'log' : 'logs'}`;
+      }
+    }
+
+    function logMessage(msg, timeStr, explicitAgent) {
+      if (!msg) return;
+      const box = document.getElementById('terminal-box');
+      if (!box) return;
+
+      const rawText = (typeof msg === 'string' ? msg : (msg.message || JSON.stringify(msg))).trim();
+      if (!rawText) return;
+
+      const time = timeStr || (typeof msg === 'object' && msg.time ? msg.time : new Date().toLocaleTimeString());
+      const agent = explicitAgent || (typeof msg === 'object' && msg.agent ? msg.agent : null);
+
+      // Route to dedicated agent console
+      const detectedAgent = classifyAgent(rawText, agent);
+      if (detectedAgent) {
+        appendAgentLog(detectedAgent, rawText, time);
+      }
+
+      const sig = `${time}|${rawText}`;
+      if (seenLogSignatures.has(sig)) return;
+      seenLogSignatures.add(sig);
+
+      if (seenLogSignatures.size > 2000) {
+        const first = seenLogSignatures.values().next().value;
+        seenLogSignatures.delete(first);
+      }
+
       const line = document.createElement('div');
       line.className = 'log-line';
-      line.innerHTML = `<span class="log-time">[${time}]</span> <span>${escapeHtml(msg)}</span>`;
+
+      if (rawText.includes('[Agent 1: Maps]') || rawText.includes('Tab 1') || detectedAgent === 'maps') {
+        line.classList.add('log-agent-maps');
+      } else if (rawText.includes('[Agent 2: Website]') || rawText.includes('Tab 2') || detectedAgent === 'website') {
+        line.classList.add('log-agent-website');
+      } else if (rawText.includes('[Agent 3: LinkedIn]') || rawText.includes('Tab 3') || detectedAgent === 'linkedin') {
+        line.classList.add('log-agent-linkedin');
+      } else if (rawText.includes('[Agent 4: Platform]') || rawText.includes('Tab 4') || detectedAgent === 'platform') {
+        line.classList.add('log-agent-platform');
+      } else if (rawText.includes('⚠️') || rawText.toLowerCase().includes('error')) {
+        line.classList.add('log-warning');
+      } else if (rawText.includes('✅') || rawText.includes('🏁') || rawText.includes('Finished')) {
+        line.classList.add('log-success');
+      }
+
+      line.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-text">${escapeHtml(rawText)}</span>`;
       box.appendChild(line);
+
+      while (box.children.length > 500) {
+        box.removeChild(box.firstChild);
+      }
+
       box.scrollTop = box.scrollHeight;
+      updateLogCountBadge();
+    }
+
+    function renderLogsBatch(logsList) {
+      if (!Array.isArray(logsList) || logsList.length === 0) return;
+      logsList.forEach(item => {
+        if (typeof item === 'string') {
+          logMessage(item);
+        } else if (item && item.message) {
+          logMessage(item.message, item.time, item.agent);
+        }
+      });
+    }
+
+    function syncLogsFromPoll(logsList) {
+      if (!Array.isArray(logsList) || logsList.length === 0) return;
+      logsList.forEach(item => {
+        if (typeof item === 'string') {
+          logMessage(item);
+        } else if (item && item.message) {
+          logMessage(item.message, item.time, item.agent);
+        }
+      });
     }
 
     function escapeHtml(str) {
@@ -617,6 +767,8 @@ let placesData = [];
         if (place.facebook) socialsList.push(`<a href="${encodeURI(place.facebook)}" target="_blank" class="badge-social badge-fb" title="Facebook: ${escapeHtml(place.facebook)}" onclick="event.stopPropagation();">📘</a>`);
         if (place.linkedin) socialsList.push(`<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" title="LinkedIn: ${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼</a>`);
         if (place.twitter) socialsList.push(`<a href="${encodeURI(place.twitter)}" target="_blank" class="badge-social badge-tw" title="Twitter/X: ${escapeHtml(place.twitter)}" onclick="event.stopPropagation();">🐦</a>`);
+        if (place.youtube) socialsList.push(`<a href="${encodeURI(place.youtube)}" target="_blank" class="badge-social badge-yt" title="YouTube: ${escapeHtml(place.youtube)}" onclick="event.stopPropagation();">▶️</a>`);
+        if (place.tiktok) socialsList.push(`<a href="${encodeURI(place.tiktok)}" target="_blank" class="badge-social badge-tt" title="TikTok: ${escapeHtml(place.tiktok)}" onclick="event.stopPropagation();">🎵</a>`);
 
         const socialsHtml = socialsList.length > 0
           ? `<div style="display:flex; gap:5px;" onclick="event.stopPropagation();">${socialsList.join('')}</div>`
@@ -929,36 +1081,85 @@ let placesData = [];
 
     function setScrapingState(running, statusText = '') {
       isRunning = running;
-      document.getElementById('start-btn').style.display = running ? 'none' : 'flex';
-      document.getElementById('stop-btn').style.display = running ? 'flex' : 'none';
+      window.isScrapingRunning = running;
+      const startBtn = document.getElementById('start-btn');
+      const stopBtn = document.getElementById('stop-btn');
+      if (startBtn) {
+        startBtn.style.display = running ? 'none' : 'flex';
+        startBtn.disabled = false;
+        if (!running) {
+          if (currentMode === 'companies') {
+            startBtn.className = 'btn btn-linkedin-theme';
+            startBtn.innerHTML = '<span>💼 Launch LinkedIn Org Harvester</span>';
+          } else if (typeof handleAgentToggleChange === 'function') {
+            handleAgentToggleChange();
+          } else {
+            startBtn.className = 'btn btn-primary';
+            startBtn.innerHTML = '<span>🚀 Start Live Agent</span>';
+          }
+        }
+      }
+      if (stopBtn) {
+        stopBtn.style.display = running ? 'flex' : 'none';
+        stopBtn.disabled = false;
+        stopBtn.innerHTML = '<span>⏹️ Stop</span>';
+      }
       const dot = document.getElementById('status-dot');
       if (running) {
-        dot.classList.add('active');
-        document.getElementById('status-text').innerText = statusText || "Live Agent Running";
+        if (dot) dot.classList.add('active');
+        const st = document.getElementById('status-text');
+        if (st) st.innerText = statusText || "Live Agent Running";
       } else {
-        dot.classList.remove('active');
-        document.getElementById('status-text').innerText = statusText || "Ready";
+        if (dot) dot.classList.remove('active');
+        const st = document.getElementById('status-text');
+        if (st) st.innerText = statusText || "Ready";
+      }
+    }
+
+    async function activateChromeTab(tabName) {
+      try {
+        const resp = await fetch('/api/activate-tab', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tab: tabName })
+        });
+        const res = await resp.json();
+        if (res.status === 'success') {
+          logMessage(`👁️ Switched live Chrome window to focus: [${tabName.toUpperCase()} Agent]`);
+        } else {
+          logMessage(`ℹ️ [${tabName.toUpperCase()}] Tab not yet active in Chrome.`);
+        }
+      } catch (e) {
+        console.error('activateChromeTab error:', e);
       }
     }
 
     function updateLiveStream(frame) {
       if (!frame || !frame.image) return;
-      let prefix = 'maps';
-      let indicatorClass = 'live-indicator maps';
-      let indicatorText = '🔴 TAB 1: MAPS LIVE';
+      const tab = (frame.tab || frame.stream_type || '').toLowerCase();
+      let prefix = null;
+      let indicatorClass = '';
+      let indicatorText = '';
 
-      if (frame.tab === 'platform' || frame.is_platform) {
+      if (tab === 'platform' || frame.is_platform) {
         prefix = 'platform';
         indicatorClass = 'live-indicator platform';
         indicatorText = '🟣 TAB 4: DIRECTORY LIVE';
-      } else if (frame.tab === 'linkedin' || frame.is_linkedin) {
+      } else if (tab === 'linkedin' || frame.is_linkedin) {
         prefix = 'linkedin';
         indicatorClass = 'live-indicator linkedin';
         indicatorText = '🔵 TAB 3: LINKEDIN LIVE';
-      } else if (frame.tab === 'website' || frame.is_website) {
+      } else if (tab === 'website' || frame.is_website) {
         prefix = 'website';
         indicatorClass = 'live-indicator website';
         indicatorText = '🟢 TAB 2: SHOP LIVE';
+      } else if (tab === 'maps' || frame.is_maps) {
+        prefix = 'maps';
+        indicatorClass = 'live-indicator maps';
+        indicatorText = '🔴 TAB 1: MAPS LIVE';
+      } else {
+        // Drop unclassified or stray frames to protect agent card isolation
+        return;
       }
 
       const img = document.getElementById(`stream-img-${prefix}`);
@@ -1164,6 +1365,18 @@ let placesData = [];
               if (msg.frame_linkedin) updateLiveStream(msg.frame_linkedin);
               if (msg.frame_platform) updateLiveStream(msg.frame_platform);
               if (msg.proximity_metrics) updateProximityUI(msg.proximity_metrics);
+              if (Array.isArray(msg.logs)) renderLogsBatch(msg.logs);
+              if (msg.agent_logs && typeof msg.agent_logs === 'object') {
+                Object.keys(msg.agent_logs).forEach(ag => {
+                  const list = msg.agent_logs[ag];
+                  if (Array.isArray(list) && list.length > 0) {
+                    list.forEach(item => {
+                      if (typeof item === 'string') appendAgentLog(ag, item);
+                      else if (item && item.message) appendAgentLog(ag, item.message, item.time);
+                    });
+                  }
+                });
+              }
             } else if (msg.type === 'proximity_total') {
               updateProximityUI(msg.data || msg);
             } else if (msg.type === 'platform_progress') {
@@ -1181,91 +1394,77 @@ let placesData = [];
             } else if (msg.type === 'place_scraped') {
               const place = msg.data;
               placesData.unshift(place);
-              if (window.tablesSplitData && Array.isArray(window.tablesSplitData.unmatched_maps)) {
-                const exists = window.tablesSplitData.unmatched_maps.some(p => (place.id && p.id === place.id) || (p.name === place.name && p.address === place.address));
-                if (!exists) {
-                  const mRow = Object.assign({}, place);
-                  const has_w = Boolean(mRow.website && mRow.website !== 'N/A' && mRow.website !== '');
-                  const has_p = Boolean(mRow.phone && mRow.phone !== 'N/A' && mRow.phone !== '');
-                  mRow.has_website = has_w;
-                  mRow.has_phone = has_p;
-                  mRow.status_tag = (has_w && has_p) ? "Full Contact (Web & Phone)" : (has_w ? "Has Website" : (has_p ? "Phone Only" : "Location Only"));
-                  window.tablesSplitData.unmatched_maps.unshift(mRow);
-                  const bMaps = document.getElementById('badge-count-maps');
-                  if (bMaps) bMaps.innerText = window.tablesSplitData.unmatched_maps.length;
-                }
+              const has_w = Boolean(place.website && place.website !== 'N/A' && place.website !== '');
+              const has_p = Boolean(place.phone && place.phone !== 'N/A' && place.phone !== '');
+              place.has_website = has_w;
+              place.has_phone = has_p;
+              place.status_tag = (has_w && has_p) ? "Full Contact (Web & Phone)" : (has_w ? "Has Website" : (has_p ? "Phone Only" : "Location Only"));
+
+              if (typeof window.updateOrPrependLiveRow === 'function') {
+                window.updateOrPrependLiveRow('maps', place);
+                window.updateOrPrependLiveRow('master', place);
+              } else if (typeof window.renderTable === 'function') {
+                window.renderTable();
               }
-              if (place.platform_verified || (place.platform_name && place.platform_name !== 'N/A')) {
-                if (window.tablesSplitData && Array.isArray(window.tablesSplitData.master_leads)) {
-                  const existsM = window.tablesSplitData.master_leads.some(p => (place.id && p.id === place.id) || p.name === place.name);
-                  if (!existsM) {
-                    window.tablesSplitData.master_leads.unshift(Object.assign({}, place));
-                    const bMaster = document.getElementById('badge-count-master');
-                    if (bMaster) bMaster.innerText = window.tablesSplitData.master_leads.length;
-                  }
-                }
-              }
-              if (typeof window.renderTable === 'function') window.renderTable();
               updateKPIs();
             } else if (msg.type === 'place_updated') {
               const uData = msg.data;
               const target = placesData.find(p => (uData.id && p.id === uData.id) || (p.name === uData.name && (p.address === uData.address || p.address === 'N/A' || uData.address === 'N/A')));
               if (target) {
                 Object.assign(target, uData);
+                if (!uData.id && target.id) uData.id = target.id;
               } else {
                 placesData.unshift(uData);
               }
 
-              if (window.tablesSplitData) {
-                // Update Table 2 (Maps)
-                if (Array.isArray(window.tablesSplitData.unmatched_maps)) {
-                  const mMap = window.tablesSplitData.unmatched_maps.find(p => (uData.id && p.id === uData.id) || (p.name === uData.name && (p.address === uData.address || p.address === 'N/A' || uData.address === 'N/A')));
-                  if (mMap) Object.assign(mMap, uData);
-                }
+              let w_tag = "Website Found";
+              const has_e = Boolean(uData.email && uData.email !== 'N/A');
+              const has_s = Boolean(uData.instagram || uData.facebook || uData.twitter || uData.linkedin || uData.youtube || uData.tiktok);
+              const bot = uData.bot_protection || "";
+              if (has_e) w_tag = "Emails Extracted";
+              else if (has_s) w_tag = "Socials Found";
+              else if (bot.includes("Denied") || bot.includes("Captcha")) w_tag = "Bot Shielded";
+              else if (uData.website_status === "failed") w_tag = "Website Unreachable";
+              else if (uData.website_status === "social") w_tag = "Social Profile";
 
-                // Update Table 3 (Website Leads - live add or update upon inspection!)
-                if (!Array.isArray(window.tablesSplitData.website_leads)) {
-                  window.tablesSplitData.website_leads = [];
-                }
-                const wList = window.tablesSplitData.website_leads;
-                const wTarget = wList.find(p => (uData.id && p.id === uData.id) || (p.name === uData.name && (p.address === uData.address || p.address === 'N/A' || uData.address === 'N/A')));
+              const wRow = Object.assign({}, target || uData);
+              Object.assign(wRow, uData);
+              wRow.status_tag = w_tag;
+              wRow.has_website = Boolean(wRow.website && wRow.website !== 'N/A');
+              wRow.has_email = has_e;
+              wRow.has_socials = has_s;
 
-                let w_tag = "Website Found";
-                const has_e = Boolean(uData.email && uData.email !== 'N/A');
-                const has_s = Boolean(uData.instagram || uData.facebook || uData.twitter);
-                const bot = uData.bot_protection || "";
-                if (has_e) w_tag = "Emails Extracted";
-                else if (has_s) w_tag = "Socials Found";
-                else if (bot.includes("Denied") || bot.includes("Captcha")) w_tag = "Bot Shielded";
-                else if (uData.website_status === "failed") w_tag = "Website Unreachable";
-                else if (uData.website_status === "social") w_tag = "Social Profile";
-
-                if (wTarget) {
-                  Object.assign(wTarget, uData);
-                  wTarget.status_tag = w_tag;
-                } else {
-                  const newWRow = Object.assign({}, target || uData);
-                  Object.assign(newWRow, uData);
-                  newWRow.status_tag = w_tag;
-                  newWRow.has_website = Boolean(newWRow.website && newWRow.website !== 'N/A');
-                  newWRow.has_email = has_e;
-                  newWRow.has_socials = has_s;
-                  wList.unshift(newWRow);
-                }
-                const bWeb = document.getElementById('badge-count-website');
-                if (bWeb) bWeb.innerText = wList.length;
-
-                // Update Table 1 (Master Leads)
-                if (Array.isArray(window.tablesSplitData.master_leads)) {
-                  const mTarget = window.tablesSplitData.master_leads.find(p => (uData.id && p.id === uData.id) || (p.name === uData.name && (p.address === uData.address || p.address === 'N/A' || uData.address === 'N/A')));
-                  if (mTarget) Object.assign(mTarget, uData);
-                }
+              if (typeof window.updateOrPrependLiveRow === 'function') {
+                window.updateOrPrependLiveRow('maps', target || uData);
+                window.updateOrPrependLiveRow('website', wRow);
+                window.updateOrPrependLiveRow('master', target || uData);
+              } else if (typeof window.renderTable === 'function') {
+                window.renderTable();
               }
-              if (typeof window.renderTable === 'function') window.renderTable();
               updateKPIs();
             } else if (msg.type === 'platform_listing_found') {
               const listing = msg.data;
-              const target = placesData.find(p => p.name === listing.company_name || (listing.lead_id && p.id === listing.lead_id));
+              const newPlatRow = {
+                id: listing.id || (placesData.length + 1),
+                platform: listing.platform,
+                platform_name: listing.platform,
+                title: listing.company_name,
+                name: listing.company_name,
+                url: listing.listing_url,
+                listing_url: listing.listing_url,
+                booking_url: listing.booking_url,
+                rating: listing.rating,
+                reviews_count: listing.review_count,
+                reviews: listing.review_count,
+                price_info: listing.price_range,
+                price_range: listing.price_range,
+                address: listing.address || "Area Proximity",
+                screenshot: listing.screenshot || "",
+                verified: listing.verified ? 1 : 0,
+                created_at: new Date().toISOString()
+              };
+
+              const target = placesData.find(p => p.name === listing.company_name || (listing.lead_id && p.id === listing.lead_id) || (listing.matched_lead_id && p.id === listing.matched_lead_id));
               if (target) {
                 target.platform_name = listing.platform;
                 target.platform_url = listing.listing_url;
@@ -1276,57 +1475,15 @@ let placesData = [];
                 target.platform_verified = 1;
               }
 
-              if (window.tablesSplitData) {
-                // Update Table 5 (Platform Directory)
-                if (!Array.isArray(window.tablesSplitData.unmatched_platform)) {
-                  window.tablesSplitData.unmatched_platform = [];
+              if (typeof window.updateOrPrependLiveRow === 'function') {
+                window.updateOrPrependLiveRow('platform', newPlatRow);
+                if (target) {
+                  window.updateOrPrependLiveRow('master', target);
+                  window.updateOrPrependLiveRow('maps', target);
                 }
-                const pList = window.tablesSplitData.unmatched_platform;
-                const pExists = pList.some(p => (p.url && p.url === listing.listing_url) || (p.title === listing.company_name && p.platform === listing.platform));
-                if (!pExists) {
-                  const newPlatRow = {
-                    id: listing.id || (pList.length + 1),
-                    platform: listing.platform,
-                    platform_name: listing.platform,
-                    title: listing.company_name,
-                    name: listing.company_name,
-                    url: listing.listing_url,
-                    listing_url: listing.listing_url,
-                    booking_url: listing.booking_url,
-                    rating: listing.rating,
-                    reviews_count: listing.review_count,
-                    reviews: listing.review_count,
-                    price_info: listing.price_range,
-                    price_range: listing.price_range,
-                    address: listing.address || "Area Proximity",
-                    screenshot: listing.screenshot || "",
-                    verified: listing.verified ? 1 : 0,
-                    created_at: new Date().toISOString()
-                  };
-                  pList.unshift(newPlatRow);
-                  const bPlat = document.getElementById('badge-count-platform');
-                  if (bPlat) bPlat.innerText = pList.length;
-                }
-
-                // Update Table 1 (Master Leads - cross verified)
-                if (target && Array.isArray(window.tablesSplitData.master_leads)) {
-                  const mList = window.tablesSplitData.master_leads;
-                  const mTarget = mList.find(p => p.name === target.name || (target.id && p.id === target.id));
-                  if (mTarget) {
-                    Object.assign(mTarget, target);
-                  } else {
-                    mList.unshift(Object.assign({}, target));
-                    const bMaster = document.getElementById('badge-count-master');
-                    if (bMaster) bMaster.innerText = mList.length;
-                  }
-                }
-                // Update Table 2 (Maps)
-                if (target && Array.isArray(window.tablesSplitData.unmatched_maps)) {
-                  const mMap = window.tablesSplitData.unmatched_maps.find(p => p.name === target.name || (target.id && p.id === target.id));
-                  if (mMap) Object.assign(mMap, target);
-                }
+              } else if (typeof window.renderTable === 'function') {
+                window.renderTable();
               }
-              if (typeof window.renderTable === 'function') window.renderTable();
               updateKPIs();
             } else if (msg.type === 'org_updated') {
               const oData = msg.data;
@@ -1335,56 +1492,38 @@ let placesData = [];
               if (target) {
                 target.employee_count = oData.employee_count;
                 if (oData.linkedin_url) target.linkedin = oData.linkedin_url;
+                if (!oData.id && target.id) oData.id = target.id;
               }
 
-              if (window.tablesSplitData) {
-                // Update Table 4 (LinkedIn Harvester)
-                if (!Array.isArray(window.tablesSplitData.linkedin_leads)) {
-                  window.tablesSplitData.linkedin_leads = [];
+              const empCount = parseInt(oData.employee_count || 0);
+              const li_tag = empCount > 0 ? "Employees Crawled" : (oData.linkedin_url ? "LinkedIn Found" : "Not Found on LinkedIn");
+
+              const liRow = Object.assign({}, target || { name: oData.company, address: "N/A", category: "Business" });
+              liRow.id = oData.id || (target ? target.id : undefined);
+              liRow.employee_count = oData.employee_count;
+              if (oData.linkedin_url) liRow.linkedin = oData.linkedin_url;
+              liRow.status_tag = li_tag;
+              liRow.has_linkedin = Boolean(liRow.linkedin && liRow.linkedin !== 'N/A');
+              liRow.has_employees = empCount > 0;
+
+              if (typeof window.updateOrPrependLiveRow === 'function') {
+                window.updateOrPrependLiveRow('linkedin', liRow);
+                if (target) {
+                  window.updateOrPrependLiveRow('maps', target);
+                  window.updateOrPrependLiveRow('master', target);
                 }
-                const liList = window.tablesSplitData.linkedin_leads;
-                const liTarget = liList.find(p => (p.name || '').toLowerCase().trim() === compName);
-
-                const empCount = parseInt(oData.employee_count || 0);
-                const li_tag = empCount > 0 ? "Employees Crawled" : (oData.linkedin_url ? "LinkedIn Found" : "Not Found on LinkedIn");
-
-                if (liTarget) {
-                  liTarget.employee_count = oData.employee_count;
-                  if (oData.linkedin_url) liTarget.linkedin = oData.linkedin_url;
-                  liTarget.status_tag = li_tag;
-                  liTarget.has_linkedin = Boolean(liTarget.linkedin && liTarget.linkedin !== 'N/A');
-                  liTarget.has_employees = empCount > 0;
-                } else {
-                  const baseLead = target || { name: oData.company, address: "N/A", category: "Business" };
-                  const newLiRow = Object.assign({}, baseLead);
-                  newLiRow.employee_count = oData.employee_count;
-                  if (oData.linkedin_url) newLiRow.linkedin = oData.linkedin_url;
-                  newLiRow.status_tag = li_tag;
-                  newLiRow.has_linkedin = Boolean(newLiRow.linkedin && newLiRow.linkedin !== 'N/A');
-                  newLiRow.has_employees = empCount > 0;
-                  liList.unshift(newLiRow);
-                }
-                const bLi = document.getElementById('badge-count-linkedin');
-                if (bLi) bLi.innerText = liList.length;
-
-                // Update Master & Maps
-                ['master_leads', 'unmatched_maps'].forEach(key => {
-                  const list = window.tablesSplitData[key];
-                  if (Array.isArray(list)) {
-                    const row = list.find(p => (p.name || '').toLowerCase().trim() === compName);
-                    if (row) {
-                      row.employee_count = oData.employee_count;
-                      if (oData.linkedin_url) row.linkedin = oData.linkedin_url;
-                    }
-                  }
-                });
+              } else if (typeof window.renderTable === 'function') {
+                window.renderTable();
               }
-              if (typeof window.renderTable === 'function') window.renderTable();
               updateKPIs();
             } else if (msg.type === 'status') {
-              setScrapingState(msg.data !== 'Finished' && msg.data !== 'Ready', msg.data);
+              const terminalStatuses = ['Finished', 'Ready', 'Stopped', 'Idle', 'Failed', 'Failed to launch'];
+              const isTerminal = terminalStatuses.includes(msg.data);
+              setScrapingState(!isTerminal, msg.data);
             } else if (msg.type === 'log') {
-              logMessage(msg.data);
+              logMessage(msg.data, msg.time, msg.agent);
+            } else if (msg.type === 'logs_cleared') {
+              clearTerminalBox();
             } else if (msg.type === 'db_cleared') {
               placesData = [];
               if (window.tablesSplitData) {
@@ -1417,9 +1556,6 @@ let placesData = [];
         if (data.frame_website) updateLiveStream(data.frame_website);
         if (data.frame_linkedin) updateLiveStream(data.frame_linkedin);
         if (data.frame_platform) updateLiveStream(data.frame_platform);
-        else if (data.live_frame) {
-          updateLiveStream(data.live_frame);
-        }
         if (!data.is_scraping && (data.status === 'Finished' || data.status === 'Ready')) {
           const indMaps = document.getElementById('stream-indicator-maps');
           if (indMaps && !indMaps.innerText.includes('IDLE')) {
@@ -1449,19 +1585,8 @@ let placesData = [];
           updateKPIs();
         }
 
-        if (data.logs && data.logs.length > 0) {
-          const box = document.getElementById('terminal-box');
-          const currentCount = box.children.length;
-          if (data.logs.length + 1 > currentCount) {
-            box.innerHTML = '';
-            data.logs.forEach(item => {
-              const line = document.createElement('div');
-              line.className = 'log-line';
-              line.innerHTML = `<span class="log-time">[Live]</span> <span>${escapeHtml(item.message)}</span>`;
-              box.appendChild(line);
-            });
-            box.scrollTop = box.scrollHeight;
-          }
+        if (data.logs && Array.isArray(data.logs)) {
+          syncLogsFromPoll(data.logs);
         }
       } catch (err) {
         console.error("Poll error:", err);
@@ -1496,6 +1621,10 @@ let placesData = [];
           if (!resp.ok) {
             alert(res.detail || "Error starting company harvester");
             setScrapingState(false, "Ready");
+          } else if (res.status === 'already_running') {
+            logMessage("ℹ️ Scraper is already active in background. Click 'Stop' if you wish to restart.");
+            setScrapingState(true, "Live Agent Running");
+            setTimeout(pollStatus, 300);
           } else {
             setTimeout(pollStatus, 300);
           }
@@ -1535,6 +1664,27 @@ let placesData = [];
       }
 
       setScrapingState(true, "Launching Chrome window...");
+
+      if (visibleBrowser) {
+        try {
+          const chk = await fetch('/api/chrome/status');
+          const cData = await chk.json();
+          if (!cData.cdp_active || !cData.is_primary) {
+            const attach = confirm(
+              "⚡ Run Agent Tabs Directly in THIS Chrome Window?\n\n" +
+              "Currently, Remote Debugging (Port 9222) is not attached to this personal Chrome window.\n\n" +
+              "• Click OK to restart Chrome on Port 9222 so all tabs (Google Maps, Website, LinkedIn, Directory) open directly in THIS window.\n" +
+              "  (All your current open tabs, logins, and accounts will be restored automatically!)\n\n" +
+              "• Click Cancel to run in a separate automation window."
+            );
+            if (attach) {
+              setScrapingState(false, "Ready");
+              await attachPrimaryChrome(true);
+              return;
+            }
+          }
+        } catch (e) {}
+      }
       const parts = [];
       if (agentMaps) parts.push("Maps");
       if (agentWebsite) parts.push("Website");
@@ -1542,34 +1692,14 @@ let placesData = [];
       if (agentPlatform) parts.push(platformName);
       logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
 
-      if (typeof window.switchTableTab === 'function' && window.currentTableTab === 'master') {
-        const masterCount = (window.tablesSplitData && window.tablesSplitData.master_leads) ? window.tablesSplitData.master_leads.length : 0;
-        if (masterCount === 0) {
-          if (agentMaps) window.switchTableTab('maps');
-          else if (agentPlatform) window.switchTableTab('platform');
-          else if (agentWebsite) window.switchTableTab('website');
-          else if (agentLinkedin) window.switchTableTab('linkedin');
-        }
+      if (typeof window.switchTableTab === 'function') {
+        if (agentMaps) window.switchTableTab('maps');
+        else if (agentPlatform) window.switchTableTab('platform');
+        else if (agentWebsite) window.switchTableTab('website');
+        else if (agentLinkedin) window.switchTableTab('linkedin');
       }
 
-      // Trigger Extension to open tabs live in this exact Chrome window ONLY for enabled agents
-      try {
-        const encoded = encodeURIComponent(query);
-        const mapsUrl = (lat && lon)
-          ? `https://www.google.com/maps/search/${encoded}/@${lat},${lon},14z?hl=en`
-          : `https://www.google.com/maps/search/${encoded}?hl=en`;
 
-        window.postMessage({
-          source: "mavon_dashboard",
-          action: "START_LIVE_BROWSER_SCRAPING",
-          url: mapsUrl,
-          enable_maps: agentMaps,
-          enable_website: agentWebsite,
-          enable_linkedin: agentLinkedin,
-          enable_platform: agentPlatform,
-          platform_url: platformCustomUrl || null
-        }, "*");
-      } catch (e) {}
 
 
       try {
@@ -1603,6 +1733,10 @@ let placesData = [];
         if (!resp.ok) {
           alert(res.detail || "Error starting scraper");
           setScrapingState(false, "Ready");
+        } else if (res.status === 'already_running') {
+          logMessage("ℹ️ Scraper is already active in background. Click 'Stop' if you wish to restart.");
+          setScrapingState(true, "Live Agent Running");
+          setTimeout(pollStatus, 300);
         } else {
           setTimeout(pollStatus, 300);
         }
@@ -1613,12 +1747,18 @@ let placesData = [];
     }
 
     async function stopScraping() {
+      const stopBtn = document.getElementById('stop-btn');
+      if (stopBtn) {
+        stopBtn.disabled = true;
+        stopBtn.innerHTML = '<span>⏳ Stopping...</span>';
+      }
       try {
         await fetch('/api/stop', { method: 'POST' });
         setScrapingState(false, "Stopped");
         logMessage("⏹️ Scraping stopped.");
       } catch (e) {
         console.error(e);
+        setScrapingState(false, "Stopped");
       }
     }
 
@@ -1653,23 +1793,32 @@ let placesData = [];
     async function checkChromeDebugStatus() {
       const btn = document.getElementById('btn-chrome-cdp');
       const text = document.getElementById('chrome-cdp-text');
+      const attachBtn = document.getElementById('btn-attach-primary-chrome');
       if (!btn || !text) return;
 
       try {
         const resp = await fetch('/api/chrome/status');
         const data = await resp.json();
-        if (data.active) {
+        if (data.active && data.is_primary) {
           btn.className = 'btn-chrome-pill';
-          text.innerText = 'Connected: Chrome Port 9222';
-          btn.title = 'Active Chrome connected on port 9222! Scraper will open tabs inside your existing browser window with all your logins.';
+          text.innerText = 'Connected: This Chrome (9222)';
+          btn.title = 'Scraper is attached to this very Chrome window! All tabs open right here alongside Mavon.';
+          if (attachBtn) attachBtn.style.display = 'none';
+        } else if (data.active && !data.is_primary) {
+          btn.className = 'btn-chrome-pill';
+          text.innerText = 'Port 9222 (Separate Window)';
+          btn.title = 'Port 9222 is currently bound to a separate ChromeAutomation window. Click "Use This Chrome" to switch it directly to this window!';
+          if (attachBtn) attachBtn.style.display = 'inline-flex';
         } else if (data.extension_active) {
           btn.className = 'btn-chrome-pill';
-          text.innerText = 'Mavon Extension Active (Synced)';
+          text.innerText = 'Mavon Extension (Synced)';
           btn.title = 'Mavon Chrome Assistant is connected and live syncing your active browser sessions.';
+          if (attachBtn) attachBtn.style.display = 'inline-flex';
         } else {
           btn.className = 'btn-chrome-pill disconnected';
-          text.innerText = 'Chrome Assistant Ready';
-          btn.title = 'Scraper will run live in a dedicated visible Chrome window. To attach Port 9222, run start_chrome_debug.bat.';
+          text.innerText = 'Port 9222 Not Attached';
+          btn.title = 'Click "Use This Chrome (Port 9222)" to enable tabs directly in this window!';
+          if (attachBtn) attachBtn.style.display = 'inline-flex';
         }
       } catch (e) {
         btn.className = 'btn-chrome-pill disconnected';
@@ -1677,16 +1826,38 @@ let placesData = [];
       }
     }
 
+    async function attachPrimaryChrome(confirmed = false) {
+      if (!confirmed) {
+        const ok = confirm(
+          "⚡ Connect This Chrome Window (Port 9222)?\n\n" +
+          "This will restart Google Chrome with Remote Debugging enabled on your active personal profile.\n" +
+          "• All your existing open tabs, logins, and accounts will be restored automatically.\n" +
+          "• All scraper tabs (Google Maps, Website, LinkedIn, Directory) will now open directly in THIS Chrome window alongside Mavon.\n\n" +
+          "Click OK to proceed with 1-click restart."
+        );
+        if (!ok) return;
+      }
+
+      logMessage("🔄 Restarting Chrome on Port 9222 attached to your active profile...");
+      try {
+        const resp = await fetch('/api/chrome/restart-with-debug', { method: 'POST' });
+        const res = await resp.json();
+        logMessage(`✅ ${res.message || 'Chrome restarted on Port 9222!'}`);
+      } catch (err) {
+        logMessage("⏳ Chrome restarting with Port 9222... please wait 2 seconds.");
+      }
+    }
+
     async function promptOrLaunchChromeDebug() {
       try {
         const resp = await fetch('/api/chrome/status');
         const data = await resp.json();
-        if (data.active) {
-          logMessage("✅ Chrome is actively connected on Remote Debugging Port 9222.");
-        } else if (data.extension_active) {
-          logMessage("🔌 Mavon Chrome Assistant is active! All LinkedIn logins and session cookies are live-synced.");
+        if (data.active && data.is_primary) {
+          logMessage("✅ Chrome is actively connected on Remote Debugging Port 9222 in this window.");
+        } else if (data.active && !data.is_primary) {
+          logMessage("ℹ️ Scraper is running in a separate Chrome window. Click 'Use This Chrome (Port 9222)' in the top header to run directly in this window!");
         } else {
-          logMessage("ℹ️ Scraper runs live in a dedicated visible Chrome window. To attach your main Chrome window on port 9222, run start_chrome_debug.bat.");
+          logMessage("ℹ️ Click 'Use This Chrome (Port 9222)' in the top header to run the agent tabs directly inside this Chrome window.");
         }
       } catch (e) {
         logMessage("ℹ️ Chrome assistant ready.");

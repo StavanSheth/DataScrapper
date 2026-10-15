@@ -213,11 +213,13 @@ async function ensureScreencastForTab(tabId, workerTag = "maps") {
 if (chrome.debugger) {
   chrome.debugger.onEvent.addListener((source, method, params) => {
     if (method === "Page.screencastFrame" && params.data) {
-      let workerTag = "maps";
-      if (source.tabId === linkedinTabId) workerTag = "linkedin";
-      if (source.tabId === shopTabId) workerTag = "website";
+      let workerTag = null;
+      if (source.tabId === mapsTabId) workerTag = "maps";
+      else if (source.tabId === linkedinTabId) workerTag = "linkedin";
+      else if (source.tabId === shopTabId) workerTag = "website";
+      else if (source.tabId === platformTabId) workerTag = "platform";
 
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (workerTag && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: "LIVE_FRAME",
           stream_type: workerTag,

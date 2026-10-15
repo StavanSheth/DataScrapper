@@ -19,10 +19,13 @@
         <p>4-Agent Live Chrome Suite: Maps Harvester, Website Inspector, LinkedIn Org & Platform Scout</p>
       </div>
     </div>
-    <div style="display:flex; align-items:center; gap:12px;">
+    <div style="display:flex; align-items:center; gap:10px;">
       <button id="btn-chrome-cdp" class="btn-chrome-pill disconnected" onclick="promptOrLaunchChromeDebug()" title="Chrome Port 9222 connection status">
         <span class="chrome-dot"></span>
         <span id="chrome-cdp-text">Checking Chrome (9222)...</span>
+      </button>
+      <button id="btn-attach-primary-chrome" class="btn-chrome-pill" style="display:none; background:rgba(99,102,241,0.25); border:1px solid #6366f1; color:#e0e7ff; font-weight:600; cursor:pointer;" onclick="attachPrimaryChrome()" title="Attach Port 9222 to this Chrome window so tabs open right here">
+        <span>⚡ Use This Chrome (Port 9222)</span>
       </button>
       <button class="btn btn-secondary" onclick="openPipelineModal()" style="font-size:0.8rem; padding:7px 14px; border:1px solid rgba(99,102,241,0.35); background:rgba(99,102,241,0.15); color:#c7d2fe; display:flex; align-items:center; gap:6px;">
         <span>📋 Verified Workflow Steps</span>
@@ -365,6 +368,7 @@
               </div>
               <div class="stream-header-right">
                 <span class="stream-url-tag" id="stream-url-maps" title="Maps Feed">maps.google.com</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('maps')" title="Bring Google Maps Tab to Front in Live Chrome">👁️ View</button>
                 <button class="btn-expand" onclick="toggleStreamExpand('card-maps')" title="Toggle Maximize">⛶</button>
               </div>
             </div>
@@ -374,6 +378,22 @@
                 <div class="placeholder-icon">🗺️</div>
                 <div class="placeholder-title">Tab 1: Google Maps</div>
                 <small class="placeholder-desc">Live visual feed of map panning & business card clicks</small>
+              </div>
+            </div>
+            <!-- Agent 1 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot maps"></span>
+                  <span>🗺️ Maps Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-maps">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('maps')" title="Clear Maps Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-maps">
+                <div class="agent-log-line maps"><span class="agent-log-time">[Maps]</span> <span>Ready. Waiting to harvest area leads...</span></div>
               </div>
             </div>
           </div>
@@ -387,6 +407,7 @@
               </div>
               <div class="stream-header-right">
                 <span class="stream-url-tag" id="stream-url-website" title="Shop Website Feed">Waiting...</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('website')" title="Bring Shop Website Tab to Front in Live Chrome">👁️ View</button>
                 <button class="btn-expand" onclick="toggleStreamExpand('card-website')" title="Toggle Maximize">⛶</button>
               </div>
             </div>
@@ -396,6 +417,22 @@
                 <div class="placeholder-icon">🌐</div>
                 <div class="placeholder-title">Tab 2: Shop Website</div>
                 <small class="placeholder-desc">Simultaneous website crawling, anti-bot handling & screenshot capture</small>
+              </div>
+            </div>
+            <!-- Agent 2 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot website"></span>
+                  <span>🌐 Website Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-website">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('website')" title="Clear Website Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-website">
+                <div class="agent-log-line website"><span class="agent-log-time">[Website]</span> <span>Ready. Waiting for shop domains...</span></div>
               </div>
             </div>
           </div>
@@ -409,6 +446,7 @@
               </div>
               <div class="stream-header-right">
                 <span class="stream-url-tag" id="stream-url-linkedin" title="LinkedIn Feed">linkedin.com</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('linkedin')" title="Bring LinkedIn Tab to Front in Live Chrome">👁️ View</button>
                 <button class="btn-expand" onclick="toggleStreamExpand('card-linkedin')" title="Toggle Maximize">⛶</button>
               </div>
             </div>
@@ -418,6 +456,22 @@
                 <div class="placeholder-icon">💼</div>
                 <div class="placeholder-title">Tab 3: LinkedIn Intelligence</div>
                 <small class="placeholder-desc">Active Chrome session scraping company staff & org hierarchy</small>
+              </div>
+            </div>
+            <!-- Agent 3 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot linkedin"></span>
+                  <span>💼 LinkedIn Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-linkedin">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('linkedin')" title="Clear LinkedIn Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-linkedin">
+                <div class="agent-log-line linkedin"><span class="agent-log-time">[LinkedIn]</span> <span>Ready. Session bridge listening...</span></div>
               </div>
             </div>
           </div>
@@ -431,6 +485,7 @@
               </div>
               <div class="stream-header-right">
                 <span class="stream-url-tag" id="stream-url-platform" title="Platform Feed">directory</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('platform')" title="Bring Platform Tab to Front in Live Chrome">👁️ View</button>
                 <button class="btn-expand" onclick="toggleStreamExpand('card-platform')" title="Toggle Maximize">⛶</button>
               </div>
             </div>
@@ -442,12 +497,40 @@
                 <small class="placeholder-desc">Active Chrome session scraping directory listings & booking details</small>
               </div>
             </div>
+            <!-- Agent 4 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot platform"></span>
+                  <span>📍 Directory Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-platform">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('platform')" title="Clear Directory Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-platform">
+                <div class="agent-log-line platform"><span class="agent-log-time">[Directory]</span> <span>Ready. Platform scout standby...</span></div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Terminal Logs underneath -->
-        <div class="terminal-box" id="terminal-box">
-          <div class="log-line"><span class="log-time">[System]</span> <span>Mavon Leads & Org Intelligence Agent ready. Database connected. Click 'Start Live Agent' to begin.</span></div>
+        <!-- Terminal Logs Container -->
+        <div class="terminal-container" style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:0 4px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:0.75rem; font-weight:700; color:#cbd5e1; text-transform:uppercase; letter-spacing:0.04em;">🖥️ Live Agent Console Logs</span>
+              <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981;" title="Live Real-Time Stream Active"></span>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span id="log-count-badge" style="font-size:0.7rem; color:#94a3b8;">1 log</span>
+              <button type="button" onclick="clearTerminalLogs()" style="background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); color:#cbd5e1; font-size:0.7rem; padding:3px 9px; border-radius:6px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.06)'" title="Clear terminal view">🧹 Clear</button>
+            </div>
+          </div>
+          <div class="terminal-box" id="terminal-box">
+            <div class="log-line"><span class="log-time">[System]</span> <span>Mavon Leads & Org Intelligence Agent ready. Database connected. Click 'Start Live Agent' to begin.</span></div>
+          </div>
         </div>
       </div>
 
@@ -964,8 +1047,8 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="/static/js/app.js?v=2.2.2"></script>
-  <script src="/static/js/table_ext.js?v=2.2.2"></script>
+  <script src="/static/js/app.js?v=2.2.7"></script>
+  <script src="/static/js/table_ext.js?v=2.2.7"></script>
 
   <!-- PLATFORM DIRECTORY MANAGEMENT MODAL (Triggered by KPI Card) -->
   <div class="modal-overlay" id="platform-modal" style="display:none;" onclick="if(event.target===this)closeDirectoryModal()">

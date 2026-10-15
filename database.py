@@ -1,9 +1,12 @@
 import urllib.parse
 import json
+import logging
 import os
 import re
 import sqlite3
 from typing import Dict, Any, List, Optional, Tuple
+
+logger = logging.getLogger("database")
 
 JUNK_EMAIL_PATTERNS = [
     re.compile(r"intl-segmenter", re.I),
@@ -12,8 +15,14 @@ JUNK_EMAIL_PATTERNS = [
     re.compile(r"@\d+\.\d+", re.I),
 ]
 
+JUNK_EMAIL_DOMAINS = (
+    "example.com", "example.org", "example.net", "domain.com", "test.com",
+    "sentry.io", "wixpress.com", "email.com", "placeholder.com", "lovable.app",
+    "schema.org", "gravatar.com", "polyfill.io", "doubleclick.net"
+)
+
 def clean_email_string(email_str: str) -> str:
-    """Filters out invalid build/package/regex artifact emails and removes HTML entity prefixes."""
+    """Filters out invalid build/package/regex artifact emails, dummy domains, and removes HTML entity prefixes."""
     if not email_str or email_str == "N/A":
         return ""
     parts = [p.strip() for p in re.split(r"[,\s]+", str(email_str)) if p.strip()]
@@ -24,8 +33,40 @@ def clean_email_string(email_str: str) -> str:
         if any(pat.search(p) for pat in JUNK_EMAIL_PATTERNS):
             continue
         if "@" in p and "." in p.split("@")[-1]:
+            parts_at = p.split("@")
+            user_part = parts_at[0].lower().strip()
+            domain_part = parts_at[-1].lower().strip()
+            if any(junk in domain_part for junk in JUNK_EMAIL_DOMAINS):
+                continue
+            if user_part in ("user", "username", "yourname", "email", "you", "placeholder"):
+                continue
+            if any(domain_part.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".svg", ".webp", ".js", ".css"]):
+                continue
             cleaned.append(p.lower())
     return ", ".join(sorted(list(set(cleaned))))
+
+def clean_phone_number(phone_str: str) -> str:
+    """Strips Google Maps telephone icon glyphs (e.g. \ue0b0), newlines, and normalizes phone number."""
+    if not phone_str or phone_str == "N/A":
+        return "N/A"
+    cleaned = re.sub(r'[\uE000-\uF8FF\r\n\t]+', ' ', str(phone_str)).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    digits = re.sub(r'\D', '', cleaned)
+    if len(digits) >= 5:
+        return cleaned
+    return "N/A"
+
+def clean_linkedin_url(url: str) -> str:
+    """Validates and cleans LinkedIn URLs, strictly rejecting search/authwall/login URLs."""
+    if not url or str(url).upper() in ("N/A", "NONE"):
+        return ""
+    u = str(url).strip()
+    u_low = u.lower()
+    if any(bad in u_low for bad in ["/search", "uas/login", "authwall", "checkpoint", "linkedin.com/help", "linkedin.com/feed", "linkedin.com/share"]):
+        return ""
+    if "linkedin.com" in u_low and ("/company/" in u_low or "/in/" in u_low):
+        return u.split("?")[0].rstrip("/")
+    return ""
 
 def normalize_bot_protection_status(bot: str, email: str = "", website: str = "", page_title: str = "") -> str:
     """Normalizes bot protection tags into explicit Access Granted vs Access Denied statuses."""
@@ -73,21 +114,21 @@ def normalize_bot_protection_status(bot: str, email: str = "", website: str = ""
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leads.db")
 
 def get_connection():
-    """Returns a SQLite connection configured with WAL mode, optimized cache and mmap sizing to prevent high RAM usage."""
+    """Returns a SQLite connection configured with optimized cache and busy timeout."""
     conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA cache_size = -2048;")
     conn.execute("PRAGMA temp_store = MEMORY;")
     conn.execute("PRAGMA mmap_size = 16777216;")
-    conn.execute("PRAGMA wal_autocheckpoint = 100;")
     return conn
 
 def init_db():
     """Initialize the SQLite leads database schema with all fields, migrations, and indexes."""
     with get_connection() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS leads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,12 +150,27 @@ def init_db():
                 facebook TEXT,
                 linkedin TEXT,
                 twitter TEXT,
+                youtube TEXT,
+                tiktok TEXT,
                 screenshot TEXT,
                 bot_protection TEXT,
                 cookie_status TEXT,
                 employee_count TEXT,
                 org_scraped INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                platform_name TEXT DEFAULT '',
+                platform_url TEXT DEFAULT '',
+                platform_rating TEXT DEFAULT '',
+                platform_reviews TEXT DEFAULT '0',
+                booking_url TEXT DEFAULT '',
+                platform_price TEXT DEFAULT '',
+                platform_verified INTEGER DEFAULT 0,
+                maps_status TEXT DEFAULT 'captured',
+                website_status TEXT DEFAULT 'pending',
+                linkedin_status TEXT DEFAULT 'pending',
+                linkedin_url TEXT DEFAULT '',
+                order_url TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
                 UNIQUE(name, address)
             )
         """)
@@ -138,7 +194,7 @@ def init_db():
             )
         """)
 
-        # Safely migrate leads table to add platform directory columns if missing
+        # Safely migrate leads table to add platform directory, extra social columns, and notes if missing
         new_platform_cols = [
             ("platform_name", "TEXT DEFAULT ''"),
             ("platform_url", "TEXT DEFAULT ''"),
@@ -151,6 +207,10 @@ def init_db():
             ("website_status", "TEXT DEFAULT 'pending'"),
             ("linkedin_status", "TEXT DEFAULT 'pending'"),
             ("linkedin_url", "TEXT DEFAULT ''"),
+            ("youtube", "TEXT DEFAULT ''"),
+            ("tiktok", "TEXT DEFAULT ''"),
+            ("order_url", "TEXT DEFAULT ''"),
+            ("notes", "TEXT DEFAULT ''"),
         ]
         for col_name, col_def in new_platform_cols:
             try:
@@ -281,6 +341,8 @@ def init_db():
                 facebook = COALESCE(facebook, ''),
                 linkedin = COALESCE(linkedin, ''),
                 twitter = COALESCE(twitter, ''),
+                youtube = COALESCE(youtube, ''),
+                tiktok = COALESCE(tiktok, ''),
                 screenshot = COALESCE(screenshot, ''),
                 bot_protection = COALESCE(bot_protection, 'N/A'),
                 cookie_status = COALESCE(cookie_status, 'None')
@@ -331,7 +393,7 @@ def find_matching_lead_id(conn, name: str, address: str = "", website: str = "",
 
     # 2. Match by clean website domain if not a generic social or aggregator domain
     dom = clean_domain(website)
-    if dom and dom not in ("facebook.com", "instagram.com", "linkedin.com", "twitter.com", "google.com", "maps.google.com"):
+    if dom and dom not in ("facebook.com", "instagram.com", "linkedin.com", "twitter.com", "youtube.com", "tiktok.com", "youtu.be", "google.com", "maps.google.com"):
         row = conn.execute("SELECT id FROM leads WHERE website LIKE ?", (f"%{dom}%",)).fetchone()
         if row:
             return row["id"]
@@ -352,6 +414,13 @@ def find_matching_lead_id(conn, name: str, address: str = "", website: str = "",
             return row["id"]
 
     return None
+
+def get_lead_id_by_name(name: str, address: str = "", website: str = "", phone: str = "") -> Optional[int]:
+    """Helper to find lead ID using multi-vector match in a single connection."""
+    if not name:
+        return None
+    with get_connection() as conn:
+        return find_matching_lead_id(conn, name=name, address=address, website=website, phone=phone)
 
 def is_lead_in_db(name: str, address: str = "") -> bool:
     """Check if a shop is already indexed in the database to prevent re-scraping."""
@@ -387,7 +456,12 @@ def load_proximity_dedup_cache(location_name: str = "") -> Dict[str, Any]:
         "total_existing_listings": 0
     }
     with get_connection() as conn:
-        leads = conn.execute("SELECT name, address, phone FROM leads").fetchall()
+        leads = conn.execute("""
+            SELECT name, address, phone FROM leads 
+            WHERE (phone IS NOT NULL AND phone != '' AND phone != 'N/A') 
+               OR (address IS NOT NULL AND address != '' AND address != 'N/A') 
+               OR (website IS NOT NULL AND website != '' AND website != 'N/A')
+        """).fetchall()
         for l in leads:
             n = (l["name"] or "").strip().lower()
             a = (l["address"] or "").strip().lower()
@@ -491,10 +565,8 @@ def save_lead(lead: Dict[str, Any]) -> bool:
     category = str(lead.get("category", "") or "Business").strip()
     raw_email = str(lead.get("email", "") or "").strip()
     email = clean_email_string(raw_email)
-    phone = str(lead.get("phone", "") or "").strip()
-    if phone == "None" or not phone:
-        phone = "N/A"
-    address = str(lead.get("address", "") or "").strip()
+    phone = clean_phone_number(str(lead.get("phone", "") or "").strip())
+    address = re.sub(r'[\ue000-\uf8ff]', '', str(lead.get("address", "") or "")).strip()
     hours = str(lead.get("hours", "") or "").strip()
     price = str(lead.get("price", "") or "").strip()
     plus_code = str(lead.get("plus_code", "") or "").strip()
@@ -506,13 +578,19 @@ def save_lead(lead: Dict[str, Any]) -> bool:
     lon = lead.get("lon")
     instagram = str(lead.get("instagram", "") or "").strip()
     facebook = str(lead.get("facebook", "") or "").strip()
-    linkedin = str(lead.get("linkedin", "") or "").strip()
+    linkedin = clean_linkedin_url(str(lead.get("linkedin", "") or "").strip())
     twitter = str(lead.get("twitter", "") or "").strip()
+    youtube = str(lead.get("youtube", "") or "").strip()
+    tiktok = str(lead.get("tiktok", "") or "").strip()
     screenshot = str(lead.get("screenshot", "") or "").strip()
     bot_protection = normalize_bot_protection_status(str(lead.get("bot_protection", "") or "").strip(), email, website)
     cookie_status = str(lead.get("cookie_status", "") or "").strip()
     if cookie_status == "Inspecting...":
         cookie_status = "None"
+    booking_url = str(lead.get("booking_url", "") or "").strip()
+    platform_name = str(lead.get("platform_name", "") or "").strip()
+    order_url = str(lead.get("order_url", "") or "").strip()
+    notes = str(lead.get("notes", "") or "").strip()
 
     with get_connection() as conn:
         try:
@@ -524,7 +602,10 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                 conn.execute("""
                     UPDATE leads SET
                         category = CASE WHEN ? != '' AND ? != 'Business' THEN ? ELSE category END,
-                        email = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE email END,
+                        email = CASE
+                            WHEN ? != '' AND ? != 'N/A' AND email != '' AND email != 'N/A' AND INSTR(email, ?) = 0 THEN email || ', ' || ?
+                            WHEN ? != '' AND ? != 'N/A' THEN ?
+                            ELSE email END,
                         phone = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE phone END,
                         address = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE address END,
                         hours = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE hours END,
@@ -540,20 +621,26 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                         facebook = CASE WHEN ? != '' THEN ? ELSE facebook END,
                         linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
                         twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
+                        youtube = CASE WHEN ? != '' THEN ? ELSE youtube END,
+                        tiktok = CASE WHEN ? != '' THEN ? ELSE tiktok END,
                         screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' AND ? != 'None' THEN ? ELSE cookie_status END
+                        cookie_status = CASE WHEN ? != '' AND ? != 'None' THEN ? ELSE cookie_status END,
+                        booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
+                        platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
+                        order_url = CASE WHEN ? != '' THEN ? ELSE order_url END,
+                        notes = CASE WHEN ? != '' THEN ? ELSE notes END
                     WHERE id = ?
                 """, (
                     category, category, category,
-                    email, email, email,
+                    email, email, email, email, email, email, email,
                     phone, phone, phone,
                     address, address, address,
                     hours, hours, hours,
                     price, price, price,
                     plus_code, plus_code, plus_code,
                     rating, rating, rating,
-                    reviews, reviews, reviews,
+                    reviews, reviews, reviews, reviews,
                     website, website, website,
                     maps_url, maps_url,
                     lat, lat,
@@ -562,9 +649,15 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                     facebook, facebook,
                     linkedin, linkedin,
                     twitter, twitter,
+                    youtube, youtube,
+                    tiktok, tiktok,
                     screenshot, screenshot,
-                    bot_protection, bot_protection,
-                    cookie_status, cookie_status,
+                    bot_protection, bot_protection, bot_protection,
+                    cookie_status, cookie_status, cookie_status,
+                    booking_url, booking_url,
+                    platform_name, platform_name,
+                    order_url, order_url,
+                    notes, notes,
                     matching_id
                 ))
                 conn.commit()
@@ -573,12 +666,13 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                 # Insert brand-new lead
                 w_status = "pending" if (website and website.startswith("http")) else "no_website"
                 cursor = conn.execute("""
-                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status, website_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, screenshot, bot_protection, cookie_status, w_status))
+                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name, order_url, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, w_status, booking_url, platform_name, order_url, notes))
                 conn.commit()
                 return cursor.lastrowid
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error in save_lead: {e}", exc_info=True)
             return 0
 
 def deduplicate_database() -> int:
@@ -608,22 +702,37 @@ def deduplicate_database() -> int:
                 conn.execute("""
                     UPDATE leads SET
                         category = CASE WHEN (category IS NULL OR category = 'Business') AND ? != 'Business' THEN ? ELSE category END,
-                        email = CASE WHEN (email IS NULL OR email = '' OR email = 'N/A') AND ? != 'N/A' THEN ? ELSE email END,
+                        email = CASE
+                            WHEN ? != '' AND ? != 'N/A' AND email != '' AND email != 'N/A' AND INSTR(email, ?) = 0 THEN email || ', ' || ?
+                            WHEN ? != '' AND ? != 'N/A' AND (email IS NULL OR email = '' OR email = 'N/A') THEN ?
+                            ELSE email END,
                         phone = CASE WHEN (phone IS NULL OR phone = '' OR phone = 'N/A') AND ? != 'N/A' THEN ? ELSE phone END,
                         address = CASE WHEN (address IS NULL OR address = '' OR address = 'N/A') AND ? != 'N/A' THEN ? ELSE address END,
                         website = CASE WHEN (website IS NULL OR website = '' OR website = 'N/A') AND ? != 'N/A' THEN ? ELSE website END,
                         maps_url = CASE WHEN (maps_url IS NULL OR maps_url = '') THEN ? ELSE maps_url END,
+                        instagram = CASE WHEN (instagram IS NULL OR instagram = '') AND ? != '' THEN ? ELSE instagram END,
+                        facebook = CASE WHEN (facebook IS NULL OR facebook = '') AND ? != '' THEN ? ELSE facebook END,
+                        linkedin = CASE WHEN (linkedin IS NULL OR linkedin = '') AND ? != '' THEN ? ELSE linkedin END,
+                        twitter = CASE WHEN (twitter IS NULL OR twitter = '') AND ? != '' THEN ? ELSE twitter END,
+                        youtube = CASE WHEN (youtube IS NULL OR youtube = '') AND ? != '' THEN ? ELSE youtube END,
+                        tiktok = CASE WHEN (tiktok IS NULL OR tiktok = '') AND ? != '' THEN ? ELSE tiktok END,
                         screenshot = CASE WHEN (screenshot IS NULL OR screenshot = '') THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN (bot_protection IS NULL OR bot_protection = '' OR bot_protection = 'N/A') AND ? != 'N/A' THEN ? ELSE bot_protection END,
                         cookie_status = CASE WHEN (cookie_status IS NULL OR cookie_status = '' OR cookie_status = 'None') AND ? != 'None' THEN ? ELSE cookie_status END
                     WHERE id = ?
                 """, (
                     lead["category"], lead["category"],
-                    lead["email"], lead["email"],
+                    lead["email"], lead["email"], lead["email"], lead["email"], lead["email"], lead["email"],
                     lead["phone"], lead["phone"],
                     lead["address"], lead["address"],
                     lead["website"], lead["website"],
                     lead["maps_url"],
+                    lead["instagram"] or "", lead["instagram"] or "",
+                    lead["facebook"] or "", lead["facebook"] or "",
+                    lead["linkedin"] or "", lead["linkedin"] or "",
+                    lead["twitter"] or "", lead["twitter"] or "",
+                    lead["youtube"] or "", lead["youtube"] or "",
+                    lead["tiktok"] or "", lead["tiktok"] or "",
                     lead["screenshot"],
                     lead["bot_protection"], lead["bot_protection"],
                     lead["cookie_status"], lead["cookie_status"],
@@ -717,6 +826,8 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                 facebook TEXT,
                 linkedin TEXT,
                 twitter TEXT,
+                youtube TEXT,
+                tiktok TEXT,
                 screenshot TEXT,
                 bot_protection TEXT,
                 cookie_status TEXT,
@@ -761,18 +872,18 @@ def renumber_and_clean_database() -> Dict[str, Any]:
                 INSERT INTO leads (
                     id, name, category, email, phone, address, hours, price, plus_code,
                     rating, reviews, website, maps_url, lat, lon, instagram, facebook,
-                    linkedin, twitter, screenshot, bot_protection, cookie_status,
+                    linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status,
                     employee_count, org_scraped, created_at,
                     platform_name, platform_url, platform_rating, platform_reviews,
                     booking_url, platform_price, platform_verified, maps_status,
                     website_status, linkedin_status, linkedin_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 l["new_id"], l["name"], l.get("category", "Business"), l["email"], l.get("phone", "N/A"),
                 l.get("address", "N/A"), l.get("hours", "N/A"), l.get("price", "N/A"), l.get("plus_code", "N/A"),
                 l.get("rating", "N/A"), l.get("reviews", "0"), l.get("website", "N/A"), l.get("maps_url", ""),
                 l.get("lat"), l.get("lon"), l.get("instagram", ""), l.get("facebook", ""),
-                l.get("linkedin", ""), l.get("twitter", ""), l.get("screenshot", ""),
+                l.get("linkedin", ""), l.get("twitter", ""), l.get("youtube", ""), l.get("tiktok", ""), l.get("screenshot", ""),
                 l["bot_protection"], l.get("cookie_status", "None"),
                 l.get("employee_count", "0"), l.get("org_scraped", 0), l.get("created_at"),
                 l.get("platform_name", ""), l.get("platform_url", ""), l.get("platform_rating", ""),
@@ -838,6 +949,22 @@ def update_lead_linkedin_data(
     if not clean_name:
         return False
 
+    linkedin_url = clean_linkedin_url(linkedin_url)
+    try:
+        emp_n = int(employee_count or 0)
+    except Exception:
+        emp_n = 0
+
+    if not linkedin_status or linkedin_status in ("found", "scraped"):
+        if "/company/" in linkedin_url:
+            linkedin_status = "verified"
+        elif "/in/" in linkedin_url or emp_n > 0:
+            linkedin_status = "personnel_verified"
+        elif linkedin_url:
+            linkedin_status = "verified"
+        else:
+            linkedin_status = "no_profile" if org_scraped > 0 else "pending"
+
     with get_connection() as conn:
         try:
             matching_id = find_matching_lead_id(conn, name=clean_name, address=address)
@@ -879,6 +1006,8 @@ def update_lead_website_data(
     facebook: str = "",
     linkedin: str = "",
     twitter: str = "",
+    youtube: str = "",
+    tiktok: str = "",
     screenshot: str = "",
     bot_protection: str = "",
     cookie_status: str = "",
@@ -889,119 +1018,88 @@ def update_lead_website_data(
     1. Match by website URL if known
     2. Fallback to name + flexible address match
     3. Fallback to name match
+    Merges emails and social media without duplicates or data loss.
     """
-    clean_name = str(name or "").strip()
-    clean_address = str(address or "").strip()
-    clean_website = str(website or "").strip()
+    clean_n = str(name or "").strip()
+    clean_addr = str(address or "").strip()
+    clean_web = str(website or "").strip()
 
-    if not clean_name and not clean_website:
+    if not clean_n and not clean_web:
         return False
 
     email = clean_email_string(email)
-    bot_protection = normalize_bot_protection_status(bot_protection, email, clean_website)
+    linkedin = clean_linkedin_url(linkedin)
+    bot_protection = normalize_bot_protection_status(bot_protection, email, clean_web)
     if cookie_status == "Inspecting...":
         cookie_status = "None"
 
     with get_connection() as conn:
         try:
-            # 1. First attempt: match by website URL
-            cursor = None
-            if clean_website and clean_website not in ["", "N/A"]:
-                cursor = conn.execute("""
-                    UPDATE leads SET
-                        email = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE email END,
-                        instagram = CASE WHEN ? != '' THEN ? ELSE instagram END,
-                        facebook = CASE WHEN ? != '' THEN ? ELSE facebook END,
-                        linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
-                        twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
-                        screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
-                        bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
-                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
-                    WHERE website = ? OR website = ? OR website = ?
-                """, (
-                    email, email, email,
-                    instagram, instagram,
-                    facebook, facebook,
-                    linkedin, linkedin,
-                    twitter, twitter,
-                    screenshot, screenshot,
-                    bot_protection, bot_protection,
-                    cookie_status, cookie_status,
-                    website_status, website_status,
-                    clean_website,
-                    clean_website.rstrip('/'),
-                    clean_website.rstrip('/') + '/'
-                ))
+            target_id = find_matching_lead_id(conn, name=clean_n, address=clean_addr, website=clean_web)
+            if not target_id and clean_web and clean_web not in ["", "N/A"]:
+                r = conn.execute("SELECT id FROM leads WHERE website = ? OR website = ? OR website = ?",
+                                 (clean_web, clean_web.rstrip('/'), clean_web.rstrip('/') + '/')).fetchone()
+                if r:
+                    target_id = r["id"]
 
-            # 2. Second attempt: match by name and address (or fuzzy N/A address)
-            if not cursor or cursor.rowcount == 0:
-                cursor = conn.execute("""
-                    UPDATE leads SET
-                        email = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE email END,
-                        instagram = CASE WHEN ? != '' THEN ? ELSE instagram END,
-                        facebook = CASE WHEN ? != '' THEN ? ELSE facebook END,
-                        linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
-                        twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
-                        screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
-                        bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
-                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
-                    WHERE name = ? AND (
-                        address = ?
-                        OR address = 'N/A'
-                        OR address = ''
-                        OR ? = 'N/A'
-                        OR ? = ''
-                        OR address LIKE ?
-                    )
-                """, (
-                    email, email, email,
-                    instagram, instagram,
-                    facebook, facebook,
-                    linkedin, linkedin,
-                    twitter, twitter,
-                    screenshot, screenshot,
-                    bot_protection, bot_protection,
-                    cookie_status, cookie_status,
-                    website_status, website_status,
-                    clean_name,
-                    clean_address,
-                    clean_address,
-                    clean_address,
-                    f"%{clean_address[:15]}%" if len(clean_address) > 10 else clean_address
-                ))
+            if not target_id and clean_n:
+                r = conn.execute("SELECT id FROM leads WHERE LOWER(name) = LOWER(?)", (clean_n,)).fetchone()
+                if r:
+                    target_id = r["id"]
 
-            # 3. Third attempt: match by exact name if still no rows updated
-            if not cursor or cursor.rowcount == 0:
-                conn.execute("""
-                    UPDATE leads SET
-                        email = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE email END,
-                        instagram = CASE WHEN ? != '' THEN ? ELSE instagram END,
-                        facebook = CASE WHEN ? != '' THEN ? ELSE facebook END,
-                        linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
-                        twitter = CASE WHEN ? != '' THEN ? ELSE twitter END,
-                        screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
-                        bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
-                        cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
-                        website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
-                    WHERE name = ?
-                """, (
-                    email, email, email,
-                    instagram, instagram,
-                    facebook, facebook,
-                    linkedin, linkedin,
-                    twitter, twitter,
-                    screenshot, screenshot,
-                    bot_protection, bot_protection,
-                    cookie_status, cookie_status,
-                    website_status, website_status,
-                    clean_name
-                ))
+            if not target_id:
+                return False
 
+            existing = conn.execute("SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok FROM leads WHERE id = ?", (target_id,)).fetchone()
+            if not existing:
+                return False
+
+            # Non-redundant email merging
+            existing_emails = [e.strip() for e in (existing["email"] or "").split(",") if e.strip() and e.strip() != "N/A"]
+            new_emails = [e.strip() for e in (email or "").split(",") if e.strip() and e.strip() != "N/A"]
+            merged_emails = list(dict.fromkeys(existing_emails + new_emails))
+            final_email = ", ".join(merged_emails) if merged_emails else (existing["email"] or "N/A")
+
+            # Non-destructive social merging
+            final_ig = instagram or existing["instagram"] or ""
+            final_fb = facebook or existing["facebook"] or ""
+            final_li = linkedin or existing["linkedin"] or ""
+            final_tw = twitter or existing["twitter"] or ""
+            final_yt = youtube or existing["youtube"] or ""
+            final_tt = tiktok or existing["tiktok"] or ""
+
+            conn.execute("""
+                UPDATE leads SET
+                    email = ?,
+                    instagram = ?,
+                    facebook = ?,
+                    linkedin = ?,
+                    twitter = ?,
+                    youtube = ?,
+                    tiktok = ?,
+                    screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
+                    bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
+                    cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
+                    website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
+                WHERE id = ?
+            """, (
+                final_email,
+                final_ig,
+                final_fb,
+                final_li,
+                final_tw,
+                final_yt,
+                final_tt,
+                screenshot, screenshot,
+                bot_protection, bot_protection,
+                cookie_status, cookie_status,
+                website_status, website_status,
+                target_id
+            ))
             conn.commit()
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error updating lead website data: {e}", exc_info=True)
             return False
 
 def get_all_leads() -> List[Dict[str, Any]]:
@@ -1028,6 +1126,8 @@ def get_all_leads() -> List[Dict[str, Any]]:
                    COALESCE(facebook, '') AS facebook,
                    COALESCE(linkedin, '') AS linkedin,
                    COALESCE(twitter, '') AS twitter,
+                   COALESCE(youtube, '') AS youtube,
+                   COALESCE(tiktok, '') AS tiktok,
                    COALESCE(screenshot, '') AS screenshot,
                    COALESCE(bot_protection, 'N/A') AS bot_protection,
                    COALESCE(cookie_status, 'None') AS cookie_status,
@@ -1040,6 +1140,8 @@ def get_all_leads() -> List[Dict[str, Any]]:
                    COALESCE(booking_url, '') AS booking_url,
                    COALESCE(platform_price, '') AS platform_price,
                    COALESCE(platform_verified, 0) AS platform_verified,
+                   COALESCE(order_url, '') AS order_url,
+                   COALESCE(notes, '') AS notes,
                    created_at
             FROM leads ORDER BY id DESC
         """)
@@ -1155,7 +1257,7 @@ def clear_leads():
 ALLOWED_LEAD_UPDATE_FIELDS = {
     "name", "category", "email", "phone", "address", "hours", "price",
     "plus_code", "rating", "reviews", "website", "maps_url", "lat", "lon",
-    "instagram", "facebook", "linkedin", "twitter", "screenshot",
+    "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "screenshot",
     "bot_protection", "cookie_status", "employee_count", "platform_name",
     "platform_url", "platform_rating", "platform_reviews", "booking_url",
     "platform_price", "platform_verified"
@@ -1319,10 +1421,18 @@ def classify_seniority(title: str) -> str:
             return "management"
     return "staff"
 
-def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lead_id: int = None, company_linkedin_url: str = "") -> int:
+def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lead_id: int = None, company_linkedin_url: str = "", linkedin_status: str = "") -> int:
     """Save a batch of employees, updating lead count and LinkedIn URL in leads table."""
     if not company_name:
         return 0
+
+    company_linkedin_url = clean_linkedin_url(company_linkedin_url)
+    if not company_linkedin_url and employees:
+        for emp in employees:
+            purl = clean_linkedin_url(emp.get("linkedin_profile_url", ""))
+            if purl and "/in/" in purl:
+                company_linkedin_url = purl
+                break
 
     saved_count = 0
     with get_connection() as conn:
@@ -1342,8 +1452,8 @@ def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lea
                 if not fname:
                     continue
                 seniority = emp.get("seniority_level") or classify_seniority(title)
-                purl = str(emp.get("linkedin_profile_url", "")).strip()
-                em = str(emp.get("email", "")).strip()
+                purl = clean_linkedin_url(str(emp.get("linkedin_profile_url", "")).strip())
+                em = clean_email_string(str(emp.get("email", "")).strip())
                 loc = str(emp.get("location", "")).strip()
                 av = str(emp.get("avatar_url", "")).strip()
 
@@ -1363,14 +1473,26 @@ def save_employees_batch(company_name: str, employees: List[Dict[str, Any]], lea
                     pass
 
         total_emp = conn.execute("SELECT COUNT(*) FROM employees WHERE company_name = ?", (company_name,)).fetchone()[0]
+
+        if not linkedin_status:
+            if company_linkedin_url and "/company/" in company_linkedin_url:
+                linkedin_status = "verified"
+            elif total_emp > 0 or (company_linkedin_url and "/in/" in company_linkedin_url):
+                linkedin_status = "personnel_verified"
+            elif company_linkedin_url:
+                linkedin_status = "verified"
+            else:
+                linkedin_status = "no_profile"
+
         conn.execute("""
             UPDATE leads SET
                 employee_count = ?,
                 org_scraped = 1,
                 linkedin = CASE WHEN ? != '' THEN ? ELSE linkedin END,
-                linkedin_status = CASE WHEN ? != '' THEN 'verified' ELSE 'no_profile' END
+                linkedin_url = CASE WHEN ? != '' THEN ? ELSE linkedin_url END,
+                linkedin_status = ?
             WHERE name = ? OR (id = ? AND ? IS NOT NULL)
-        """, (str(total_emp), company_linkedin_url, company_linkedin_url, company_linkedin_url, company_name, lead_id, lead_id))
+        """, (str(total_emp), company_linkedin_url, company_linkedin_url, company_linkedin_url, company_linkedin_url, linkedin_status, company_name, lead_id, lead_id))
 
         conn.commit()
     return saved_count
@@ -1618,7 +1740,11 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         has_e = bool(email_str and email_str != "N/A")
         ig = str(l.get("instagram", "") or "").strip()
         fb = str(l.get("facebook", "") or "").strip()
-        has_s = bool(ig or fb)
+        li = str(l.get("linkedin", "") or "").strip()
+        tw = str(l.get("twitter", "") or "").strip()
+        yt = str(l.get("youtube", "") or "").strip()
+        tt = str(l.get("tiktok", "") or "").strip()
+        has_s = bool(ig or fb or li or tw or yt or tt)
         bot = str(l.get("bot_protection", "") or "").strip()
         w_status = str(l.get("website_status", "") or "pending").strip()
 
@@ -1656,12 +1782,20 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
             website_leads.append(w_row)
 
         # 4. Format LinkedIn Harvester Lead
-        li_url = str(l.get("linkedin", "") or l.get("linkedin_url", "") or "").strip()
+        li_url = clean_linkedin_url(str(l.get("linkedin", "") or l.get("linkedin_url", "") or "").strip())
         emp_cnt = str(l.get("employee_count", "") or "").strip()
         org_scraped = int(l.get("org_scraped", 0) or 0)
         li_status = str(l.get("linkedin_status", "") or "pending").strip()
 
-        if org_scraped > 0 or (emp_cnt and emp_cnt != "0"):
+        has_emps = bool(org_scraped > 0 or (emp_cnt and emp_cnt != "0"))
+        is_person = bool("/in/" in li_url or li_status == "personnel_verified")
+
+        if is_person:
+            li_tag = "Personnel Found"
+            li_employees_count += 1
+            li_found_count += 1
+            li_finished_count += 1
+        elif has_emps:
             li_tag = "Employees Crawled"
             li_employees_count += 1
             li_found_count += 1
@@ -1670,14 +1804,14 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
             li_tag = "LinkedIn Found"
             li_found_count += 1
             li_finished_count += 1
-        elif li_status == "not_found":
+        elif li_status in ["not_found", "no_profile"]:
             li_tag = "Not Found on LinkedIn"
             li_not_found_count += 1
             li_finished_count += 1
         elif li_status == "failed":
             li_tag = "LinkedIn Blocked / Timeout"
             li_finished_count += 1
-        elif li_status in ["found", "scraped"]:
+        elif li_status in ["found", "scraped", "verified"]:
             li_tag = "LinkedIn Found"
             li_found_count += 1
             li_finished_count += 1
@@ -1685,9 +1819,12 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
             li_tag = "Pending in Queue"
 
         li_row = dict(l)
+        li_row["linkedin"] = li_url
+        li_row["linkedin_url"] = li_url
         li_row["status_tag"] = li_tag
         li_row["has_linkedin"] = bool(li_url and li_url != "N/A")
-        li_row["has_employees"] = bool(org_scraped > 0 or (emp_cnt and emp_cnt != "0"))
+        li_row["has_employees"] = has_emps
+        li_row["is_personnel"] = is_person
         # Only show leads in LinkedIn table that have actually been catered/inspected so far
         if li_tag != "Pending in Queue":
             linkedin_leads.append(li_row)
@@ -2018,4 +2155,54 @@ def normalize_all_platform_listings(city_context: str = "") -> Dict[str, Any]:
         "newly_matched": newly_matched,
         "counts": get_tables_split_data()["counts"]
     }
+
+def heal_database_records() -> Dict[str, int]:
+    """
+    Cleans up any legacy formatting flaws in leads.db:
+    1. Removes invalid LinkedIn URLs (/search, /uas/login, /authwall)
+    2. If a lead has employees in employees table, links to the primary employee's profile
+    3. Cleans unicode phone icon glyphs (\ue0b0) and newlines from phone numbers
+    4. Removes dummy template emails (example.com, etc.)
+    """
+    stats = {"cleaned_linkedin": 0, "linked_personnel": 0, "cleaned_phones": 0, "cleaned_emails": 0}
+    with get_connection() as conn:
+        # 1. Clean phones
+        rows = conn.execute("SELECT id, phone FROM leads WHERE phone IS NOT NULL AND phone != '' AND phone != 'N/A'").fetchall()
+        for r in rows:
+            orig = r["phone"]
+            cleaned = clean_phone_number(orig)
+            if cleaned != orig:
+                conn.execute("UPDATE leads SET phone = ? WHERE id = ?", (cleaned, r["id"]))
+                stats["cleaned_phones"] += 1
+
+        # 2. Clean dummy emails
+        rows = conn.execute("SELECT id, email FROM leads WHERE email IS NOT NULL AND email != '' AND email != 'N/A'").fetchall()
+        for r in rows:
+            orig = r["email"]
+            cleaned = clean_email_string(orig)
+            if cleaned != orig:
+                conn.execute("UPDATE leads SET email = ? WHERE id = ?", (cleaned, r["id"]))
+                stats["cleaned_emails"] += 1
+
+        # 3. Clean invalid LinkedIn URLs and link personnel
+        rows = conn.execute("SELECT id, name, linkedin, employee_count FROM leads WHERE linkedin IS NOT NULL AND linkedin != ''").fetchall()
+        for r in rows:
+            orig = r["linkedin"]
+            cleaned = clean_linkedin_url(orig)
+            if cleaned != orig:
+                # Check if we have an employee for this company in employees table
+                emp_row = conn.execute("SELECT linkedin_profile_url FROM employees WHERE (lead_id = ? OR lower(trim(company_name)) = lower(trim(?))) AND linkedin_profile_url LIKE '%/in/%' ORDER BY (CASE WHEN seniority_level = 'executive' THEN 1 WHEN seniority_level = 'management' THEN 2 ELSE 3 END) ASC LIMIT 1", (r["id"], r["name"])).fetchone()
+                if emp_row and emp_row[0]:
+                    purl = clean_linkedin_url(emp_row[0])
+                    conn.execute("UPDATE leads SET linkedin = ?, linkedin_url = ?, linkedin_status = 'personnel_verified' WHERE id = ?", (purl, purl, r["id"]))
+                    stats["linked_personnel"] += 1
+                else:
+                    emp_cnt = r["employee_count"]
+                    has_emps = bool(emp_cnt and emp_cnt != "0")
+                    new_status = "personnel_verified" if has_emps else "no_profile"
+                    conn.execute("UPDATE leads SET linkedin = '', linkedin_url = '', linkedin_status = ? WHERE id = ?", (new_status, r["id"]))
+                    stats["cleaned_linkedin"] += 1
+
+        conn.commit()
+    return stats
 

@@ -53,7 +53,9 @@ window.switchTableTab = function(tab) {
     else if (tab === 'linkedin') titleEl.innerText = '💼 LinkedIn Org Harvester (Workforce & Decision Makers)';
     else if (tab === 'platform') titleEl.innerText = '🟣 Platform Directory Listings (All Records)';
   }
-  window.renderTagFilterBar();
+  if (typeof window.renderTagFilterBar === 'function') {
+    window.renderTagFilterBar();
+  }
   if (typeof window.renderFiltersForCurrentTable === 'function') {
     window.renderFiltersForCurrentTable();
   }
@@ -424,7 +426,11 @@ window.updateSplitData = function(data) {
   if (typeof plotShopsOnMap === 'function') {
     plotShopsOnMap();
   }
-  window.renderTable();
+  const tbody = document.getElementById('places-tbody');
+  const hasRows = tbody && tbody.querySelectorAll('tr:not(#empty-row)').length > 0;
+  if (!hasRows || !window.isScrapingRunning) {
+    window.renderTable();
+  }
 };
 
 window.refreshTablesSplit = async function() {
@@ -620,6 +626,10 @@ window.renderTableHeader = function() {
       <th style="width: 35px;">#</th>
       <th>Business Name</th>
       <th>Category</th>
+      <th>Email Address</th>
+      <th>Social Media</th>
+      <th>Platform / Booking</th>
+      <th>Notes</th>
       <th>Phone</th>
       <th>Address</th>
       <th>Rating & Reviews</th>
@@ -964,6 +974,465 @@ Platform Directory Listings (Intact): ${counts.platform || 0}`;
   }
 };
 
+window.formatDateTime = function(dateStr) {
+  if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
+  try {
+    const d = new Date(dateStr.replace(' ', 'T'));
+    if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+    const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.75rem; white-space:nowrap;">
+      <span style="color:#e2e8f0; font-weight:500;">📅 ${datePart}</span>
+      <span style="color:#94a3b8; font-size:0.7rem;">🕒 ${timePart}</span>
+    </div>`;
+  } catch (e) {
+    return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+  }
+};
+
+window.buildSinglePlaceRow = function(place, index, curTab) {
+  curTab = curTab || window.currentTableTab || 'maps';
+  const rowId = place.id || index;
+  const tr = document.createElement('tr');
+  tr.id = `row-${rowId}`;
+  if (typeof focusShop === 'function') {
+    tr.onclick = () => focusShop(rowId);
+  }
+
+  const emailHtml = (place.email && place.email !== 'N/A')
+    ? `<span class="badge badge-email" title="Click to copy" onclick="event.stopPropagation(); navigator.clipboard.writeText('${place.email}'); alert('Copied: ${place.email}')">✉️ ${escapeHtml(place.email)}</span>`
+    : '<span class="badge badge-none">Not listed</span>';
+
+  const categoryHtml = place.category
+    ? `<span class="badge badge-category">${escapeHtml(place.category)}</span>`
+    : '<span class="badge badge-none">Business</span>';
+
+  const ratingHtml = (place.rating && place.rating !== 'N/A')
+    ? `<span class="rating-pill">⭐ ${place.rating} <small style="color:#94a3b8;">(${place.reviews || '0'})</small></span>`
+    : '<span style="color:#64748b;">N/A</span>';
+
+  const linksHtml = `
+    <div style="display:flex; gap:8px;" onclick="event.stopPropagation();">
+      ${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn">🌐 Site</a>` : ''}
+      ${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn">🗺️ Maps</a>` : ''}
+    </div>
+  `;
+
+  const socialsList = [];
+  if (place.instagram) socialsList.push(`<a href="${encodeURI(place.instagram)}" target="_blank" class="badge-social badge-ig" title="Instagram: ${escapeHtml(place.instagram)}" onclick="event.stopPropagation();">📸</a>`);
+  if (place.facebook) socialsList.push(`<a href="${encodeURI(place.facebook)}" target="_blank" class="badge-social badge-fb" title="Facebook: ${escapeHtml(place.facebook)}" onclick="event.stopPropagation();">👥</a>`);
+  if (place.linkedin) socialsList.push(`<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" title="LinkedIn: ${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼</a>`);
+  if (place.twitter) socialsList.push(`<a href="${encodeURI(place.twitter)}" target="_blank" class="badge-social badge-tw" title="Twitter/X: ${escapeHtml(place.twitter)}" onclick="event.stopPropagation();">🐦</a>`);
+  if (place.youtube) socialsList.push(`<a href="${encodeURI(place.youtube)}" target="_blank" class="badge-social badge-yt" title="YouTube: ${escapeHtml(place.youtube)}" onclick="event.stopPropagation();">▶️</a>`);
+  if (place.tiktok) socialsList.push(`<a href="${encodeURI(place.tiktok)}" target="_blank" class="badge-social badge-tt" title="TikTok: ${escapeHtml(place.tiktok)}" onclick="event.stopPropagation();">🎵</a>`);
+
+  const socialsHtml = socialsList.length > 0
+    ? `<div style="display:flex; gap:5px;" onclick="event.stopPropagation();">${socialsList.join('')}</div>`
+    : '<span class="badge badge-none">—</span>';
+
+  // Platform & Booking badge HTML
+  const platBadges = [];
+  const bUrl = place.booking_url || '';
+  const pName = place.platform_name || '';
+  const oUrl = place.order_url || '';
+
+  if (bUrl) {
+    let label = pName ? `📅 ${escapeHtml(pName)}` : '📅 Book Table';
+    platBadges.push(`<a href="${encodeURI(bUrl)}" target="_blank" class="badge-platform-pill badge-platform-booking" title="Book on ${escapeHtml(pName || 'Platform')}" onclick="event.stopPropagation();">${label}</a>`);
+  } else if (pName && pName !== 'N/A') {
+    platBadges.push(`<span class="badge-platform-pill badge-platform-booking">📅 ${escapeHtml(pName)}</span>`);
+  }
+
+  if (oUrl) {
+    platBadges.push(`<a href="${encodeURI(oUrl)}" target="_blank" class="badge-platform-pill badge-platform-order" title="Order Online" onclick="event.stopPropagation();">🛍️ Order</a>`);
+  }
+
+  const platformBookingHtml = platBadges.length > 0 
+    ? `<div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;" onclick="event.stopPropagation();">${platBadges.join('')}</div>`
+    : '<span class="badge badge-none">—</span>';
+
+  // Notes HTML (price, services, women-owned, floor info, etc.)
+  const rawNotes = place.notes || (place.price && place.price !== 'N/A' ? `💰 ${place.price}` : '');
+  let notesHtml = '<span class="badge badge-none">—</span>';
+  if (rawNotes) {
+    const noteTokens = rawNotes.split(' | ').filter(t => t.trim());
+    const chips = noteTokens.map(t => {
+      let trimmed = t.trim();
+      let cls = 'badge-note-chip';
+      if (trimmed.startsWith('💰')) cls += ' badge-note-price';
+      else if (trimmed.startsWith('🍽️')) cls += ' badge-note-service';
+      else if (trimmed.startsWith('💜')) cls += ' badge-note-highlight';
+      else if (trimmed.startsWith('📍')) cls += ' badge-note-loc';
+      return `<span class="${cls}" title="${escapeHtml(trimmed)}">${escapeHtml(trimmed)}</span>`;
+    });
+    notesHtml = `<div style="display:flex; flex-direction:column; gap:3px; max-width:210px;" onclick="event.stopPropagation();">${chips.join('')}</div>`;
+  }
+
+  let botHtml = '<span class="badge badge-none">N/A</span>';
+  if (place.bot_protection) {
+    const bp = place.bot_protection;
+    if (bp.includes('Access Denied')) {
+      botHtml = `<span class="badge badge-bot-denied" title="Access Denied by Anti-Bot Shield">🛑 ${escapeHtml(bp)}</span>`;
+    } else if (bp.includes('Access Granted')) {
+      botHtml = `<span class="badge badge-bot-granted" title="Anti-Bot Shield active but website accessed successfully">✅ ${escapeHtml(bp)}</span>`;
+    } else if (bp.includes('Cloudflare')) {
+      botHtml = `<span class="badge badge-bot-cloudflare">🛡️ ${escapeHtml(bp)}</span>`;
+    } else if (bp.includes('Anti-Bot') || bp.includes('Captcha') || bp.includes('Datadome') || bp.includes('PerimeterX')) {
+      botHtml = `<span class="badge badge-bot-challenge">⚠️ ${escapeHtml(bp)}</span>`;
+    } else if (bp === 'Clean') {
+      botHtml = '<span class="badge badge-bot-clean">✔️ Clean</span>';
+    } else {
+      botHtml = `<span class="badge badge-none">${escapeHtml(bp)}</span>`;
+    }
+  }
+
+  let cookieHtml = '<span class="badge badge-none">—</span>';
+  if (place.cookie_status) {
+    if (place.cookie_status === 'Accepted') {
+      cookieHtml = '<span class="badge badge-cookie-accepted" title="Cookie banner auto-accepted">🍪 Accepted</span>';
+    } else if (place.cookie_status.includes('Unaccepted')) {
+      cookieHtml = '<span class="badge badge-cookie-pending" title="Cookie banner detected (unaccepted)">🍪 Unaccepted</span>';
+    } else if (place.cookie_status === 'None') {
+      cookieHtml = '<span class="badge badge-none" title="No cookie banner detected">None</span>';
+    } else {
+      cookieHtml = `<span class="badge badge-none">${escapeHtml(place.cookie_status)}</span>`;
+    }
+  }
+
+  const screenHtml = (place.screenshot && place.screenshot !== 'N/A')
+    ? `
+      <div class="screen-thumb-container" onclick="event.stopPropagation(); openImageModal('${encodeURI(place.screenshot)}', '${escapeHtml(place.name)}')">
+        <div class="screen-thumb-box" title="Click to view full screenshot of ${escapeHtml(place.name)}">
+          <img src="${encodeURI(place.screenshot)}" alt="${escapeHtml(place.name)}" onerror="handleImgError(this)">
+          <div class="screen-thumb-overlay">🔍 View</div>
+        </div>
+        <button class="btn-screen-view" title="Expand screenshot">
+          <span>🔍 View</span>
+        </button>
+      </div>
+    `
+    : '<span class="badge badge-none" style="opacity:0.6;">—</span>';
+
+  const empCount = place.employee_count ? parseInt(place.employee_count) : 0;
+  const employeeBadgeHtml = (empCount > 0)
+    ? `<span class="badge badge-employees">👥 ${empCount} Members</span>`
+    : '<span class="badge badge-none">—</span>';
+
+  const orgChartBtn = `
+    <button class="btn-org-tree" onclick="event.stopPropagation(); openOrgModal('${escapeHtml(place.name)}')">
+      <span>🌳 Org Tree</span>
+    </button>
+  `;
+
+  const isSelected = window.selectedRowIds && window.selectedRowIds.has(place.id);
+  if (isSelected) tr.classList.add('row-selected');
+
+  const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${place.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
+  const curType = curTab === 'maps' ? 'maps' : 'master';
+  const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
+    <div style="display:flex; gap:6px; justify-content:center;">
+      <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('${curType}', ${place.id})" title="Edit lead">✏️</button>
+      <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('${curType}', ${place.id}, '${escapeHtml(place.name || 'Lead')}')" title="Delete lead">🗑️</button>
+    </div>
+  </td>`;
+
+  if (curTab === 'maps') {
+    tr.innerHTML = `
+      ${checkTd}
+      <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td>${categoryHtml}</td>
+      <td>${emailHtml}</td>
+      <td>${socialsHtml}</td>
+      <td>${platformBookingHtml}</td>
+      <td>${notesHtml}</td>
+      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
+      <td>${ratingHtml}</td>
+      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td><span class="badge badge-verified" style="background:rgba(34,197,94,0.15); color:#4ade80; border:1px solid rgba(34,197,94,0.3);">✓ Captured</span></td>
+      <td>${window.formatDateTime(place.created_at)}</td>
+      ${actionsTd}
+    `;
+  } else if (curTab === 'website') {
+    let wStatusBadge = '<span class="badge badge-none">Pending</span>';
+    if (place.website_status === 'emails_found') wStatusBadge = '<span class="badge badge-email">✉️ Emails Found</span>';
+    else if (place.website_status === 'clean') wStatusBadge = '<span class="badge badge-verified">✓ Clean</span>';
+    else if (place.website_status === 'social') wStatusBadge = '<span class="badge badge-social">📸 Social Profile</span>';
+    else if (place.website_status === 'failed') wStatusBadge = '<span class="badge badge-bot-denied">⚠️ Failed / Blocked</span>';
+    else if (place.website_status === 'no_website') wStatusBadge = '<span class="badge badge-none">No Website</span>';
+
+    tr.innerHTML = `
+      ${checkTd}
+      <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td>${wStatusBadge}</td>
+      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${emailHtml}</td>
+      <td>${socialsHtml}</td>
+      <td>${botHtml}</td>
+      <td>${cookieHtml}</td>
+      <td>${screenHtml}</td>
+      ${actionsTd}
+    `;
+  } else if (curTab === 'linkedin') {
+    const liUrl = place.company_linkedin || place.linkedin || '';
+    let liStatusBadge = '<span class="badge badge-none">Pending</span>';
+    if (empCount > 0 || place.founder_name) liStatusBadge = '<span class="badge badge-verified">🌳 Mapped</span>';
+    else if (liUrl && liUrl !== 'N/A') liStatusBadge = '<span class="badge badge-category">Company Verified</span>';
+    else if (place.linkedin_status === 'not_found') liStatusBadge = '<span class="badge badge-none">Not Found</span>';
+
+    let keyPeopleHtml = '<span style="color:#64748b;">—</span>';
+    if (place.founder_name) {
+      keyPeopleHtml = `<span style="color:#38bdf8; font-weight:600;">👑 ${escapeHtml(place.founder_name)}</span> <small style="color:#94a3b8;">(${escapeHtml(place.founder_title || 'Decision Maker')})</small>`;
+    } else if (empCount > 0) {
+      keyPeopleHtml = `<span style="color:#38bdf8; font-weight:600;">${empCount} members</span> extracted`;
+    }
+
+    tr.innerHTML = `
+      ${checkTd}
+      <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td class="shop-title">${escapeHtml(place.name || place.company_name)}</td>
+      <td>${liStatusBadge}</td>
+      <td>${liUrl && liUrl !== 'N/A' ? `<a href="${encodeURI(liUrl)}" target="_blank" class="badge-social badge-li" style="text-decoration:none; padding:4px 8px; width:auto; border-radius:6px;" title="${escapeHtml(liUrl)}" onclick="event.stopPropagation();">💼 LinkedIn Page</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${employeeBadgeHtml}</td>
+      <td style="font-size:0.8rem; color:#cbd5e1;">${keyPeopleHtml}</td>
+      <td>${orgChartBtn}</td>
+      ${actionsTd}
+    `;
+  } else if (curTab === 'platform') {
+    const pName = escapeHtml(place.platform || place.platform_name || 'Platform');
+    const itemUrl = place.url || place.listing_url || place.platform_url || '';
+    const pRating = (place.rating && place.rating !== 'N/A') ? `⭐ ${place.rating}` : '';
+    const pReviews = (place.reviews_count || place.reviews) ? `(${place.reviews_count || place.reviews})` : '';
+
+    const platformColHtml = itemUrl
+      ? `
+        <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
+          <a href="${encodeURI(itemUrl)}" target="_blank" class="badge-platform-btn" title="Open '${escapeHtml(place.title || place.name || 'Listing')}' on ${pName}">
+            🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span>
+          </a>
+          <a href="${encodeURI(itemUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(itemUrl)}">
+            🔗 ${cleanDisplayUrl(itemUrl)}
+          </a>
+        </div>
+      `
+      : `<span class="badge badge-platform">🟣 ${pName}</span>`;
+
+    const bookLink = (place.booking_url && place.booking_url !== 'N/A')
+      ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:3px 8px; text-decoration:none; width:auto; border-radius:6px;" title="Direct Booking / Reservation URL" onclick="event.stopPropagation();">📅 Book Now</a>`
+      : '<span class="badge badge-none">—</span>';
+
+    const listLink = itemUrl
+      ? `<a href="${encodeURI(itemUrl)}" target="_blank" class="link-btn" style="color:#c084fc; font-size:0.76rem;" title="View Listing Page" onclick="event.stopPropagation();">🔗 Open on ${pName}</a>`
+      : '<span class="badge badge-none">—</span>';
+
+    const platActionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
+      <div style="display:flex; gap:6px; justify-content:center;">
+        <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('platform', ${place.id})" title="Edit listing">✏️</button>
+        <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('platform', ${place.id}, '${escapeHtml(place.title || 'Listing')}')" title="Delete listing">🗑️</button>
+      </div>
+    </td>`;
+
+    tr.innerHTML = `
+      ${checkTd}
+      <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td>${platformColHtml}</td>
+      <td><span class="badge badge-verified" style="background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3);">🟣 Listed</span></td>
+      <td class="shop-title">${escapeHtml(place.title || place.name || place.company_name || 'Listing')}</td>
+      <td><span class="badge badge-category">${escapeHtml(place.category || 'Listing')}</span></td>
+      <td>${screenHtml}</td>
+      <td><span class="rating-pill">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span></td>
+      <td>${place.price_info || place.price_range ? `<span style="font-size:0.75rem; color:#34d399; font-weight:600;">💰 ${escapeHtml(place.price_info || place.price_range)}</span>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td style="color:#94a3b8; font-size:0.8rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address || 'N/A')}</td>
+      <td>${bookLink}</td>
+      <td>${listLink}</td>
+      <td>${window.formatDateTime(place.created_at)}</td>
+      ${platActionsTd}
+    `;
+  } else {
+    // Table 1: Master Normalized
+    let platformHtml = '<span class="badge badge-none">—</span>';
+    if (place.platform_name && place.platform_name !== 'N/A') {
+      const pName = escapeHtml(place.platform_name);
+      const pUrl = place.platform_url || place.booking_url || '';
+      const pRating = (place.platform_rating && place.platform_rating !== 'N/A') ? `⭐ ${place.platform_rating}` : '';
+      const pReviews = (place.platform_reviews && place.platform_reviews !== 'N/A') ? `(${place.platform_reviews})` : '';
+      const bookLink = (place.booking_url && place.booking_url !== 'N/A' && place.booking_url !== pUrl)
+        ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:2px 6px; text-decoration:none; width:auto;" title="Direct Booking / Listing" onclick="event.stopPropagation();">📅 Book</a>`
+        : '';
+      const badgeBtn = pUrl
+        ? `<a href="${encodeURI(pUrl)}" target="_blank" class="badge-platform-btn" title="Open ${escapeHtml(place.name)} on ${pName}: ${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span></a>`
+        : `<span class="badge badge-platform">🟣 ${pName}</span>`;
+      const directLink = pUrl
+        ? `<a href="${encodeURI(pUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🔗 ${cleanDisplayUrl(pUrl)}</a>`
+        : '';
+
+      platformHtml = `
+        <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
+          <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+            ${badgeBtn}
+            ${bookLink}
+            <span class="badge badge-verified" title="Normalized & Cross-Verified Match">✔ Verified</span>
+          </div>
+          ${directLink}
+          ${pRating ? `<span style="font-size:0.72rem; color:#d8b4fe; white-space:nowrap;">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span>` : ''}
+          ${place.platform_price && place.platform_price !== 'N/A' ? `<span style="font-size:0.68rem; color:#34d399; white-space:nowrap;">💰 ${escapeHtml(place.platform_price)}</span>` : ''}
+        </div>
+      `;
+    }
+
+    tr.innerHTML = `
+      ${checkTd}
+      <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td>${categoryHtml}</td>
+      <td>${emailHtml}</td>
+      <td>${socialsHtml}</td>
+      <td>${botHtml}</td>
+      <td>${cookieHtml}</td>
+      <td>${employeeBadgeHtml}</td>
+      <td>${orgChartBtn}</td>
+      <td>${screenHtml}</td>
+      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
+      <td>${ratingHtml}</td>
+      <td>${platformHtml}</td>
+      <td>${linksHtml}</td>
+      <td>${window.formatDateTime(place.created_at)}</td>
+      ${actionsTd}
+    `;
+  }
+  return tr;
+};
+
+// =======================================================================
+// UNIVERSAL LIVE INCREMENTAL ROW SYNCHRONIZATION (ACROSS ALL 5 TABLES)
+// =======================================================================
+
+window.updateOrPrependLiveRow = function(tabName, item) {
+  if (!item || !tabName) return;
+
+  const tbody = document.getElementById('places-tbody');
+  if (!tbody) return;
+
+  if (!window.tablesSplitData) {
+    window.tablesSplitData = {
+      master_leads: [],
+      unmatched_maps: [],
+      unmatched_platform: [],
+      website_leads: [],
+      linkedin_leads: [],
+      counts: {},
+      queue_progress: {}
+    };
+  }
+
+  let listKey = 'unmatched_maps';
+  if (tabName === 'master') listKey = 'master_leads';
+  else if (tabName === 'website') listKey = 'website_leads';
+  else if (tabName === 'linkedin') listKey = 'linkedin_leads';
+  else if (tabName === 'platform') listKey = 'unmatched_platform';
+
+  if (!Array.isArray(window.tablesSplitData[listKey])) {
+    window.tablesSplitData[listKey] = [];
+  }
+  const list = window.tablesSplitData[listKey];
+
+  // Match existing record in dataset
+  const matchIdx = list.findIndex(p => {
+    if (item.id && p.id && String(p.id) === String(item.id)) return true;
+    if (tabName === 'platform') {
+      const pUrl = (p.url || p.listing_url || '').split('?')[0].toLowerCase();
+      const iUrl = (item.url || item.listing_url || '').split('?')[0].toLowerCase();
+      if (pUrl && iUrl && pUrl === iUrl) return true;
+      const pTitle = (p.title || p.name || '').trim().toLowerCase();
+      const iTitle = (item.title || item.name || '').trim().toLowerCase();
+      return pTitle && iTitle && pTitle === iTitle && (p.platform === item.platform);
+    }
+    const pName = (p.name || p.title || '').trim().toLowerCase();
+    const iName = (item.name || item.title || '').trim().toLowerCase();
+    if (pName && iName && pName === iName) {
+      if (!p.address || !item.address || p.address === 'N/A' || item.address === 'N/A') return true;
+      return p.address.toLowerCase().includes(item.address.toLowerCase()) || item.address.toLowerCase().includes(p.address.toLowerCase());
+    }
+    return false;
+  });
+
+  if (matchIdx >= 0) {
+    Object.assign(list[matchIdx], item);
+    item = list[matchIdx];
+  } else {
+    list.unshift(item);
+  }
+
+  // Update tab switcher badge
+  const badgeEl = document.getElementById('badge-count-' + tabName);
+  if (badgeEl) badgeEl.innerText = list.length;
+
+  // Update total database KPI
+  const statTotal = document.getElementById('stat-total');
+  if (statTotal && window.tablesSplitData.master_leads && window.tablesSplitData.unmatched_maps) {
+    statTotal.innerText = window.tablesSplitData.master_leads.length + window.tablesSplitData.unmatched_maps.length;
+  }
+
+  // If the user is currently viewing this tab, update DOM live!
+  if (window.currentTableTab === tabName) {
+    const emptyRow = document.getElementById('empty-row');
+    if (emptyRow) emptyRow.remove();
+
+    const rowId = item.id;
+    let existingRow = rowId ? document.getElementById(`row-${rowId}`) : null;
+    if (!existingRow) {
+      const itemName = (item.name || item.title || '').trim().toLowerCase();
+      const allRows = tbody.querySelectorAll('tr');
+      for (let r of allRows) {
+        const titleEl = r.querySelector('.shop-title');
+        if (titleEl && titleEl.innerText.trim().toLowerCase() === itemName) {
+          existingRow = r;
+          if (rowId) existingRow.id = `row-${rowId}`;
+          break;
+        }
+      }
+    }
+
+    if (existingRow) {
+      const updatedTr = window.buildSinglePlaceRow(item, 0, tabName);
+      existingRow.innerHTML = updatedTr.innerHTML;
+      existingRow.classList.remove('row-live-arrived');
+      void existingRow.offsetWidth;
+      existingRow.classList.add('row-live-arrived');
+      tbody.insertBefore(existingRow, tbody.firstChild);
+      setTimeout(() => existingRow.classList.remove('row-live-arrived'), 2800);
+    } else {
+      const newTr = window.buildSinglePlaceRow(item, 0, tabName);
+      newTr.classList.add('row-live-arrived');
+      tbody.insertBefore(newTr, tbody.firstChild);
+
+      const numCells = tbody.querySelectorAll('tr > td:nth-child(2)');
+      numCells.forEach((c, idx) => {
+        if (idx < 50) c.innerText = idx + 1;
+      });
+
+      const tableContainer = document.querySelector('.table-responsive') || document.querySelector('.table-container') || tbody.closest('div');
+      if (tableContainer) {
+        tableContainer.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      setTimeout(() => newTr.classList.remove('row-live-arrived'), 2800);
+    }
+
+    const countBadge = document.getElementById('places-count-badge');
+    if (countBadge) countBadge.innerText = `${list.length} items`;
+  }
+};
+
+window.prependLivePlaceRow = function(place) {
+  window.updateOrPrependLiveRow('maps', place);
+};
+
 window.renderTable = function() {
   window.renderTableHeader();
   const tbody = document.getElementById('places-tbody');
@@ -1106,7 +1575,9 @@ window.renderTable = function() {
         (item.linkedin && item.linkedin !== 'N/A') ||
         (item.instagram && item.instagram !== 'N/A') ||
         (item.facebook && item.facebook !== 'N/A') ||
-        (item.twitter && item.twitter !== 'N/A')
+        (item.twitter && item.twitter !== 'N/A') ||
+        (item.youtube && item.youtube !== 'N/A') ||
+        (item.tiktok && item.tiktok !== 'N/A')
       );
       if (!hasSoc) return false;
     }
@@ -1170,294 +1641,8 @@ window.renderTable = function() {
     }
   }
 
-  if (window.currentTableTab === 'platform') {
-    filteredList.forEach((item, index) => {
-      const tr = document.createElement('tr');
-      const pName = escapeHtml(item.platform || item.platform_name || 'Platform');
-      const itemUrl = item.url || item.listing_url || item.platform_url || '';
-      const pRating = (item.rating && item.rating !== 'N/A') ? `⭐ ${item.rating}` : '';
-      const pReviews = (item.reviews_count || item.reviews) ? `(${item.reviews_count || item.reviews})` : '';
-
-      const platformColHtml = itemUrl
-        ? `
-          <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
-            <a href="${encodeURI(itemUrl)}" target="_blank" class="badge-platform-btn" title="Open '${escapeHtml(item.title || item.name || 'Listing')}' on ${pName}">
-              🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span>
-            </a>
-            <a href="${encodeURI(itemUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(itemUrl)}">
-              🔗 ${cleanDisplayUrl(itemUrl)}
-            </a>
-          </div>
-        `
-        : `<span class="badge badge-platform">🟣 ${pName}</span>`;
-
-      const bookLink = (item.booking_url && item.booking_url !== 'N/A')
-        ? `<a href="${encodeURI(item.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:3px 8px; text-decoration:none; width:auto; border-radius:6px;" title="Direct Booking / Reservation URL" onclick="event.stopPropagation();">📅 Book Now</a>`
-        : '<span class="badge badge-none">—</span>';
-
-      const listLink = itemUrl
-        ? `<a href="${encodeURI(itemUrl)}" target="_blank" class="link-btn" style="color:#c084fc; font-size:0.76rem;" title="View Listing Page" onclick="event.stopPropagation();">🔗 Open on ${pName}</a>`
-        : '<span class="badge badge-none">—</span>';
-
-      const screenHtml = (item.screenshot && item.screenshot !== 'N/A')
-        ? `
-          <div class="screen-thumb-container" onclick="event.stopPropagation(); openImageModal('${encodeURI(item.screenshot)}', '${escapeHtml(item.title || item.name || item.company_name || 'Listing')}')">
-            <div class="screen-thumb-box" title="Click to view full screenshot of ${escapeHtml(item.title || item.name || item.company_name || 'Listing')}">
-              <img src="${encodeURI(item.screenshot)}" alt="${escapeHtml(item.title || item.name || item.company_name || 'Listing')}" onerror="handleImgError(this)">
-              <div class="screen-thumb-overlay">🔍 View</div>
-            </div>
-            <button class="btn-screen-view" title="Expand screenshot">
-              <span>🔍 View</span>
-            </button>
-          </div>
-        `
-        : '<span class="badge badge-none" style="opacity:0.6;">—</span>';
-
-      const isSelected = window.selectedRowIds && window.selectedRowIds.has(item.id);
-      if (isSelected) tr.classList.add('row-selected');
-
-      const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
-      const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
-        <div style="display:flex; gap:6px; justify-content:center;">
-          <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('platform', ${item.id})" title="Edit listing">✏️</button>
-          <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('platform', ${item.id}, '${escapeHtml(item.title || 'Listing')}')" title="Delete listing">🗑️</button>
-        </div>
-      </td>`;
-
-      tr.innerHTML = `
-        ${checkTd}
-        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${item.id || ''}">${index + 1}</td>
-        <td>${platformColHtml}</td>
-        <td><span class="badge badge-verified" style="background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3);">🟣 Listed</span></td>
-        <td class="shop-title">${escapeHtml(item.title || item.name || item.company_name || 'Listing')}</td>
-        <td><span class="badge badge-category">${escapeHtml(item.category || 'Listing')}</span></td>
-        <td>${screenHtml}</td>
-        <td><span class="rating-pill">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span></td>
-        <td>${item.price_info || item.price_range ? `<span style="font-size:0.75rem; color:#34d399; font-weight:600;">💰 ${escapeHtml(item.price_info || item.price_range)}</span>` : '<span class="badge badge-none">—</span>'}</td>
-        <td>${item.phone && item.phone !== 'N/A' ? `<a href="tel:${item.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(item.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
-        <td style="color:#94a3b8; font-size:0.8rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(item.address || 'N/A')}</td>
-        <td>${bookLink}</td>
-        <td>${listLink}</td>
-        <td>${formatDateTime(item.created_at)}</td>
-        ${actionsTd}
-      `;
-      tbody.appendChild(tr);
-    });
-    return;
-  }
-
   filteredList.forEach((place, index) => {
-    const rowId = place.id || index;
-    const tr = document.createElement('tr');
-    tr.id = `row-${rowId}`;
-    if (typeof focusShop === 'function') {
-      tr.onclick = () => focusShop(rowId);
-    }
-
-    const emailHtml = (place.email && place.email !== 'N/A')
-      ? `<span class="badge badge-email" title="Click to copy" onclick="event.stopPropagation(); navigator.clipboard.writeText('${place.email}'); alert('Copied: ${place.email}')">✉️ ${escapeHtml(place.email)}</span>`
-      : '<span class="badge badge-none">Not listed</span>';
-
-    const categoryHtml = place.category
-      ? `<span class="badge badge-category">${escapeHtml(place.category)}</span>`
-      : '<span class="badge badge-none">Business</span>';
-
-    const ratingHtml = (place.rating && place.rating !== 'N/A')
-      ? `<span class="rating-pill">⭐ ${place.rating} <small style="color:#94a3b8;">(${place.reviews || '0'})</small></span>`
-      : '<span style="color:#64748b;">N/A</span>';
-
-    const linksHtml = `
-      <div style="display:flex; gap:8px;" onclick="event.stopPropagation();">
-        ${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn">🌐 Site</a>` : ''}
-        ${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn">🗺️ Maps</a>` : ''}
-      </div>
-    `;
-
-    const socialsList = [];
-    if (place.instagram) socialsList.push(`<a href="${encodeURI(place.instagram)}" target="_blank" class="badge-social badge-ig" title="Instagram: ${escapeHtml(place.instagram)}" onclick="event.stopPropagation();">📸</a>`);
-    if (place.facebook) socialsList.push(`<a href="${encodeURI(place.facebook)}" target="_blank" class="badge-social badge-fb" title="Facebook: ${escapeHtml(place.facebook)}" onclick="event.stopPropagation();">👥</a>`);
-    if (place.linkedin) socialsList.push(`<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" title="LinkedIn: ${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼</a>`);
-    if (place.twitter) socialsList.push(`<a href="${encodeURI(place.twitter)}" target="_blank" class="badge-social badge-tw" title="Twitter/X: ${escapeHtml(place.twitter)}" onclick="event.stopPropagation();">🐦</a>`);
-
-    const socialsHtml = socialsList.length > 0
-      ? `<div style="display:flex; gap:5px;" onclick="event.stopPropagation();">${socialsList.join('')}</div>`
-      : '<span class="badge badge-none">—</span>';
-
-    let botHtml = '<span class="badge badge-none">N/A</span>';
-    if (place.bot_protection) {
-      const bp = place.bot_protection;
-      if (bp.includes('Access Denied')) {
-        botHtml = `<span class="badge badge-bot-denied" title="Access Denied by Anti-Bot Shield">🛑 ${escapeHtml(bp)}</span>`;
-      } else if (bp.includes('Access Granted')) {
-        botHtml = `<span class="badge badge-bot-granted" title="Anti-Bot Shield active but website accessed successfully">✅ ${escapeHtml(bp)}</span>`;
-      } else if (bp.includes('Cloudflare')) {
-        botHtml = `<span class="badge badge-bot-cloudflare">🛡️ ${escapeHtml(bp)}</span>`;
-      } else if (bp.includes('Anti-Bot') || bp.includes('Captcha') || bp.includes('Datadome') || bp.includes('PerimeterX')) {
-        botHtml = `<span class="badge badge-bot-challenge">⚠️ ${escapeHtml(bp)}</span>`;
-      } else if (bp === 'Clean') {
-        botHtml = '<span class="badge badge-bot-clean">✔️ Clean</span>';
-      } else {
-        botHtml = `<span class="badge badge-none">${escapeHtml(bp)}</span>`;
-      }
-    }
-
-    let cookieHtml = '<span class="badge badge-none">—</span>';
-    if (place.cookie_status) {
-      if (place.cookie_status === 'Accepted') {
-        cookieHtml = '<span class="badge badge-cookie-accepted" title="Cookie banner auto-accepted">🍪 Accepted</span>';
-      } else if (place.cookie_status.includes('Unaccepted')) {
-        cookieHtml = '<span class="badge badge-cookie-pending" title="Cookie banner detected (unaccepted)">🍪 Unaccepted</span>';
-      } else if (place.cookie_status === 'None') {
-        cookieHtml = '<span class="badge badge-none" title="No cookie banner detected">None</span>';
-      } else {
-        cookieHtml = `<span class="badge badge-none">${escapeHtml(place.cookie_status)}</span>`;
-      }
-    }
-
-    const screenHtml = (place.screenshot && place.screenshot !== 'N/A')
-      ? `
-        <div class="screen-thumb-container" onclick="event.stopPropagation(); openImageModal('${encodeURI(place.screenshot)}', '${escapeHtml(place.name)}')">
-          <div class="screen-thumb-box" title="Click to view full screenshot of ${escapeHtml(place.name)}">
-            <img src="${encodeURI(place.screenshot)}" alt="${escapeHtml(place.name)}" onerror="handleImgError(this)">
-            <div class="screen-thumb-overlay">🔍 View</div>
-          </div>
-          <button class="btn-screen-view" title="Expand screenshot">
-            <span>🔍 View</span>
-          </button>
-        </div>
-      `
-      : '<span class="badge badge-none" style="opacity:0.6;">—</span>';
-
-    const empCount = place.employee_count ? parseInt(place.employee_count) : 0;
-    const employeeBadgeHtml = (empCount > 0)
-      ? `<span class="badge badge-employees">👥 ${empCount} Members</span>`
-      : '<span class="badge badge-none">—</span>';
-
-    const orgChartBtn = `
-      <button class="btn-org-tree" onclick="event.stopPropagation(); openOrgModal('${escapeHtml(place.name)}')">
-        <span>🌳 Org Tree</span>
-      </button>
-    `;
-
-    const isSelected = window.selectedRowIds && window.selectedRowIds.has(place.id);
-    if (isSelected) tr.classList.add('row-selected');
-
-    const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${place.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
-    const curType = window.currentTableTab === 'maps' ? 'maps' : 'master';
-    const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
-      <div style="display:flex; gap:6px; justify-content:center;">
-        <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('${curType}', ${place.id})" title="Edit lead">✏️</button>
-        <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('${curType}', ${place.id}, '${escapeHtml(place.name || 'Lead')}')" title="Delete lead">🗑️</button>
-      </div>
-    </td>`;
-
-    if (window.currentTableTab === 'maps') {
-      tr.innerHTML = `
-        ${checkTd}
-        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-        <td class="shop-title">${escapeHtml(place.name)}</td>
-        <td>${categoryHtml}</td>
-        <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
-        <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
-        <td>${ratingHtml}</td>
-        <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
-        <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
-        <td><span class="badge badge-verified" style="background:rgba(34,197,94,0.15); color:#4ade80; border:1px solid rgba(34,197,94,0.3);">✓ Captured</span></td>
-        <td>${formatDateTime(place.created_at)}</td>
-        ${actionsTd}
-      `;
-    } else if (window.currentTableTab === 'website') {
-      let wStatusBadge = '<span class="badge badge-none">Pending</span>';
-      if (place.website_status === 'emails_found') wStatusBadge = '<span class="badge badge-email">✉️ Emails Found</span>';
-      else if (place.website_status === 'clean') wStatusBadge = '<span class="badge badge-verified">✓ Clean</span>';
-      else if (place.website_status === 'social') wStatusBadge = '<span class="badge badge-social">📸 Social Profile</span>';
-      else if (place.website_status === 'failed') wStatusBadge = '<span class="badge badge-bot-denied">⚠️ Failed / Blocked</span>';
-      else if (place.website_status === 'no_website') wStatusBadge = '<span class="badge badge-none">No Website</span>';
-
-      tr.innerHTML = `
-        ${checkTd}
-        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-        <td class="shop-title">${escapeHtml(place.name)}</td>
-        <td>${wStatusBadge}</td>
-        <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
-        <td>${emailHtml}</td>
-        <td>${socialsHtml}</td>
-        <td>${botHtml}</td>
-        <td>${cookieHtml}</td>
-        <td>${screenHtml}</td>
-        ${actionsTd}
-      `;
-    } else if (window.currentTableTab === 'linkedin') {
-      let liStatusBadge = '<span class="badge badge-none">Pending</span>';
-      if (empCount > 0) liStatusBadge = '<span class="badge badge-verified">🌳 Mapped</span>';
-      else if (place.linkedin && place.linkedin !== 'N/A') liStatusBadge = '<span class="badge badge-category">Company Verified</span>';
-      else if (place.linkedin_status === 'not_found') liStatusBadge = '<span class="badge badge-none">Not Found</span>';
-
-      tr.innerHTML = `
-        ${checkTd}
-        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-        <td class="shop-title">${escapeHtml(place.name)}</td>
-        <td>${liStatusBadge}</td>
-        <td>${place.linkedin && place.linkedin !== 'N/A' ? `<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" style="text-decoration:none; padding:4px 8px; width:auto; border-radius:6px;" title="${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼 LinkedIn Page</a>` : '<span class="badge badge-none">—</span>'}</td>
-        <td>${employeeBadgeHtml}</td>
-        <td style="font-size:0.8rem; color:#cbd5e1;">${empCount > 0 ? `<span style="color:#38bdf8; font-weight:600;">${empCount} members</span> extracted` : '<span style="color:#64748b;">—</span>'}</td>
-        <td>${orgChartBtn}</td>
-        ${actionsTd}
-      `;
-    } else {
-      // Table 1: Master Normalized
-      let platformHtml = '<span class="badge badge-none">—</span>';
-      if (place.platform_name && place.platform_name !== 'N/A') {
-        const pName = escapeHtml(place.platform_name);
-        const pUrl = place.platform_url || place.booking_url || '';
-        const pRating = (place.platform_rating && place.platform_rating !== 'N/A') ? `⭐ ${place.platform_rating}` : '';
-        const pReviews = (place.platform_reviews && place.platform_reviews !== 'N/A') ? `(${place.platform_reviews})` : '';
-        const bookLink = (place.booking_url && place.booking_url !== 'N/A' && place.booking_url !== pUrl)
-          ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:2px 6px; text-decoration:none; width:auto;" title="Direct Booking / Listing" onclick="event.stopPropagation();">📅 Book</a>`
-          : '';
-        const badgeBtn = pUrl
-          ? `<a href="${encodeURI(pUrl)}" target="_blank" class="badge-platform-btn" title="Open ${escapeHtml(place.name)} on ${pName}: ${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span></a>`
-          : `<span class="badge badge-platform">🟣 ${pName}</span>`;
-        const directLink = pUrl
-          ? `<a href="${encodeURI(pUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(pUrl)}" onclick="event.stopPropagation();">🔗 ${cleanDisplayUrl(pUrl)}</a>`
-          : '';
-
-        platformHtml = `
-          <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
-            <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
-              ${badgeBtn}
-              ${bookLink}
-              <span class="badge badge-verified" title="Normalized & Cross-Verified Match">✔ Verified</span>
-            </div>
-            ${directLink}
-            ${pRating ? `<span style="font-size:0.72rem; color:#d8b4fe; white-space:nowrap;">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span>` : ''}
-            ${place.platform_price && place.platform_price !== 'N/A' ? `<span style="font-size:0.68rem; color:#34d399; white-space:nowrap;">💰 ${escapeHtml(place.platform_price)}</span>` : ''}
-          </div>
-        `;
-      }
-
-      tr.innerHTML = `
-        ${checkTd}
-        <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-        <td class="shop-title">${escapeHtml(place.name)}</td>
-        <td>${categoryHtml}</td>
-        <td>${emailHtml}</td>
-        <td>${socialsHtml}</td>
-        <td>${botHtml}</td>
-        <td>${cookieHtml}</td>
-        <td>${employeeBadgeHtml}</td>
-        <td>${orgChartBtn}</td>
-        <td>${screenHtml}</td>
-        <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
-        <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
-        <td>${ratingHtml}</td>
-        <td>${platformHtml}</td>
-        <td>${linksHtml}</td>
-        <td>${formatDateTime(place.created_at)}</td>
-        ${actionsTd}
-      `;
-    }
-    tbody.appendChild(tr);
+    tbody.appendChild(window.buildSinglePlaceRow(place, index, window.currentTableTab));
   });
 
   // Update header checkbox and batch bar
@@ -1479,34 +1664,11 @@ window.renderTable = function() {
 };
 
 // =======================================================================
-// REAL-TIME AUTO SYNC & WEBSOCKET LISTENER
+// INITIALIZATION
 // =======================================================================
-
-function initTableExtRealtime() {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  try {
-    const extWs = new WebSocket(`${proto}//${window.location.host}/ws`);
-    extWs.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'init' && msg.tables_split) {
-          window.updateSplitData(msg.tables_split);
-        } else if (msg.type === 'tables_split') {
-          window.updateSplitData(msg.data);
-        } else if (msg.type === 'db_cleared') {
-          window.refreshTablesSplit();
-        }
-      } catch (e) {}
-    };
-    extWs.onclose = () => {
-      setTimeout(initTableExtRealtime, 2500);
-    };
-  } catch (err) {}
-}
 
 window.addEventListener('DOMContentLoaded', () => {
   window.refreshTablesSplit();
-  initTableExtRealtime();
 });
 
 

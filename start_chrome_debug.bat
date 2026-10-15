@@ -5,7 +5,7 @@ echo ===============================================================
 echo.
 echo Closing existing Chrome processes to allow Remote Debugging port 9222 binding...
 taskkill /F /IM chrome.exe >nul 2>&1
-timeout /t 1 /nobreak >nul
+ping 127.0.0.1 -n 2 >nul
 
 set "CHROME_EXE=C:\Program Files\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME_EXE%" set "CHROME_EXE=C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"

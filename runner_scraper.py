@@ -5,15 +5,18 @@ import base64
 import datetime
 import json
 import logging
+logger = logging.getLogger("runner_scraper")
 import os
 import re
 import sys
 import math
 import time
+import subprocess
+import shutil
 from typing import Dict, Any, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads, get_cached_census_total, set_cached_census_total, update_lead_website_data
+from database import save_lead, save_employees_batch, classify_seniority, clean_domain, is_lead_in_db, save_platform_listing, normalize_all_platform_listings, get_tables_split_data, extract_core_brand_name, load_proximity_dedup_cache, is_place_already_scraped, is_platform_listing_already_scraped, get_pending_resume_leads, get_cached_census_total, set_cached_census_total, update_lead_website_data, clean_email_string, get_connection
 from scrapers.antibot import (
     decode_cloudflare_email,
     detect_and_handle_cookies,
@@ -69,17 +72,71 @@ JUNK_EXTENSIONS = (
     ".js", ".css", ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3"
 )
 IGNORE_DOMAINS = (
-    "sentry.io", "wixpress.com", "example.com", "schema.org", "google.com",
-    "w3.org", "cloudflare.com", "gravatar.com", "polyfill.io", "doubleclick.net"
+    "sentry.io", "wixpress.com", "example.com", "example.org", "example.net",
+    "domain.com", "test.com", "schema.org", "google.com", "w3.org", "cloudflare.com",
+    "gravatar.com", "polyfill.io", "doubleclick.net", "placeholder.com", "email.com",
+    "lovable.app"
 )
 
-def emit_event(event_type: str, data: Any):
+def is_valid_email(email_str: str) -> bool:
+    """Strictly validates extracted emails, dropping dummy domains, placeholders, and binary extensions."""
+    if not email_str or "@" not in email_str:
+        return False
+    em = email_str.strip().lower()
+    if any(em.endswith(ext) for ext in JUNK_EXTENSIONS):
+        return False
+    parts = em.split("@")
+    if len(parts) != 2:
+        return False
+    user, domain = parts[0], parts[1]
+    if len(user) < 1 or len(domain) < 3 or "." not in domain:
+        return False
+    if any(bad in domain for bad in IGNORE_DOMAINS):
+        return False
+    if user in ("user", "username", "yourname", "email", "you", "placeholder"):
+        return False
+    return True
+
+def clean_phone_number(phone_str: str) -> str:
+    """Strips Google Maps phone icon glyphs (\ue0b0), newlines, and normalizes phone number."""
+    if not phone_str or phone_str == "N/A":
+        return "N/A"
+    cleaned = re.sub(r'[\uE000-\uF8FF\r\n\t]+', ' ', str(phone_str)).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    digits = re.sub(r'\D', '', cleaned)
+    if len(digits) >= 5:
+        return cleaned
+    return "N/A"
+
+def clean_linkedin_url(url: str) -> str:
+    """Validates and cleans LinkedIn URLs, strictly rejecting search/authwall/login URLs."""
+    if not url or str(url).upper() in ("N/A", "NONE"):
+        return ""
+    u = str(url).strip()
+    u_low = u.lower()
+    if any(bad in u_low for bad in ["/search", "uas/login", "authwall", "checkpoint", "linkedin.com/help", "linkedin.com/feed", "linkedin.com/share"]):
+        return ""
+    if "linkedin.com" in u_low and ("/company/" in u_low or "/in/" in u_low):
+        return u.split("?")[0].rstrip("/")
+    return ""
+
+def emit_event(event_type: str, data: Any, agent: Optional[str] = None):
     try:
-        msg = json.dumps({"type": event_type, "data": data}, ensure_ascii=False)
+        payload = {"type": event_type, "data": data}
+        if agent:
+            payload["agent"] = agent
+        elif isinstance(data, dict) and "agent" in data:
+            payload["agent"] = data["agent"]
+        msg = json.dumps(payload, ensure_ascii=False)
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
+        if event_type == "log":
+            logger.info(str(data))
     except Exception as e:
         logger.error(f"Failed to emit event: {e}")
+
+def emit_log(message: str, agent: str = "system"):
+    emit_event("log", message, agent=agent)
 
 def clean_text(text: str) -> str:
     if not text:
@@ -174,7 +231,7 @@ def extract_emails_from_text(html: str) -> List[str]:
             href = a["href"].strip()
             if href.lower().startswith("mailto:"):
                 email_part = href.split(":", 1)[1].split("?")[0].strip()
-                if email_part and "@" in email_part:
+                if email_part and "@" in email_part and is_valid_email(email_part):
                     found.add(email_part.lower())
 
         # 2. Cloudflare Protected Emails (<span class="__cf_email__" data-cfemail="..."> or /email-protection#...)
@@ -184,31 +241,27 @@ def extract_emails_from_text(html: str) -> List[str]:
                 cf_hex = el.get("href", "").split("#")[-1]
             if cf_hex:
                 decoded = decode_cloudflare_email(cf_hex)
-                if decoded and "@" in decoded and "." in decoded:
+                if decoded and is_valid_email(decoded):
                     found.add(decoded.lower().strip())
 
         # 3. JSON-LD structured data schema
         for s in soup.find_all("script", type="application/ld+json"):
             if s.string:
                 for match in EMAIL_REGEX.findall(s.string):
-                    found.add(match.strip().lower())
+                    if is_valid_email(match):
+                        found.add(match.strip().lower())
 
         # 4. Standard RegEx pattern across page text
         for match in EMAIL_REGEX.findall(html):
             match = match.strip().lower()
-            if any(match.endswith(ext) for ext in JUNK_EXTENSIONS):
-                continue
-            if any(bad in match for bad in IGNORE_DOMAINS):
-                continue
-            parts = match.split("@")
-            if len(parts) == 2 and "." in parts[1] and len(parts[1].split(".")[-1]) >= 2:
+            if is_valid_email(match):
                 found.add(match)
 
         # 5. Obfuscated patterns like user [at] domain.com or user (at) domain.com
         obf_matches = re.findall(r'([a-zA-Z0-9_.+-]+)\s*(?:\[at\]|\(at\)|\s+at\s+)\s*([a-zA-Z0-9-]+)\s*(?:\[dot\]|\(dot\)|\s+dot\s+|\.)\s*([a-zA-Z]{2,10})', html, re.I)
         for user, dom, tld in obf_matches:
             cand = f"{user}@{dom}.{tld}".lower()
-            if not any(cand.endswith(ext) for ext in JUNK_EXTENSIONS) and not any(bad in cand for bad in IGNORE_DOMAINS):
+            if is_valid_email(cand):
                 found.add(cand)
 
     except Exception:
@@ -350,7 +403,7 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
     3. <meta> tags (og:see_also, twitter:site, twitter:creator, etc.)
     4. Regex pattern matching across page source code.
     """
-    socials = {"instagram": "", "facebook": "", "linkedin": "", "twitter": ""}
+    socials = {"instagram": "", "facebook": "", "linkedin": "", "twitter": "", "youtube": "", "tiktok": ""}
     if not html:
         return socials
 
@@ -358,7 +411,9 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
         "instagram": [],
         "facebook": [],
         "linkedin": [],
-        "twitter": []
+        "twitter": [],
+        "youtube": [],
+        "tiktok": []
     }
 
     try:
@@ -373,12 +428,16 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
 
             if "instagram.com/" in lower:
                 candidates["instagram"].append(href)
-            elif "facebook.com/" in lower:
+            elif "facebook.com/" in lower or "fb.me/" in lower:
                 candidates["facebook"].append(href)
             elif "linkedin.com/" in lower:
                 candidates["linkedin"].append(href)
             elif "twitter.com/" in lower or "x.com/" in lower:
                 candidates["twitter"].append(href)
+            elif "youtube.com/" in lower or "youtu.be/" in lower:
+                candidates["youtube"].append(href)
+            elif "tiktok.com/" in lower:
+                candidates["tiktok"].append(href)
 
         # 2. Check JSON-LD structured data (<script type="application/ld+json">)
         for s in soup.find_all("script", type="application/ld+json"):
@@ -394,9 +453,11 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
                     elif isinstance(obj, str):
                         lower = obj.lower()
                         if "instagram.com/" in lower: candidates["instagram"].append(obj)
-                        elif "facebook.com/" in lower: candidates["facebook"].append(obj)
+                        elif "facebook.com/" in lower or "fb.me/" in lower: candidates["facebook"].append(obj)
                         elif "linkedin.com/" in lower: candidates["linkedin"].append(obj)
                         elif "twitter.com/" in lower or "x.com/" in lower: candidates["twitter"].append(obj)
+                        elif "youtube.com/" in lower or "youtu.be/" in lower: candidates["youtube"].append(obj)
+                        elif "tiktok.com/" in lower: candidates["tiktok"].append(obj)
                 walk_json(data)
             except Exception:
                 pass
@@ -409,9 +470,11 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
             lower = content.lower()
             prop = (meta.get("property") or meta.get("name") or "").lower()
             if "instagram.com/" in lower: candidates["instagram"].append(content)
-            elif "facebook.com/" in lower: candidates["facebook"].append(content)
+            elif "facebook.com/" in lower or "fb.me/" in lower: candidates["facebook"].append(content)
             elif "linkedin.com/" in lower: candidates["linkedin"].append(content)
             elif "twitter.com/" in lower or "x.com/" in lower: candidates["twitter"].append(content)
+            elif "youtube.com/" in lower or "youtu.be/" in lower: candidates["youtube"].append(content)
+            elif "tiktok.com/" in lower: candidates["tiktok"].append(content)
             elif "twitter:site" in prop or "twitter:creator" in prop:
                 handle = content.lstrip("@").strip()
                 if handle and len(handle) < 30 and not any(ign in handle.lower() for ign in ["share", "intent"]):
@@ -426,13 +489,21 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
         for m in fb_matches:
             candidates["facebook"].append(f"https://www.facebook.com/{m}")
 
-        li_matches = re.findall(r'https?://(?:www\.)?linkedin\.com/(?:company|in)/([a-zA-Z0-9_.-]{2,50})/?', html, re.IGNORECASE)
-        for m in li_matches:
-            candidates["linkedin"].append(f"https://www.linkedin.com/company/{m}")
+        li_matches = re.findall(r'https?://(?:www\.)?linkedin\.com/(company|in)/([a-zA-Z0-9_.-]{2,50})/?', html, re.IGNORECASE)
+        for kind, m in li_matches:
+            candidates["linkedin"].append(f"https://www.linkedin.com/{kind.lower()}/{m}")
 
         tw_matches = re.findall(r'https?://(?:www\.)?(?:twitter|x)\.com/([a-zA-Z0-9_]{2,30})/?', html, re.IGNORECASE)
         for m in tw_matches:
             candidates["twitter"].append(f"https://x.com/{m}")
+
+        yt_matches = re.findall(r'https?://(?:www\.)?(?:youtube\.com/(?:c/|channel/|user/|@)?|youtu\.be/)([a-zA-Z0-9_.-]{2,50})/?', html, re.IGNORECASE)
+        for m in yt_matches:
+            candidates["youtube"].append(f"https://www.youtube.com/@{m.lstrip('@')}")
+
+        tt_matches = re.findall(r'https?://(?:www\.)?tiktok\.com/@([a-zA-Z0-9_.-]{2,50})/?', html, re.IGNORECASE)
+        for m in tt_matches:
+            candidates["tiktok"].append(f"https://www.tiktok.com/@{m}")
 
     except Exception:
         pass
@@ -458,13 +529,12 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
                 socials["facebook"] = cleaned
                 break
 
-    # LinkedIn
+    # LinkedIn (Prefer company, but accept /in/ personnel profile)
     for raw in candidates["linkedin"]:
-        cleaned = clean_social_url(raw)
-        lower = cleaned.lower()
-        if any(k in lower for k in ["/company/", "/in/"]):
-            if not any(bad in lower for bad in ["sharearticle", "sharing", "legal", "feed"]):
-                socials["linkedin"] = cleaned
+        cleaned = clean_linkedin_url(raw)
+        if cleaned:
+            socials["linkedin"] = cleaned
+            if "/company/" in cleaned:
                 break
 
     # Twitter / X
@@ -477,95 +547,134 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
                 socials["twitter"] = cleaned
                 break
 
+    # YouTube
+    for raw in candidates["youtube"]:
+        cleaned = clean_social_url(raw)
+        lower = cleaned.lower()
+        if not any(bad in lower for bad in ["/watch", "/embed", "/shorts", "/playlist", "youtube.com/live", "share", "intent"]):
+            path = urllib.parse.urlparse(cleaned).path.strip("/")
+            if path and len(path) > 1:
+                socials["youtube"] = cleaned
+                break
+
+    # TikTok
+    for raw in candidates["tiktok"]:
+        cleaned = clean_social_url(raw)
+        lower = cleaned.lower()
+        if not any(bad in lower for bad in ["/video/", "/share", "intent"]):
+            path = urllib.parse.urlparse(cleaned).path.strip("/")
+            if path and len(path) > 1:
+                socials["tiktok"] = cleaned
+                break
+
     return socials
 
 async def frame_streamer_loop(maps_page=None, linkedin_page=None, pages_dict=None):
-    """Streams live JPEG screenshot frames of Tab 1 (Google Maps), Tab 2 (Shop Website), and Tab 3 (LinkedIn Org) to frontend."""
+    """Streams live JPEG screenshot frames of Tab 1 (Google Maps), Tab 2 (Shop Website), Tab 3 (LinkedIn Org), and Tab 4 (Platform) to frontend."""
+    p_dict = pages_dict if isinstance(pages_dict, dict) else {}
     while not stop_stream_event.is_set():
         # 1. Stream Tab 1 (Google Maps)
+        cur_maps = p_dict.get("maps") or maps_page
         try:
-            if maps_page and not maps_page.is_closed():
-                maps_url = maps_page.url or ""
+            if cur_maps and not cur_maps.is_closed():
+                maps_url = cur_maps.url or ""
                 if maps_url and "about:blank" not in maps_url:
-                    buf_maps = await maps_page.screenshot(type="jpeg", quality=55)
+                    buf_maps = await cur_maps.screenshot(type="jpeg", quality=55)
                     if len(buf_maps) > 6000:
                         b64_maps = base64.b64encode(buf_maps).decode("ascii")
                         emit_event("live_frame", {
                             "tab": "maps",
+                            "stream_type": "maps",
                             "image": f"data:image/jpeg;base64,{b64_maps}",
                             "url": maps_url,
                             "title": "Google Maps Live Agent",
-                            "is_website": False
+                            "is_maps": True,
+                            "is_website": False,
+                            "is_linkedin": False,
+                            "is_platform": False
                         })
         except Exception:
             pass
 
         # 2. Stream Tab 2 (Shop Website)
-        website_page = pages_dict.get("website") if pages_dict else None
+        cur_site = p_dict.get("website")
         try:
-            if website_page and not website_page.is_closed():
-                site_url = website_page.url or ""
+            if cur_site and not cur_site.is_closed():
+                site_url = cur_site.url or ""
                 if site_url and "about:blank" not in site_url:
-                    buf_site = await website_page.screenshot(type="jpeg", quality=55)
+                    buf_site = await cur_site.screenshot(type="jpeg", quality=55)
                     if len(buf_site) > 6000:
                         b64_site = base64.b64encode(buf_site).decode("ascii")
                         site_title = ""
                         try:
-                            site_title = await website_page.title()
+                            site_title = await cur_site.title()
                         except Exception:
                             pass
                         emit_event("live_frame", {
                             "tab": "website",
+                            "stream_type": "website",
                             "image": f"data:image/jpeg;base64,{b64_site}",
                             "url": site_url,
                             "title": site_title[:50] if site_title else "Shop Website",
-                            "is_website": True
+                            "is_maps": False,
+                            "is_website": True,
+                            "is_linkedin": False,
+                            "is_platform": False
                         })
         except Exception:
             pass
 
         # 3. Stream Tab 3 (LinkedIn Org Intelligence)
+        cur_li = p_dict.get("linkedin") or linkedin_page
         try:
-            if linkedin_page and not linkedin_page.is_closed():
-                li_url = linkedin_page.url or ""
+            if cur_li and not cur_li.is_closed():
+                li_url = cur_li.url or ""
                 if li_url and "about:blank" not in li_url:
-                    buf_li = await linkedin_page.screenshot(type="jpeg", quality=55)
+                    buf_li = await cur_li.screenshot(type="jpeg", quality=55)
                     if len(buf_li) > 6000:
                         b64_li = base64.b64encode(buf_li).decode("ascii")
                         li_title = ""
                         try:
-                            li_title = await linkedin_page.title()
+                            li_title = await cur_li.title()
                         except Exception:
                             pass
                         emit_event("live_frame", {
                             "tab": "linkedin",
+                            "stream_type": "linkedin",
                             "image": f"data:image/jpeg;base64,{b64_li}",
                             "url": li_url,
                             "title": li_title[:50] if li_title else "LinkedIn Org Intelligence",
-                            "is_linkedin": True
+                            "is_maps": False,
+                            "is_website": False,
+                            "is_linkedin": True,
+                            "is_platform": False
                         })
         except Exception:
             pass
 
         # 4. Stream Tab 4 (Platform Directory Agent: Fresha, Airbnb, Yelp, etc.)
-        platform_page = pages_dict.get("platform") if pages_dict else None
+        cur_plat = p_dict.get("platform")
         try:
-            if platform_page and not platform_page.is_closed():
-                plat_url = platform_page.url or ""
+            if cur_plat and not cur_plat.is_closed():
+                plat_url = cur_plat.url or ""
                 if plat_url and "about:blank" not in plat_url:
-                    buf_plat = await platform_page.screenshot(type="jpeg", quality=55)
+                    buf_plat = await cur_plat.screenshot(type="jpeg", quality=55)
                     if len(buf_plat) > 6000:
                         b64_plat = base64.b64encode(buf_plat).decode("ascii")
                         plat_title = ""
                         try:
-                            plat_title = await platform_page.title()
+                            plat_title = await cur_plat.title()
                         except Exception:
                             pass
                         emit_event("live_frame", {
                             "tab": "platform",
+                            "stream_type": "platform",
                             "image": f"data:image/jpeg;base64,{b64_plat}",
                             "url": plat_url,
                             "title": plat_title[:50] if plat_title else "Platform Directory Agent",
+                            "is_maps": False,
+                            "is_website": False,
+                            "is_linkedin": False,
                             "is_platform": True
                         })
         except Exception:
@@ -613,7 +722,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         if any(m in w_low for m in meta_domains):
             is_ig = "instagram.com" in w_low
             plat_name = "Instagram" if is_ig else "Facebook"
-            emit_event("log", f"ℹ️ [Meta Platform Bypassed] #{idx} '{name}' uses {plat_name} as primary web link. Recorded under socials without opening Meta platform.")
+            emit_event("log", f"ℹ️ [Agent 2: Website] #{idx} '{name}' uses {plat_name} as primary web link. Recorded under socials without opening external Meta platform.")
             try:
                 with get_connection() as conn:
                     if is_ig:
@@ -632,7 +741,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             queue.task_done()
             continue
 
-        emit_event("log", f"🌐 [Tab 2 - Simultaneous] Inspecting shop website: {website_url}")
+        emit_event("log", f"🌐 [Agent 2: Website] Inspecting shop website for #{idx} '{name}': {website_url}")
         emit_event("status", f"Browsing website #{idx}: {name}")
         emit_event("website_navigated", {"url": website_url, "name": name, "index": idx})
 
@@ -658,20 +767,20 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     pass
                 await tab_page.wait_for_timeout(300)
             except Exception as e:
-                emit_event("log", f"⚠️ Website note on #{idx}: {str(e)[:50]}")
+                emit_event("log", f"⚠️ [Agent 2: Website] Navigation notice on #{idx} '{name}': {str(e)[:50]}")
 
             # Automatically accept cookies / consent banner if presented
             cookie_status = await detect_and_handle_cookies(tab_page)
             if cookie_status == "Accepted":
-                emit_event("log", f"🍪 Auto-accepted cookie banner on #{idx} {name}")
+                emit_event("log", f"🍪 [Agent 2: Website] Auto-accepted cookie banner on #{idx} '{name}'")
                 await tab_page.wait_for_timeout(400)
             elif cookie_status == "Detected (Unaccepted)":
-                emit_event("log", f"🍪 Cookie banner detected (unaccepted) on #{idx} {name}")
+                emit_event("log", f"🍪 [Agent 2: Website] Cookie banner detected on #{idx} '{name}'")
 
             # Check if Cloudflare Turnstile checkbox is present and attempt to click it
             solved_turnstile = await attempt_turnstile_solve(tab_page)
             if solved_turnstile:
-                emit_event("log", f"🛡️ Handled anti-bot checkbox on #{idx} {name}")
+                emit_event("log", f"🛡️ [Agent 2: Website] Handled anti-bot Turnstile checkbox on #{idx} '{name}'")
 
             page_title = ""
             try:
@@ -693,7 +802,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             if bot_status != "Clean":
                 is_denied = "Access Denied" in bot_status
                 log_icon = "🚫" if is_denied else "🛡️"
-                emit_event("log", f"{log_icon} [Anti-Bot Alert] #{idx} {name} -> {bot_status}")
+                emit_event("log", f"{log_icon} [Agent 2: Website] Anti-bot status for #{idx} '{name}' -> {bot_status}")
                 if is_denied:
                     # Stamp the warning banner on page DOM before screenshot so it is visibly baked on the image
                     try:
@@ -764,9 +873,11 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                                     for (const l of links) {
                                         const u = String(l).toLowerCase();
                                         if (u.includes('instagram.com/')) socs['instagram'] = l;
-                                        if (u.includes('facebook.com/')) socs['facebook'] = l;
+                                        if (u.includes('facebook.com/') || u.includes('fb.me/')) socs['facebook'] = l;
                                         if (u.includes('linkedin.com/')) socs['linkedin'] = l;
                                         if (u.includes('twitter.com/') || u.includes('x.com/')) socs['twitter'] = l;
+                                        if (u.includes('youtube.com/') || u.includes('youtu.be/')) socs['youtube'] = l;
+                                        if (u.includes('tiktok.com/')) socs['tiktok'] = l;
                                     }
                                 }
                             }
@@ -834,13 +945,13 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             # If emails were successfully extracted from the page, confirm Access Granted
             if primary_email and "Access Denied" in bot_status:
                 bot_status = bot_status.replace("Access Denied", "Access Granted")
-                emit_event("log", f"🎉 [Access Granted] Contact emails extracted from #{idx} {name}!")
+                emit_event("log", f"🎉 [Agent 2: Website] Contact emails successfully extracted from #{idx} '{name}'!")
 
             # Immediately update lead record in SQLite database!
             w_status = "found"
             if email_list:
                 w_status = "emails_found"
-            elif socials.get("instagram") or socials.get("facebook") or socials.get("twitter"):
+            elif any(socials.get(k) for k in ["instagram", "facebook", "twitter", "linkedin", "youtube", "tiktok"]):
                 w_status = "socials_found"
 
             try:
@@ -853,6 +964,8 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     facebook=socials.get("facebook", ""),
                     linkedin=socials.get("linkedin", ""),
                     twitter=socials.get("twitter", ""),
+                    youtube=socials.get("youtube", ""),
+                    tiktok=socials.get("tiktok", ""),
                     screenshot=rel_screenshot_path,
                     bot_protection=bot_status,
                     cookie_status=cookie_status,
@@ -872,6 +985,8 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 "facebook": socials.get("facebook", ""),
                 "linkedin": socials.get("linkedin", ""),
                 "twitter": socials.get("twitter", ""),
+                "youtube": socials.get("youtube", ""),
+                "tiktok": socials.get("tiktok", ""),
                 "screenshot": rel_screenshot_path,
                 "bot_protection": bot_status,
                 "cookie_status": cookie_status,
@@ -879,13 +994,17 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             })
 
             log_parts = []
-            if email_list: log_parts.append(f"✉️ {', '.join(email_list)}")
+            if email_list: log_parts.append(f"✉️ Emails: {', '.join(email_list)}")
             if socials.get("instagram"): log_parts.append(f"📸 IG: {socials['instagram']}")
             if socials.get("facebook"): log_parts.append(f"📘 FB: {socials['facebook']}")
+            if socials.get("linkedin"): log_parts.append(f"💼 LinkedIn: {socials['linkedin']}")
+            if socials.get("twitter"): log_parts.append(f"🐦 X: {socials['twitter']}")
+            if socials.get("youtube"): log_parts.append(f"▶️ YT: {socials['youtube']}")
+            if socials.get("tiktok"): log_parts.append(f"🎵 TT: {socials['tiktok']}")
             if bot_status != "Clean": log_parts.append(f"🛡️ {bot_status}")
             if cookie_status != "None": log_parts.append(f"🍪 {cookie_status}")
-            msg = " | ".join(log_parts) if log_parts else "No emails/socials detected"
-            emit_event("log", f"✅ [Tab 2 Finished: #{idx} {name}] {msg}")
+            msg = " | ".join(log_parts) if log_parts else "No contact emails/socials detected on page"
+            emit_event("log", f"✅ [Agent 2: Website] Finished #{idx} '{name}' -> {msg}")
 
             # -------------------------------------------------------------
             # PARALLEL PIPELINE: Send company to Tab 3 (LinkedIn Intelligence)
@@ -932,6 +1051,37 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         finally:
             queue.task_done()
 
+async def extract_single_linkedin_profile(page) -> Optional[Dict[str, Any]]:
+    """Extracts profile details from an individual LinkedIn profile (/in/<username>)."""
+    try:
+        return await page.evaluate(r"""() => {
+            const nameEl = document.querySelector('h1.inline.t-24.v-align-middle, h1.text-heading-xlarge, h1');
+            const titleEl = document.querySelector('.text-body-medium.break-words, div[data-generated-suggestion-target], .pv-text-details__left-panel div.text-body-medium');
+            const locEl = document.querySelector('span.text-body-small.inline.t-black--light.break-words, .pv-text-details__left-panel span.text-body-small');
+            const imgEl = document.querySelector('img.pv-top-card-profile-picture__image, img[data-view-name="profile-card"], img.presence-entity__image');
+            
+            let rawName = nameEl ? (nameEl.innerText || nameEl.textContent || "").trim() : "";
+            let rawTitle = titleEl ? (titleEl.innerText || titleEl.textContent || "").trim() : "";
+            let loc = locEl ? (locEl.innerText || locEl.textContent || "").trim() : "";
+            let avatar = imgEl ? imgEl.src : "";
+            
+            let cleanName = rawName.replace(/•\s*(1st|2nd|3rd\+?|Following|Follow)/gi, '').replace(/\(He\/Him\)|\(She\/Her\)|\(They\/Them\)/gi, '').trim();
+            let cleanTitle = rawTitle.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+            
+            if (cleanName && cleanName !== "LinkedIn Member" && cleanName.length > 2) {
+                return {
+                    full_name: cleanName,
+                    title: cleanTitle || "Key Personnel",
+                    linkedin_profile_url: window.location.href.split('?')[0].replace(/\/+$/, ''),
+                    avatar_url: avatar,
+                    location: loc
+                };
+            }
+            return null;
+        }""")
+    except Exception:
+        return None
+
 async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Event):
     """
     Dedicated Worker for Tab 3: Navigates company's LinkedIn profile / search directly in the user's active Chrome session,
@@ -961,17 +1111,23 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
         core_brand = clean_brand_tokens(name, city=city)
         domain_brand = extract_brand_from_domain(website_url)
 
-        emit_event("log", f"💼 [LinkedIn Step 1/5 - Company Resolution] Resolving verified LinkedIn profile for #{idx} '{name}' (Brand: '{core_brand}')...")
+        emit_event("log", f"💼 [Agent 3: LinkedIn] Resolving verified LinkedIn profile for #{idx} '{name}' (Brand: '{core_brand}')...")
         emit_event("status", f"Resolving LinkedIn profile: {core_brand}")
 
         try:
             # Step 1: Determine target verified company URL via cascading directory search
             verified_company_url = None
-            if known_linkedin and "linkedin.com/company/" in known_linkedin:
-                clean_base = known_linkedin.split("?")[0].rstrip("/")
-                verified_company_url = clean_base
-                emit_event("log", f"🔗 [LinkedIn Step 1/5] Using verified LinkedIn company URL from website: {verified_company_url}")
-            else:
+            known_person_url = None
+            if known_linkedin:
+                clean_base = clean_linkedin_url(known_linkedin)
+                if clean_base and "/company/" in clean_base:
+                    verified_company_url = clean_base
+                    emit_event("log", f"🔗 [Agent 3: LinkedIn] Using verified corporate LinkedIn URL from website: {verified_company_url}")
+                elif clean_base and "/in/" in clean_base:
+                    known_person_url = clean_base
+                    emit_event("log", f"👤 [Agent 3: LinkedIn] Detected key personnel profile from website: {known_person_url}")
+
+            if not verified_company_url:
                 # Build prioritized search candidate queries: Core Brand -> Exact Maps Name -> Domain Brand
                 search_candidates = []
                 if core_brand and core_brand.lower() != name.lower():
@@ -983,7 +1139,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 for cand_query in search_candidates:
                     encoded_cand = urllib.parse.quote(cand_query)
                     search_co_url = f"https://www.linkedin.com/search/results/companies/?keywords={encoded_cand}"
-                    emit_event("log", f"🏢 [LinkedIn Step 1/5] Searching company directory on LinkedIn for '{cand_query}'...")
+                    emit_event("log", f"🏢 [Agent 3: LinkedIn] Searching corporate directory for '{cand_query}'...")
                     emit_event("linkedin_navigated", {"url": search_co_url, "name": cand_query})
                     try:
                         await tab_page.goto(search_co_url, wait_until="domcontentloaded", timeout=15000)
@@ -1009,26 +1165,26 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                             return null;
                         }""")
                         if li_result and isinstance(li_result, dict):
-                            cand_href = li_result.get("href", "")
+                            cand_href = clean_linkedin_url(li_result.get("href", ""))
                             cand_title = li_result.get("title", "")
-                            if verify_company_name_match(cand_query, cand_title) or verify_company_name_match(core_brand, cand_title):
+                            if cand_href and (verify_company_name_match(cand_query, cand_title) or verify_company_name_match(core_brand, cand_title)):
                                 verified_company_url = cand_href
-                                emit_event("log", f"🏢 [LinkedIn Step 1/5] Verified company via LinkedIn directory: '{cand_title}' ({verified_company_url})")
+                                emit_event("log", f"🎯 [Agent 3: LinkedIn] Verified corporate page match: '{cand_title}' ({verified_company_url})")
                                 break
                             else:
-                                emit_event("log", f"⚠️ [LinkedIn Step 1/5] Skipped non-matching company candidate '{cand_title}' for '{cand_query}'")
+                                emit_event("log", f"⚠️ [Agent 3: LinkedIn] Candidate '{cand_title}' did not match target '{cand_query}'")
                     except Exception as e:
-                        emit_event("log", f"⚠️ Company search note for '{cand_query}': {str(e)[:40]}")
+                        emit_event("log", f"⚠️ [Agent 3: LinkedIn] Search note for '{cand_query}': {str(e)[:40]}")
 
             if not verified_company_url:
-                emit_event("log", f"ℹ️ [LinkedIn Step 1/5] No official corporate page for '{name}'. Using targeted Boolean role search in People directory...")
+                emit_event("log", f"ℹ️ [Agent 3: LinkedIn] No corporate page found for '{name}'. Switching to Personnel Fallback Search...")
 
             employees = []
 
             # Step 2: Open company's /people/ directory if verified corporate page exists
             if verified_company_url:
                 people_target = f"{verified_company_url}/people/"
-                emit_event("log", f"👥 [LinkedIn Step 2/5 - Directory Navigation] Opening people directory: {people_target}")
+                emit_event("log", f"👥 [Agent 3: LinkedIn] Opening People directory: {people_target}")
                 emit_event("linkedin_navigated", {"url": people_target, "name": core_brand})
                 try:
                     await tab_page.goto(people_target, wait_until="domcontentloaded", timeout=15000)
@@ -1169,10 +1325,23 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 except Exception as e:
                     emit_event("log", f"⚠️ Employee DOM parse note: {str(e)[:50]}")
 
-            # Fallback: If 0 cards extracted from /people/ OR if no company page existed,
-            # execute targeted Boolean People Search directly on LinkedIn!
+            # Fallback 1: If 0 cards from company directory and website had a direct personal LinkedIn profile, scrape it
+            if len(employees) == 0 and known_person_url:
+                try:
+                    emit_event("log", f"👤 [LinkedIn Step 2/5] Inspecting personnel profile from website: {known_person_url}...")
+                    emit_event("linkedin_navigated", {"url": known_person_url, "name": core_brand})
+                    await tab_page.goto(known_person_url, wait_until="domcontentloaded", timeout=12000)
+                    await tab_page.wait_for_timeout(1000)
+                    p_data = await extract_single_linkedin_profile(tab_page)
+                    if p_data:
+                        employees.append(p_data)
+                        emit_event("log", f"✅ [LinkedIn Step 2/5] Verified personnel profile: '{p_data['full_name']}' ({p_data['title']})")
+                except Exception as d_err:
+                    emit_event("log", f"⚠️ Direct personnel scrape note: {str(d_err)[:40]}")
+
+            # Fallback 2: Targeted Boolean People Search directly on LinkedIn
             if len(employees) == 0:
-                role_bool = '("Founder" OR "Co-Founder" OR "Owner" OR "Director" OR "CEO" OR "Manager" OR "Head")'
+                role_bool = '("Founder" OR "Co-Founder" OR "Owner" OR "Director" OR "CEO" OR "Manager" OR "Head" OR "Principal")'
                 people_queries = [
                     f'"{core_brand}" {role_bool}',
                     f'"{core_brand}"'
@@ -1253,10 +1422,28 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
 
                             if verified_candidates:
                                 employees = verified_candidates
-                                emit_event("log", f"✅ [LinkedIn Step 4/5] Discovered {len(employees)} verified personnel profiles for '{core_brand}' via targeted keyword search")
+                                emit_event("log", f"✅ [Agent 3: LinkedIn] Discovered {len(employees)} verified personnel profiles for '{core_brand}' via targeted keyword search")
                                 break
                     except Exception as pe_err:
-                        emit_event("log", f"⚠️ People search note for query '{p_query}': {str(pe_err)[:40]}")
+                        emit_event("log", f"⚠️ [Agent 3: LinkedIn] People search note for query '{p_query}': {str(pe_err)[:40]}")
+
+            # If no corporate company page was found, but linked personnel were discovered, deep-scrape primary individual
+            top_person = None
+            if employees and not verified_company_url:
+                exec_words = ["founder", "owner", "ceo", "director", "managing", "partner", "principal", "president", "head"]
+                top_person = next((e for e in employees if any(kw in e.get("title", "").lower() for kw in exec_words)), employees[0])
+                p_url = clean_linkedin_url(top_person.get("linkedin_profile_url", ""))
+                if p_url and "/in/" in p_url and (not tab_page.url or p_url not in tab_page.url):
+                    try:
+                        emit_event("log", f"👤 [Agent 3: LinkedIn] Personnel Fallback: Scraping profile details for '{top_person.get('full_name')}' ({p_url})...")
+                        emit_event("linkedin_navigated", {"url": p_url, "name": top_person.get('full_name')})
+                        await tab_page.goto(p_url, wait_until="domcontentloaded", timeout=12000)
+                        await tab_page.wait_for_timeout(800)
+                        single_data = await extract_single_linkedin_profile(tab_page)
+                        if single_data:
+                            top_person.update({k: v for k, v in single_data.items() if v})
+                    except Exception as p_err:
+                        emit_event("log", f"⚠️ [Agent 3: LinkedIn] Personnel profile scrape note: {str(p_err)[:40]}")
 
             # Enrich employee emails from snippet text or matched business website emails
             for emp in employees:
@@ -1277,13 +1464,34 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                             break
 
             # Step 5: Classify & save into Database
-            final_linkedin_url = verified_company_url or (tab_page.url.split("?")[0].rstrip("/") if (tab_page.url and "linkedin.com" in tab_page.url) else known_linkedin)
-            if final_linkedin_url and "/people" in final_linkedin_url:
-                final_linkedin_url = final_linkedin_url.replace("/people", "")
+            if verified_company_url:
+                final_linkedin_url = verified_company_url
+                resolved_status = "verified"
+            elif employees:
+                if not top_person:
+                    exec_words = ["founder", "owner", "ceo", "director", "managing", "partner", "principal", "president", "head"]
+                    top_person = next((e for e in employees if any(kw in e.get("title", "").lower() for kw in exec_words)), employees[0])
+                final_linkedin_url = clean_linkedin_url(top_person.get("linkedin_profile_url", ""))
+                resolved_status = "personnel_verified"
+            elif known_linkedin:
+                clean_known = clean_linkedin_url(known_linkedin)
+                final_linkedin_url = clean_known
+                resolved_status = "verified" if "/company/" in clean_known else ("personnel_verified" if "/in/" in clean_known else "no_profile")
+            else:
+                final_linkedin_url = ""
+                resolved_status = "no_profile"
+
+            final_linkedin_url = clean_linkedin_url(final_linkedin_url)
 
             # Save batch to SQLite with explicit lead_id reference
             lead_id_target = item.get("id") or item.get("lead_id")
-            saved = save_employees_batch(company_name=name, employees=employees, lead_id=lead_id_target, company_linkedin_url=final_linkedin_url)
+            saved = save_employees_batch(
+                company_name=name,
+                employees=employees,
+                lead_id=lead_id_target,
+                company_linkedin_url=final_linkedin_url,
+                linkedin_status=resolved_status
+            )
 
             exec_count = sum(1 for e in employees if classify_seniority(e.get("title", "")) == "executive")
             mgmt_count = sum(1 for e in employees if classify_seniority(e.get("title", "")) == "management")
@@ -1292,6 +1500,7 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
             emit_event("org_updated", {
                 "company": name,
                 "linkedin_url": final_linkedin_url,
+                "linkedin_status": resolved_status,
                 "employee_count": len(employees),
                 "tiers": {
                     "executive": exec_count,
@@ -1300,10 +1509,26 @@ async def linkedin_worker(tab_page, queue: asyncio.Queue, done_event: asyncio.Ev
                 }
             })
 
-            emit_event("log", f"🌳 [Tab 3 Finished: {name}] {len(employees)} employees mapped: {exec_count} Execs | {mgmt_count} Leads | {staff_count} Staff")
+            emit_event("place_updated", {
+                "id": lead_id_target,
+                "name": name,
+                "address": address,
+                "linkedin": final_linkedin_url,
+                "linkedin_url": final_linkedin_url,
+                "linkedin_status": resolved_status,
+                "employee_count": str(len(employees))
+            })
+
+            if resolved_status == "personnel_verified":
+                p_name = top_person.get("full_name") if top_person else "Key Personnel"
+                emit_event("log", f"👤 [Agent 3: LinkedIn] Finished #{idx} '{name}' -> Linked key personnel: '{p_name}' ({final_linkedin_url}). Total {len(employees)} personnel profiles mapped.")
+            elif verified_company_url:
+                emit_event("log", f"🏢 [Agent 3: LinkedIn] Finished #{idx} '{name}' -> Corporate page verified ({final_linkedin_url}). Hierarchy: {exec_count} Execs | {mgmt_count} Leads | {staff_count} Staff.")
+            else:
+                emit_event("log", f"ℹ️ [Agent 3: LinkedIn] Finished #{idx} '{name}' -> No public corporate page or verified personnel on LinkedIn.")
 
         except Exception as err:
-            emit_event("log", f"⚠️ Error scanning LinkedIn for {name}: {str(err)[:60]}")
+            emit_event("log", f"⚠️ [Agent 3: LinkedIn] Error scanning LinkedIn for '{name}': {str(err)[:60]}")
         finally:
             queue.task_done()
 
@@ -1448,6 +1673,7 @@ async def platform_area_search_worker(
     location_name: str,
     radius_km: float = 5.0,
     max_results: int = 15,
+    scrape_all: bool = False,
     custom_url_pattern: str = "",
     visible_browser: bool = True,
     dedup_cache: Dict[str, Any] = None,
@@ -1464,7 +1690,7 @@ async def platform_area_search_worker(
             selected_platforms = ["Fresha"]
 
         active_clean_platforms = [p.strip() for p in selected_platforms if p.strip()]
-        emit_event("log", f"🟣 [Tab 4 Platform Scout] Target platforms active ({len(active_clean_platforms)}): {', '.join(active_clean_platforms)}")
+        emit_event("log", f"🟣 [Agent 4: Platform] Target platforms active ({len(active_clean_platforms)}): {', '.join(active_clean_platforms)}")
 
         # =========================================================================
         # PHASE 1: PROXIMITY CENSUS (Discover total businesses across ALL platforms)
@@ -1476,14 +1702,14 @@ async def platform_area_search_worker(
             timeout_ms = 15000  # Generous 15s timeout to prevent premature aborts
 
             emit_event("status", f"Census: Probing {p_name} volume for '{category}' in '{location_name}'...")
-            emit_event("log", f"🎯 [Proximity Census] Probing {p_name} total available businesses in '{location_name}'...")
+            emit_event("log", f"🎯 [Agent 4: Platform] Probing {p_name} total available businesses in '{location_name}'...")
             emit_event("platform_navigated", {"url": target_url, "title": f"{p_name} Proximity Census", "platform": p_name})
 
             # Check if verified total was already discovered for this platform & location
             cached_tot = get_cached_census_total(p_name, category, location_name)
             if cached_tot and cached_tot > 0:
                 final_plat_total = cached_tot
-                emit_event("log", f"⚡ [Census Cache] Reusing verified count for {p_name} in '{location_name}': ~{final_plat_total} businesses (Bypassing redundant probe).")
+                emit_event("log", f"⚡ [Agent 4: Platform] Reusing verified census count for {p_name} in '{location_name}': ~{final_plat_total} businesses.")
             else:
                 detected_total = 0
                 try:
@@ -1833,7 +2059,7 @@ async def platform_area_search_worker(
                             extracted_listings.append(item)
                             new_in_pass += 1
 
-                    emit_event("log", f"📜 [Tab 4 - {p_name}] Scroll pass {scroll_pass}: Found {len(extracted_listings)}/{max_results} listings ({new_in_pass} new in this view).")
+                    emit_event("log", f"📜 [Agent 4: Platform - {p_name}] Scroll pass {scroll_pass}: Discovered {len(extracted_listings)}/{max_results} listings ({new_in_pass} new cards).")
                     emit_event("platform_progress", {
                         "platform": p_name,
                         "scraped": len(extracted_listings),
@@ -1843,7 +2069,7 @@ async def platform_area_search_worker(
                     })
 
                     if len(extracted_listings) >= max_results:
-                        emit_event("log", f"🎯 [Tab 4 - {p_name}] Reached target quota of {max_results} listings!")
+                        emit_event("log", f"🎯 [Agent 4: Platform - {p_name}] Reached target quota of {max_results} listings!")
                         break
 
                     if new_in_pass == 0:
@@ -1855,12 +2081,12 @@ async def platform_area_search_worker(
                                 return false;
                             }""")
                             if has_next:
-                                emit_event("log", f"➡️ [Tab 4 - {p_name}] Triggered next pagination page...")
+                                emit_event("log", f"➡️ [Agent 4: Platform - {p_name}] Navigating to next directory page...")
                                 await platform_page.wait_for_timeout(1500)
                                 consecutive_stagnant = 0
                                 continue
                             else:
-                                emit_event("log", f"🏁 [Tab 4 - {p_name}] Reached end of directory results ({len(extracted_listings)} listings discovered).")
+                                emit_event("log", f"🏁 [Agent 4: Platform - {p_name}] Reached end of directory results ({len(extracted_listings)} listings discovered).")
                                 break
                     else:
                         consecutive_stagnant = 0
@@ -1868,7 +2094,7 @@ async def platform_area_search_worker(
                     await platform_page.evaluate("window.scrollBy({top: 1100, behavior: 'smooth'})")
                     await platform_page.wait_for_timeout(600)
 
-                emit_event("log", f"🟣 [Tab 4 - {p_name}] Total harvested listings from {p_name}: {len(extracted_listings)}.")
+                emit_event("log", f"🟣 [Agent 4: Platform - {p_name}] Total harvested listings from {p_name}: {len(extracted_listings)}.")
 
                 # =====================================================================
                 # CARD CLICKING & VERIFIED DETAILS INSPECTION
@@ -1979,14 +2205,14 @@ async def platform_area_search_worker(
                         "verified": False
                     })
 
-                emit_event("log", f"🟣 [Tab 4 - {p_name}] Stored {saved_count} listings in database for '{location_name}'.")
+                emit_event("log", f"✅ [Agent 4: Platform - {p_name}] Stored {saved_count} verified directory listings in database for '{location_name}'.")
 
             except Exception as plat_err:
-                emit_event("log", f"⚠️ [Tab 4 Error on {p_name}] {type(plat_err).__name__}: {plat_err}")
+                emit_event("log", f"⚠️ [Agent 4: Platform Error on {p_name}] {type(plat_err).__name__}: {plat_err}")
                 logging.exception(f"Error on platform {p_name}")
 
     except Exception as worker_err:
-        emit_event("log", f"❌ [Tab 4 Worker Error] {type(worker_err).__name__}: {worker_err}")
+        emit_event("log", f"❌ [Agent 4: Platform Worker Error] {type(worker_err).__name__}: {worker_err}")
         logging.exception("Platform area worker encountered fatal error")
 
 
@@ -2010,6 +2236,7 @@ async def run_scraper(
     dedup_area: bool = True,
     skip_existing_db: bool = False,
     standalone_companies: Optional[str] = None,
+    standalone_websites: Optional[str] = None,
     extension_active: bool = False,
 ):
     cleaned_query = query.strip() if query else ""
@@ -2023,7 +2250,7 @@ async def run_scraper(
     emit_event("log", f"Starting Desktop Chrome (Visible: {visible_browser})...")
 
     async with async_playwright() as p:
-        profile_dir = os.path.abspath("./chrome_live_profile")
+        profile_dir = r"C:\ChromeAutomation"
         screen_w, screen_h = get_screen_dimensions()
 
         launch_args = [
@@ -2065,47 +2292,91 @@ async def run_scraper(
                     return c
             return None
 
-        if visible_browser:
-            # First priority: connect directly to active Chrome browser if Remote Debugging (port 9222) is enabled
-            try:
-                emit_event("log", "🔗 Checking for active Google Chrome with Remote Debugging (Port 9222)...")
-                browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=1200)
-                context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
-                cdp_connected = True
-                emit_event("log", "✅ Successfully attached to your active Google Chrome window (Port 9222)! All logins, tabs and accounts preserved.")
-            except Exception:
-                emit_event("log", "🌐 Opening visible Google Chrome agent window for live scraping...")
-
-            if cdp_connected and context:
-                force_foreground_window()
-
-            # Second priority: launch dedicated visible Chrome if CDP is not available
-            if not context:
-                if extension_active:
-                    emit_event("log", "🧩 Mavon Extension is active in your Chrome! Tabs are running live in your main browser window.")
-                else:
-                    # Purge stale session cache so Chrome never re-opens tabs from old sessions
-                    stale_sessions = os.path.join(profile_dir, "Default", "Sessions")
-                    if os.path.exists(stale_sessions):
-                        try:
-                            shutil.rmtree(stale_sessions, ignore_errors=True)
-                        except Exception:
-                            pass
-
-                    emit_event("log", "Launching fresh Google Chrome window with Mavon Extension...")
+        async def ensure_chrome_running() -> bool:
+            import urllib.request
+            def is_port_open() -> bool:
+                for target_url in ["http://127.0.0.1:9222/json/version", "http://localhost:9222/json/version"]:
                     try:
-                        context = await p.chromium.launch_persistent_context(
-                            user_data_dir=profile_dir,
-                            channel="chrome",
-                            headless=False,
-                            args=launch_args,
-                            no_viewport=True,
-                            locale="en-US"
-                        )
-                        if context:
-                            force_foreground_window()
-                    except Exception as e:
-                        logger.warning(f"Native Chrome launch fallback: {e}")
+                        with urllib.request.urlopen(target_url, timeout=1.2) as resp:
+                            if resp.status == 200:
+                                return True
+                    except Exception:
+                        pass
+                return False
+
+            if is_port_open():
+                return True
+
+            chrome_exe = get_chrome_executable_path()
+            src_user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+            dest_user_data = r"C:\ChromeAutomation"
+
+            # Check if Chrome is already running on the desktop
+            chrome_running = False
+            try:
+                chk = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"], capture_output=True, text=True, timeout=2.0)
+                if "chrome.exe" in (chk.stdout or "").lower():
+                    chrome_running = True
+            except Exception:
+                pass
+
+            if chrome_running:
+                emit_event("log", "⚠️ Chrome is running without Port 9222. Click '⚡ Use This Chrome (Port 9222)' in the dashboard header so all tabs open in this window!")
+            
+            # If Chrome is not running, launch user's primary profile directly with Port 9222
+            target_profile_dir = src_user_data if not chrome_running else dest_user_data
+            emit_event("log", f"🚀 Launching Chrome on Port 9222 (Profile: {'Personal' if not chrome_running else 'Automation'})...")
+
+            if chrome_exe:
+                cmd_args = [
+                    chrome_exe,
+                    f'--user-data-dir={target_profile_dir}',
+                    '--remote-debugging-port=9222',
+                    '--remote-allow-origins=*',
+                    '--restore-last-session',
+                    '--start-maximized',
+                    'http://localhost:8080'
+                ]
+                subprocess.Popen(cmd_args)
+                emit_event("log", "Launched Chrome with Port 9222 enabled.")
+
+            # Wait up to 8 seconds for port 9222 to become ready
+            for _ in range(20):
+                await asyncio.sleep(0.4)
+                if is_port_open():
+                    emit_event("log", "✅ Google Chrome Port 9222 is active and ready.")
+                    return True
+
+            return is_port_open()
+
+        if visible_browser:
+            emit_event("log", "🔗 Checking for active Google Chrome with Remote Debugging (Port 9222)...")
+            ready = await ensure_chrome_running()
+            if ready:
+                try:
+                    browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=15000)
+                    context = browser.contexts[0] if browser.contexts else await browser.new_context(no_viewport=True)
+                    cdp_connected = True
+                    emit_event("log", "✅ Attached directly to your active Google Chrome window (Port 9222)! All accounts and tabs preserved.")
+                    force_foreground_window()
+                except Exception as cdp_err:
+                    logger.warning(f"CDP connect error: {cdp_err}")
+
+            if not context:
+                emit_event("log", "Launching Chrome with persistent automation profile...")
+                try:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        channel="chrome",
+                        headless=False,
+                        args=launch_args,
+                        no_viewport=True,
+                        locale="en-US"
+                    )
+                    if context:
+                        force_foreground_window()
+                except Exception as e:
+                    logger.warning(f"Native Chrome launch fallback: {e}")
 
         # Headless fallback if toggle is OFF
         if not context:
@@ -2194,7 +2465,7 @@ async def run_scraper(
             await clear_fixed_viewport(linkedin_page)
 
             stop_stream_event.clear()
-            stream_task = asyncio.create_task(frame_streamer_loop(None, linkedin_page, None))
+            stream_task = asyncio.create_task(frame_streamer_loop(pages_dict={"linkedin": linkedin_page}))
 
             linkedin_queue = asyncio.Queue()
             done_event = asyncio.Event()
@@ -2247,6 +2518,63 @@ async def run_scraper(
             emit_event("status", "Finished")
             emit_event("log", "🏁 Finished Standalone LinkedIn Org Intelligence.")
             emit_event("completed", {"count": len(comp_list), "places": []})
+            return
+
+        # =============================================================
+        # STANDALONE WEBSITE AGENT (Agent 2 - Tab 2)
+        # =============================================================
+        if standalone_websites or (not enable_maps and enable_website and not enable_linkedin and not enable_platform):
+            if standalone_websites:
+                site_list = [w.strip() for w in standalone_websites.split(",") if w.strip()]
+            else:
+                from database import get_all_leads
+                db_leads = get_all_leads()
+                site_list = [l["website"] for l in db_leads if l.get("website") and l["website"].startswith("http")][:10]
+                if not site_list:
+                    site_list = ["https://grind.co.uk"]
+
+            emit_event("status", f"Scanning {len(site_list)} websites...")
+            emit_event("log", f"🌐 [Agent 2: Website] Starting Standalone Website Inspector for: {', '.join(site_list)}")
+
+            website_page = await context.new_page() if cdp_connected else (context.pages[0] if context.pages else await context.new_page())
+            await clear_fixed_viewport(website_page)
+
+            stop_stream_event.clear()
+            stream_task = asyncio.create_task(frame_streamer_loop(pages_dict={"website": website_page}))
+
+            website_queue = asyncio.Queue()
+            done_event = asyncio.Event()
+
+            worker_task = asyncio.create_task(website_worker(context, website_queue, done_event, website_page=website_page, cdp_connected=cdp_connected))
+
+            for idx, site_url in enumerate(site_list, start=1):
+                clean_host = site_url.split("//")[-1].split("/")[0]
+                website_queue.put_nowait({
+                    "index": idx,
+                    "name": clean_host,
+                    "address": "N/A",
+                    "website": site_url
+                })
+
+            done_event.set()
+            await website_queue.join()
+            if worker_task:
+                worker_task.cancel()
+
+            stop_stream_event.set()
+            if stream_task:
+                try: await stream_task
+                except Exception: pass
+
+            if cdp_connected:
+                try: await website_page.close()
+                except Exception: pass
+            else:
+                await context.close()
+
+            emit_event("status", "Finished")
+            emit_event("log", "🏁 Finished Standalone Website Inspector.")
+            emit_event("completed", {"count": len(site_list), "places": []})
             return
 
         # =============================================================
@@ -2455,6 +2783,7 @@ async def run_scraper(
                 location_name=search_location,
                 radius_km=radius_km,
                 max_results=max_results,
+                scrape_all=scrape_all,
                 custom_url_pattern=platform_custom_url or "",
                 visible_browser=visible_browser,
                 dedup_cache=dedup_cache
@@ -2465,7 +2794,7 @@ async def run_scraper(
 
         # Start live screen streaming across all active agent viewports
         stop_stream_event.clear()
-        stream_task = asyncio.create_task(frame_streamer_loop(maps_page, linkedin_page, pages_dict))
+        stream_task = asyncio.create_task(frame_streamer_loop(pages_dict=pages_dict))
 
         if enable_maps and maps_page:
             # Dynamic zoom from radius_km
@@ -2476,7 +2805,7 @@ async def run_scraper(
             else:
                 search_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
 
-            emit_event("log", f"Navigating Tab 1 (Google Maps): {search_url}")
+            emit_event("log", f"🗺️ [Agent 1: Maps] Navigating to: {search_url}")
             emit_event("status", f"Searching Google Maps: {cleaned_query}")
             emit_event("maps_navigated", {"url": search_url, "query": cleaned_query})
             await maps_page.goto(search_url, wait_until="domcontentloaded")
@@ -2490,7 +2819,7 @@ async def run_scraper(
             try:
                 consent_btn = maps_page.locator('button:has-text("Reject all"), button:has-text("Accept all"), form[action*="consent"] button').first
                 if await consent_btn.is_visible(timeout=2000):
-                    emit_event("log", "Accepting cookie consent...")
+                    emit_event("log", "🍪 [Agent 1: Maps] Auto-accepting Google Maps cookie consent...")
                     await consent_btn.click()
                     await maps_page.wait_for_timeout(1000)
             except Exception:
@@ -2500,15 +2829,16 @@ async def run_scraper(
             feed_selector = 'div[role="feed"]'
             try:
                 await maps_page.wait_for_selector(feed_selector, timeout=12000)
-                emit_event("log", "Google Maps results feed loaded.")
+                emit_event("log", "🗺️ [Agent 1: Maps] Google Maps results feed loaded. Scanning area businesses...")
             except Exception:
-                emit_event("log", "Results feed container detected.")
+                emit_event("log", "🗺️ [Agent 1: Maps] Results feed container detected.")
 
             await maps_page.wait_for_timeout(1000)
         seen_titles = set()
         seen_signatures = set()
         seen_phones = set()
         seen_domains = set()
+        seen_names = set()
         scroll_attempts = 0
         is_infinite = (scrape_all or max_results >= 9999)
         target_max = 999999 if is_infinite else max_results
@@ -2532,8 +2862,11 @@ async def run_scraper(
 
                 try:
                     elem = links.nth(i)
-                    title = await elem.get_attribute("aria-label") or ""
-                    title = clean_text(title)
+                    raw_title = await elem.get_attribute("aria-label") or ""
+                    title = clean_text(raw_title)
+                    # Strip 'Visited link' or 'visited' suffix added by Google Maps
+                    title = re.sub(r'\s*[·•\-]\s*visited\s*link.*$', '', title, flags=re.I).strip()
+                    title = re.sub(r'\s+visited\s*link.*$', '', title, flags=re.I).strip()
 
                     if not title or title in seen_titles:
                         continue
@@ -2567,7 +2900,7 @@ async def run_scraper(
                             "total": proximity_total_estimated,
                             "percent": min(100, round(((len(scraped_places) + skipped_count) / max(1, proximity_total_estimated)) * 100))
                         })
-                        emit_event("log", f"⏭️ [Skipped In DB] '{title}' already verified in database. Bypassing detail pane.")
+                        emit_event("log", f"⏭️ [Agent 1: Maps] Skipped '{title}' (already verified in database).")
                         try:
                             await elem.evaluate("el => window.MavonScraper && window.MavonScraper.highlight(el, 'Skipped (In DB)', '#f59e0b')")
                         except Exception:
@@ -2576,7 +2909,7 @@ async def run_scraper(
 
                     idx = len(scraped_places) + 1
 
-                    emit_event("log", f"👉 [{idx}] Inspecting: {title}")
+                    emit_event("log", f"👉 [Agent 1: Maps] [{idx}] Inspecting place card: '{title}'")
                     emit_event("status", f"Scraping #{idx}: {title}")
 
                     # Highlight place card visually using extension bridge
@@ -2585,23 +2918,63 @@ async def run_scraper(
                     except Exception:
                         pass
 
-                    # FAST CLICK & BATCH IN-PAGE EXTRACTION (Detail Panel)
-                    await elem.click()
+                    # Extract feed card data directly (prevents detail pane mismatches)
+                    card_data = {}
                     try:
-                        # Wait for the detail panel header (h1.DUwDvf) to update with the clicked place
+                        card_data = await elem.evaluate(r"""(el) => {
+                            const card = el.closest('div.Nv2PK, div[role="article"]') || el.parentElement;
+                            if (!card) return {};
+                            const webA = card.querySelector('a[data-value="Website"], a[aria-label*="website" i]');
+                            return {
+                                cardWeb: webA ? webA.href : '',
+                                cardText: card.innerText || ''
+                            };
+                        }""")
+                    except Exception:
+                        pass
+
+                    # FAST RELIABLE DOM CLICK & SYNCHRONIZED DETAIL PANE EXTRACTION
+                    try:
+                        await elem.evaluate("el => { el.scrollIntoView({ block: 'center' }); el.click(); }")
+                    except Exception:
+                        await elem.click(force=True)
+
+                    # Synchronize with Google Maps network loading: wait until detail header matches this place AND buttons hydrate
+                    clean_target = re.sub(r'[^a-zA-Z0-9]', '', title).lower()[:15]
+                    try:
                         await maps_page.wait_for_function(
-                            """(targetTitle) => {
+                            """(target) => {
                                 const h1 = document.querySelector('h1.DUwDvf');
                                 if (!h1) return false;
-                                const hText = (h1.innerText || '').trim().toLowerCase();
-                                if (!targetTitle) return hText.length > 0;
-                                return hText.includes(targetTitle.toLowerCase()) || targetTitle.toLowerCase().includes(hText);
+                                const hClean = (h1.innerText || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                                const isMatch = !target || hClean.includes(target) || target.includes(hClean);
+                                if (!isMatch) return false;
+
+                                const pane = h1.closest('div.dS8AEf, div.m6QErb.DxyBCb, div.m6QErb.kA9KIf') || h1.closest('div[role="main"]');
+                                if (!pane) return false;
+                                const hasDetail = !!pane.querySelector(
+                                    'button[data-item-id="address"], button[aria-label*="Address:"], button[data-item-id*="phone:"], a[data-item-id="authority"], div[data-item-id*="oh"]'
+                                );
+                                return hasDetail;
                             }""",
-                            arg=title[:25],
-                            timeout=2500
+                            arg=clean_target,
+                            timeout=3500
                         )
                     except Exception:
-                        await maps_page.wait_for_timeout(400)
+                        await maps_page.wait_for_timeout(350)
+
+                    # Scroll the opened place card detail pane to reveal below-the-fold contact info
+                    try:
+                        await maps_page.evaluate("""() => {
+                            const h1 = document.querySelector('h1.DUwDvf');
+                            const detailPane = h1 ? (h1.closest('div.dS8AEf, div.m6QErb.DxyBCb, div.m6QErb.kA9KIf') || h1.closest('div[role="main"]')) : null;
+                            if (detailPane) {
+                                detailPane.scrollTop = 450;
+                            }
+                        }""")
+                        await maps_page.wait_for_timeout(150)
+                    except Exception:
+                        pass
 
                     # Single ultra-fast evaluation in browser V8 (Extracts all details in <10ms)
                     detail_data = {}
@@ -2618,20 +2991,37 @@ async def run_scraper(
                                 hours: '',
                                 price: '',
                                 plus_code: '',
+                                email: '',
                                 ig: '',
                                 fb: '',
                                 li: '',
                                 tw: '',
+                                yt: '',
+                                tt: '',
                                 lat: null,
                                 lon: null
                             };
 
-                            // Title
+                            // Helper to unwrap Google redirection URLs (e.g. google.com/url?q=...)
+                            const unwrapUrl = (href) => {
+                                if (!href) return '';
+                                try {
+                                    if (href.includes('google.com/url?') || href.includes('/url?q=')) {
+                                        const m = href.match(/[?&]q=([^&]+)/);
+                                        if (m) return decodeURIComponent(m[1]).split('?')[0].replace(/\/+$/, '');
+                                    }
+                                } catch (_) {}
+                                return href.split('?')[0].replace(/\/+$/, '');
+                            };
+
+                            // Title & Scoped Detail Pane Root
                             const h1 = document.querySelector('h1.DUwDvf');
                             if (h1) d.title = h1.innerText.trim();
+                            const pane = h1 ? (h1.closest('div.dS8AEf, div.m6QErb.DxyBCb, div.m6QErb.kA9KIf') || h1.closest('div[role="main"]')) : null;
+                            const root = pane || document;
 
                             // Category
-                            const catBtn = document.querySelector('button.DkEaL, button[jsaction*="category"], div.fontBodyMedium button, span.YhemCb');
+                            const catBtn = root.querySelector('button.DkEaL, button[jsaction*="category"], div.fontBodyMedium button, span.YhemCb');
                             if (catBtn) {
                                 const cText = catBtn.innerText.trim();
                                 const ignore = ["learn more", "see more", "read more", "claim this business", "suggest an edit", "save", "nearby", "send to phone", "share", "reviews", "photos", "overview", "about", "directions", "copy", "update results when map moves", "update results", "search this area"];
@@ -2641,7 +3031,7 @@ async def run_scraper(
                             }
 
                             // Rating
-                            const ratingEl = document.querySelector('div.F7nice span[aria-hidden="true"], span.ceNzKf, div.fontDisplayLarge, span[aria-label*="stars"], span.MW4etd');
+                            const ratingEl = root.querySelector('div.F7nice span[aria-hidden="true"], span.ceNzKf, div.fontDisplayLarge, span[aria-label*="stars"], span.MW4etd');
                             if (ratingEl) {
                                 const text = ratingEl.innerText || ratingEl.getAttribute('aria-label') || '';
                                 const m = text.match(/\b([0-5]\.\d+)\b/);
@@ -2649,7 +3039,7 @@ async def run_scraper(
                             }
 
                             // Reviews
-                            const revEl = document.querySelector('div.F7nice span[aria-label*="reviews"], span.mgr77e, button[aria-label*="reviews"], span[aria-label*="reviews"], span.UY7F9, div.F7nice button');
+                            const revEl = root.querySelector('div.F7nice span[aria-label*="reviews"], span.mgr77e, button[aria-label*="reviews"], span[aria-label*="reviews"], span.UY7F9, div.F7nice button');
                             if (revEl) {
                                 const text = revEl.getAttribute('aria-label') || revEl.innerText || '';
                                 const digits = text.match(/[\d,]+/);
@@ -2657,51 +3047,172 @@ async def run_scraper(
                             }
 
                             // Address
-                            const addrEl = document.querySelector('button[data-item-id="address"], button[aria-label*="Address:"], div[data-item-id="address"], button[data-tooltip*="Copy address"], [data-item-id*="address"]');
+                            const addrEl = root.querySelector('button[data-item-id="address"], button[aria-label*="Address:"], div[data-item-id="address"], button[data-tooltip*="Copy address"], [data-item-id*="address"]');
                             if (addrEl) {
-                                const text = addrEl.innerText || addrEl.getAttribute('aria-label') || '';
-                                d.address = text.replace(/^Address:\s*/i, '').trim();
+                                const text = addrEl.getAttribute('aria-label') || addrEl.innerText || '';
+                                d.address = text.replace(/^Address:\s*/i, '').replace(/[\uE000-\uF8FF]/g, '').trim();
                             }
 
                             // Phone
-                            const phoneEl = document.querySelector('button[data-item-id*="phone:"], button[aria-label*="Phone:"], button[data-tooltip*="Copy phone"], a[href^="tel:"]');
+                            const phoneEl = root.querySelector('button[data-item-id*="phone:"], button[aria-label*="Phone:"], button[data-tooltip*="Copy phone"], a[href^="tel:"]');
                             if (phoneEl) {
-                                const text = phoneEl.innerText || phoneEl.getAttribute('aria-label') || '';
-                                d.phone = text.replace(/^Phone:\s*/i, '').trim();
+                                const text = phoneEl.getAttribute('aria-label') || phoneEl.innerText || '';
+                                d.phone = text.replace(/^Phone:\s*/i, '').replace(/[\uE000-\uF8FF]/g, '').trim();
                             }
 
-                            // Website
-                            const webEl = document.querySelector('a[data-item-id="authority"], a[aria-label*="Website:"]');
-                            if (webEl && webEl.href) {
-                                d.website = webEl.href;
+                            // Website: STRICTLY inside detail pane authority button (NEVER global feed buttons)
+                            if (pane) {
+                                const webEl = pane.querySelector('a[data-item-id="authority"], a[data-tooltip*="Open website"]');
+                                if (webEl && webEl.href) {
+                                    d.website = unwrapUrl(webEl.href);
+                                }
                             }
+
+                            // Email extraction from Google Maps detail pane
+                            let mapsEmail = '';
+                            const mailLink = root.querySelector('a[href^="mailto:"]');
+                            if (mailLink && mailLink.href) {
+                                mapsEmail = mailLink.href.replace(/^mailto:/i, '').split('?')[0].trim();
+                            }
+                            if (!mapsEmail) {
+                                const emailEl = root.querySelector('button[data-item-id*="email"], a[data-item-id*="email"], [aria-label*="Email:" i], button[data-tooltip*="email" i]');
+                                if (emailEl) {
+                                    const txt = emailEl.getAttribute('aria-label') || emailEl.innerText || '';
+                                    const m = txt.match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/);
+                                    if (m) mapsEmail = m[0];
+                                }
+                            }
+                            if (!mapsEmail && pane && pane.innerText) {
+                                const m = pane.innerText.match(/\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b/);
+                                if (m) {
+                                    const potential = m[0].trim();
+                                    if (!potential.match(/\.(png|jpg|jpeg|svg|webp|gif|js|css)$/i)) {
+                                        mapsEmail = potential;
+                                    }
+                                }
+                            }
+                            d.email = mapsEmail;
 
                             // Hours
-                            const hoursEl = document.querySelector('button[data-item-id*="oh"], div[data-item-id*="oh"], button[aria-label*="Hours"], div[aria-label*="Hours"]');
+                            const hoursEl = root.querySelector('button[data-item-id*="oh"], div[data-item-id*="oh"], button[aria-label*="Hours"], div[aria-label*="Hours"]');
                             if (hoursEl) {
                                 d.hours = (hoursEl.innerText || '').split('\n')[0].trim();
                             }
 
                             // Price
-                            const priceEl = document.querySelector('span[aria-label*="per person"], span[aria-label*="Price"], button[data-item-id*="price"], div[aria-label*="£"], div[aria-label*="$"]');
+                            const priceEl = root.querySelector('span[aria-label*="per person"], span[aria-label*="Price"], button[data-item-id*="price"], div[aria-label*="£"], div[aria-label*="$"]');
                             if (priceEl) {
                                 d.price = priceEl.innerText.trim();
                             }
 
                             // Plus code
-                            const pcEl = document.querySelector('button[data-item-id="oloc"], button[aria-label*="Plus code"]');
+                            const pcEl = root.querySelector('button[data-item-id="oloc"], button[aria-label*="Plus code"]');
                             if (pcEl) {
                                 d.plus_code = pcEl.innerText.trim();
                             }
 
-                            // Socials
-                            document.querySelectorAll('a[href*="instagram.com"], a[href*="facebook.com"], a[href*="linkedin.com"], a[href*="twitter.com"], a[href*="x.com"]').forEach(a => {
-                                const h = (a.href || '').split('?')[0];
-                                if (h.includes('instagram.com') && !d.ig && !h.includes('/p/')) d.ig = h;
-                                else if (h.includes('facebook.com') && !d.fb && !h.includes('sharer')) d.fb = h;
-                                else if (h.includes('linkedin.com') && !d.li) d.li = h;
-                                else if ((h.includes('twitter.com') || h.includes('x.com')) && !d.tw) d.tw = h;
+                            // Socials strictly inside detail pane and overview profiles
+                            if (pane) {
+                                const allLinks = pane.querySelectorAll('a[href]');
+                                allLinks.forEach(a => {
+                                    const rawHref = a.getAttribute('href') || a.href || '';
+                                    const cleanHref = unwrapUrl(rawHref);
+                                    const lower = cleanHref.toLowerCase();
+                                    if (lower.includes('instagram.com/') && !d.ig && !lower.includes('/p/')) {
+                                        d.ig = cleanHref;
+                                    } else if ((lower.includes('facebook.com/') || lower.includes('fb.me/')) && !d.fb && !lower.includes('sharer')) {
+                                        d.fb = cleanHref;
+                                    } else if (lower.includes('linkedin.com/') && !d.li) {
+                                        d.li = cleanHref;
+                                    } else if ((lower.includes('twitter.com/') || lower.includes('x.com/')) && !d.tw && !lower.includes('/intent/')) {
+                                        d.tw = cleanHref;
+                                    } else if ((lower.includes('youtube.com/') || lower.includes('youtu.be/')) && !d.yt && !lower.includes('/watch')) {
+                                        d.yt = cleanHref;
+                                    } else if (lower.includes('tiktok.com/') && !d.tt) {
+                                        d.tt = cleanHref;
+                                    }
+                                });
+                            }
+
+                            // Platform Booking & Table Reservation
+                            let bUrl = '';
+                            let bPlat = '';
+                            const bookEl = root.querySelector('a[data-tooltip*="reservation" i], a[data-tooltip*="booking" i], a[data-tooltip*="table" i], a[aria-label*="table" i], a[aria-label*="reserve" i], a[aria-label*="book" i], a[href*="zoma.to"], a[href*="zomato.com"], a[href*="opentable.com"], a[href*="resy.com"], a[href*="fresha.com"], a[href*="booksy.com"], a[href*="practo.com"], a[data-item-id*="action:1"], a[data-item-id="reserve"]');
+                            if (bookEl && (bookEl.href || bookEl.getAttribute('href'))) {
+                                bUrl = unwrapUrl(bookEl.getAttribute('href') || bookEl.href);
+                                const bLower = bUrl.toLowerCase();
+                                const tLower = (bookEl.innerText || '').toLowerCase();
+                                if (bLower.includes('zoma.to') || bLower.includes('zomato') || tLower.includes('zoma')) bPlat = 'Zomato';
+                                else if (bLower.includes('swiggy') || tLower.includes('swiggy')) bPlat = 'Swiggy';
+                                else if (bLower.includes('opentable') || tLower.includes('opentable')) bPlat = 'OpenTable';
+                                else if (bLower.includes('resy') || tLower.includes('resy')) bPlat = 'Resy';
+                                else if (bLower.includes('fresha') || tLower.includes('fresha')) bPlat = 'Fresha';
+                                else if (bLower.includes('booksy') || tLower.includes('booksy')) bPlat = 'Booksy';
+                                else if (bLower.includes('practo') || tLower.includes('practo')) bPlat = 'Practo';
+                                else if (bLower.includes('eazydiner')) bPlat = 'EazyDiner';
+                                else if (bLower.includes('dineout')) bPlat = 'Dineout';
+                                else bPlat = 'Reservation';
+                            }
+                            d.booking_url = bUrl;
+                            d.platform_name = bPlat;
+
+                            // Order Online Link
+                            let oUrl = '';
+                            const orderEl = root.querySelector('a[aria-label*="Order online" i], button[aria-label*="Order online" i], a.A1zNzb, a[href*="searchviewer"][href*="order"]');
+                            if (orderEl && (orderEl.href || orderEl.getAttribute('href'))) {
+                                oUrl = unwrapUrl(orderEl.getAttribute('href') || orderEl.href);
+                            }
+                            d.order_url = oUrl;
+
+                            // Formulate Structured Notes (Price, Services, Highlights, Location info)
+                            const noteItems = [];
+                            if (d.price) {
+                                noteItems.push(`💰 ${d.price}`);
+                            }
+
+                            const allSpans = Array.from(root.querySelectorAll('div, span')).filter(el => {
+                                const t = el.innerText || '';
+                                return (t.includes('Dine-in') || t.includes('Takeaway') || t.includes('Delivery') || t.includes('Curbside pickup')) && t.length < 80;
                             });
+                            if (allSpans.length > 0) {
+                                const cleanServices = allSpans[0].innerText.replace(/[\ue000-\uf8ff\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+                                const parts = ['Dine-in', 'Takeaway', 'Delivery', 'No-contact delivery', 'Curbside pickup'].filter(s => cleanServices.includes(s));
+                                if (parts.length > 0) {
+                                    noteItems.push(`🍽️ ${parts.join(' · ')}`);
+                                }
+                            }
+
+                            const attrEls = Array.from(root.querySelectorAll('div, button, span')).filter(el => {
+                                const t = el.innerText || '';
+                                return (t.includes('women-owned') || t.includes('Identifies as') || t.includes('LGBTQ') || t.includes('Veteran')) && t.length < 60;
+                            });
+                            if (attrEls.length > 0) {
+                                const attrText = attrEls[0].innerText.replace(/[\ue000-\uf8ff\r\n]+/g, ' ').trim();
+                                if (attrText) noteItems.push(`💜 ${attrText}`);
+                            }
+
+                            if (pane) {
+                                const secAddrEl = pane.querySelector('button[data-item-id*="address"] ~ button, div.rogA2c ~ div.rogA2c');
+                                if (secAddrEl) {
+                                    const secText = secAddrEl.innerText.replace(/[\ue000-\uf8ff\r\n]+/g, ' ').trim();
+                                    if (secText && (secText.toLowerCase().includes('floor') || secText.toLowerCase().includes('mall') || secText.toLowerCase().includes('complex'))) {
+                                        noteItems.push(`📍 ${secText}`);
+                                    }
+                                }
+                            }
+
+                            d.notes = noteItems.join(' | ');
+
+                            // If primary website was a social media profile, set it accordingly
+                            if (d.website) {
+                                const wLower = d.website.toLowerCase();
+                                if (wLower.includes('instagram.com/') && !d.ig) d.ig = d.website;
+                                else if ((wLower.includes('facebook.com/') || wLower.includes('fb.me/')) && !d.fb) d.fb = d.website;
+                                else if (wLower.includes('linkedin.com/') && !d.li) d.li = d.website;
+                                else if ((wLower.includes('twitter.com/') || wLower.includes('x.com/')) && !d.tw) d.tw = d.website;
+                                else if ((wLower.includes('youtube.com/') || wLower.includes('youtu.be/')) && !d.yt) d.yt = d.website;
+                                else if (wLower.includes('tiktok.com/') && !d.tt) d.tt = d.website;
+                            }
 
                             // DOM Coordinates
                             const dirLink = document.querySelector('a[href*="destination="], a[data-value="Directions"], a[href*="maps/dir/"]');
@@ -2729,13 +3240,61 @@ async def run_scraper(
                     address = detail_data.get("address") or ""
                     phone = detail_data.get("phone") or ""
                     website = detail_data.get("website") or ""
+
+                    # Card-level fallback: If website was not in detail pane, check the clicked card's direct website button
+                    if not website and card_data.get("cardWeb"):
+                        u = card_data["cardWeb"]
+                        if "google.com/url?q=" in u:
+                            m = re.search(r'[?&]q=([^&]+)', u)
+                            if m:
+                                u = urllib.parse.unquote(m.group(1))
+                        website = u
+
+                    # Secondary deep-scroll fallback: If website is not found, scroll further down in detail pane and check authority link
+                    if not website:
+                        try:
+                            await maps_page.evaluate("""() => {
+                                const h1 = document.querySelector('h1.DUwDvf');
+                                const detailPane = h1 ? (h1.closest('div.TIHn2, div.m6QErb:not([role="feed"]), div[role="main"]') || h1.parentElement?.parentElement) : null;
+                                if (detailPane) {
+                                    detailPane.scrollTop = 900;
+                                }
+                            }""")
+                            deep_web = await maps_page.wait_for_function(
+                                """() => {
+                                    const h1 = document.querySelector('h1.DUwDvf');
+                                    const pane = h1 ? (h1.closest('div.TIHn2, div.m6QErb:not([role="feed"]), div[role="main"]') || h1.parentElement?.parentElement) : null;
+                                    const webEl = pane ? pane.querySelector('a[data-item-id="authority"], a[data-tooltip*="Open website"]') : null;
+                                    if (webEl && webEl.href) {
+                                        let u = webEl.href;
+                                        if (u.includes('google.com/url?q=')) {
+                                            const match = u.match(/[?&]q=([^&]+)/);
+                                            if (match) u = decodeURIComponent(match[1]);
+                                        }
+                                        return u;
+                                    }
+                                    return false;
+                                }""",
+                                timeout=500
+                            )
+                            if deep_web:
+                                website = await deep_web.json_value()
+                        except Exception:
+                            pass
                     hours = detail_data.get("hours") or ""
                     price = detail_data.get("price") or ""
                     plus_code = detail_data.get("plus_code") or ""
+                    maps_email = clean_email_string(detail_data.get("email") or "")
                     maps_ig = detail_data.get("ig") or ""
                     maps_fb = detail_data.get("fb") or ""
                     maps_li = detail_data.get("li") or ""
                     maps_tw = detail_data.get("tw") or "" 
+                    maps_yt = detail_data.get("yt") or ""
+                    maps_tt = detail_data.get("tt") or ""
+                    maps_b_url = detail_data.get("booking_url") or ""
+                    maps_b_plat = detail_data.get("platform_name") or ""
+                    maps_o_url = detail_data.get("order_url") or ""
+                    maps_notes = detail_data.get("notes") or (f"💰 {price}" if price else "")
 
                     # FALLBACK: If right-side detail pane had missing address or phone, extract from small feed card preview_text
                     if preview_text:
@@ -2757,9 +3316,11 @@ async def run_scraper(
                     if website:
                         w_low = website.lower()
                         if "instagram.com/" in w_low and not maps_ig: maps_ig = website
-                        elif "facebook.com/" in w_low and not maps_fb: maps_fb = website
+                        elif ("facebook.com/" in w_low or "fb.me/" in w_low) and not maps_fb: maps_fb = website
                         elif "linkedin.com/" in w_low and not maps_li: maps_li = website
                         elif ("twitter.com/" in w_low or "x.com/" in w_low) and not maps_tw: maps_tw = website
+                        elif ("youtube.com/" in w_low or "youtu.be/" in w_low) and not maps_yt: maps_yt = website
+                        elif "tiktok.com/" in w_low and not maps_tt: maps_tt = website
 
                     # Extract Exact GPS Coordinates (Lat, Lon) of the Place
                     lat_val = detail_data.get("lat")
@@ -2796,11 +3357,11 @@ async def run_scraper(
                         if (norm_name, norm_addr) in seen_signatures:
                             emit_event("log", f"🔄 [Area Dedup] Skipped '{place_title}' (already harvested in this area).")
                             continue
-                        if phone_digits and len(phone_digits) >= 7 and phone_digits in seen_phones:
+                        if phone_digits and len(phone_digits) >= 8 and phone_digits in seen_phones:
                             emit_event("log", f"🔄 [Area Dedup] Skipped '{place_title}' (phone matches existing shop).")
                             continue
-                        if dom and dom in seen_domains:
-                            emit_event("log", f"🔄 [Area Dedup] Skipped '{place_title}' (domain '{dom}' matches existing shop).")
+                        if dom and dom in seen_domains and norm_name in seen_names:
+                            emit_event("log", f"🔄 [Area Dedup] Skipped '{place_title}' (matches existing shop name & domain).")
                             continue
 
                     if skip_existing_db:
@@ -2809,29 +3370,40 @@ async def run_scraper(
                             continue
 
                     seen_signatures.add((norm_name, norm_addr))
-                    if phone_digits and len(phone_digits) >= 7:
+                    seen_names.add(norm_name)
+                    if phone_digits and len(phone_digits) >= 8:
                         seen_phones.add(phone_digits)
                     if dom:
                         seen_domains.add(dom)
+
+                    is_social_site = bool(website and any(s in website.lower() for s in [
+                        "instagram.com", "facebook.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "tiktok.com"
+                    ]))
 
                     place_info = {
                         "index": idx,
                         "name": place_title,
                         "category": category or "Business",
                         "address": address or "N/A",
-                        "phone": phone or "N/A",
+                        "phone": clean_phone_number(phone),
                         "hours": hours or "N/A",
                         "price": price or "N/A",
                         "plus_code": plus_code or "N/A",
-                        "emails": [],
-                        "email": "N/A",
+                        "emails": [maps_email] if maps_email else [],
+                        "email": maps_email or "N/A",
                         "instagram": maps_ig,
                         "facebook": maps_fb,
                         "linkedin": maps_li,
                         "twitter": maps_tw,
+                        "youtube": maps_yt,
+                        "tiktok": maps_tt,
+                        "booking_url": maps_b_url,
+                        "platform_name": maps_b_plat,
+                        "order_url": maps_o_url,
+                        "notes": maps_notes,
                         "screenshot": "",
-                        "bot_protection": "Inspecting..." if (enable_website and extract_emails and website) else "N/A",
-                        "cookie_status": "Inspecting..." if (enable_website and extract_emails and website) else "None",
+                        "bot_protection": "Social Profile" if is_social_site else ("Inspecting..." if (enable_website and extract_emails and website and not is_social_site) else "N/A"),
+                        "cookie_status": "None" if is_social_site else ("Inspecting..." if (enable_website and extract_emails and website and not is_social_site) else "None"),
                         "rating": rating or "N/A",
                         "reviews": reviews or "0",
                         "website": website or "N/A",
@@ -2847,7 +3419,23 @@ async def run_scraper(
 
                     scraped_places.append(place_info)
                     emit_event("place_scraped", place_info)
-                    emit_event("log", f"✅ Added: {place_title} | 🏷️ {category or 'Business'} | 📞 {phone or 'N/A'}")
+                    soc_tags = []
+                    if maps_email: soc_tags.append(f"✉️ {maps_email}")
+                    if maps_ig: soc_tags.append(f"📸 IG: {maps_ig}")
+                    if maps_fb: soc_tags.append(f"👥 FB: {maps_fb}")
+                    if maps_li: soc_tags.append(f"💼 LI: {maps_li}")
+                    if maps_tw: soc_tags.append(f"🐦 X: {maps_tw}")
+                    if maps_yt: soc_tags.append(f"▶️ YT: {maps_yt}")
+                    if maps_tt: soc_tags.append(f"🎵 TT: {maps_tt}")
+                    soc_str = (" | " + " ".join(soc_tags)) if soc_tags else ""
+
+                    extra_tags = []
+                    if maps_b_plat or maps_b_url: extra_tags.append(f"📅 {maps_b_plat or 'Booking'}")
+                    if maps_o_url: extra_tags.append("🛍️ Order Online")
+                    if maps_notes: extra_tags.append(f"📝 {maps_notes}")
+                    extra_str = (" | " + " ".join(extra_tags)) if extra_tags else ""
+
+                    emit_event("log", f"✅ [Agent 1: Maps] Saved #{idx}: '{place_title}' | 🏷️ {category or 'Business'} | 📞 {place_info['phone']} | 🌐 {website or 'N/A'}{soc_str}{extra_str} | ⭐ {rating or 'N/A'}")
                     dedup_cache["leads_names"].add(place_title.lower().strip())
                     if address and address != 'N/A':
                         dedup_cache["leads_name_addr"].add((place_title.lower().strip(), address.lower().strip()))
@@ -2864,6 +3452,7 @@ async def run_scraper(
                     # Tab 1 DOES NOT STOP! It immediately moves to the next place!
                     # -----------------------------------------------------------------
                     if enable_website and website and website.startswith("http") and website_queue:
+                        emit_event("log", f"➡️ [Agent 1: Maps] Dispatched #{idx} '{place_title}' to [Agent 2: Website] for contact discovery")
                         website_queue.put_nowait({
                             "index": idx,
                             "name": place_title,
@@ -2871,6 +3460,7 @@ async def run_scraper(
                             "website": website,
                         })
                     elif enable_linkedin and linkedin_queue:
+                        emit_event("log", f"➡️ [Agent 1: Maps] Dispatched #{idx} '{place_title}' to [Agent 3: LinkedIn] for org intelligence")
                         linkedin_queue.put_nowait({
                             "index": idx,
                             "name": place_title,
@@ -3050,6 +3640,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-dedup-area", dest="dedup_area", action="store_false")
     parser.add_argument("--skip-existing-db", action="store_true", default=False)
     parser.add_argument("--standalone-companies", type=str, default=None)
+    parser.add_argument("--standalone-websites", type=str, default=None)
     parser.add_argument("--extension-active", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -3073,5 +3664,6 @@ if __name__ == "__main__":
         dedup_area=args.dedup_area,
         skip_existing_db=args.skip_existing_db,
         standalone_companies=args.standalone_companies,
+        standalone_websites=args.standalone_websites,
         extension_active=args.extension_active,
     ))

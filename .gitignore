@@ -30,3 +30,9 @@ linkedin_cookies.json
 *.swo
 .DS_Store
 Thumbs.db
+
+# Scratch diagnostic files & local proof images
+scratch/
+test_agents_individually.py
+*_proof.png
+*_verified.png

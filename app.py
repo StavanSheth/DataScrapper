@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +46,7 @@ from database import (
     cleanup_orphan_screenshots,
     update_lead_linkedin_data,
     save_platform_listing,
+    get_lead_id_by_name,
 )
 
 # Force UTF-8 encoding on Windows
@@ -80,9 +82,18 @@ os.makedirs(screenshots_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
 
+import datetime
+
 # Global state
 active_process: Optional[asyncio.subprocess.Process] = None
-recent_logs: deque = deque(maxlen=300)
+recent_logs: deque = deque(maxlen=800)
+recent_agent_logs: Dict[str, deque] = {
+    "maps": deque(maxlen=200),
+    "website": deque(maxlen=200),
+    "linkedin": deque(maxlen=200),
+    "platform": deque(maxlen=200),
+    "system": deque(maxlen=200)
+}
 current_status: str = "Ready"
 is_scraping: bool = False
 active_websockets: List[WebSocket] = []
@@ -91,6 +102,33 @@ last_live_frame_website: Optional[Dict[str, Any]] = None
 last_live_frame_linkedin: Optional[Dict[str, Any]] = None
 last_live_frame_platform: Optional[Dict[str, Any]] = None
 extension_ws: Optional[WebSocket] = None
+
+def kill_all_scraper_processes():
+    global active_process
+    pids_to_kill = set()
+    if active_process and active_process.returncode is None:
+        pids_to_kill.add(active_process.pid)
+    active_process = None
+
+    pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.pid")
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, "r") as f:
+                saved_pid = int(f.read().strip())
+                if saved_pid > 0:
+                    pids_to_kill.add(saved_pid)
+            os.remove(pid_file)
+        except Exception:
+            pass
+
+    for pid in pids_to_kill:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+            else:
+                os.kill(pid, 9)
+        except Exception:
+            pass
 
 proximity_metrics: Dict[str, Any] = {
     "location": "",
@@ -103,16 +141,49 @@ proximity_metrics: Dict[str, Any] = {
     "platforms": {}
 }
 
-def add_log(message: str):
-    recent_logs.append({"time": "", "message": message})
+_ws_broadcast_lock = asyncio.Lock()
 
 async def broadcast(event: Dict[str, Any]):
-    for ws in list(active_websockets):
-        try:
-            await ws.send_json(event)
-        except Exception:
-            if ws in active_websockets:
-                active_websockets.remove(ws)
+    async with _ws_broadcast_lock:
+        for ws in list(active_websockets):
+            try:
+                await ws.send_json(event)
+            except Exception:
+                if ws in active_websockets:
+                    active_websockets.remove(ws)
+
+def add_log(message: str, agent: Optional[str] = None):
+    t_str = datetime.datetime.now().strftime("%H:%M:%S")
+    clean_msg = str(message).strip()
+    if not clean_msg:
+        return
+
+    # Auto-classify agent from content if not explicitly supplied
+    if not agent or agent == "system":
+        low = clean_msg.lower()
+        if any(k in low for k in ["[maps]", "[agent 1:", "google maps", "panning", "radius filter", "area dedup", "db dedup", "maps feed", "pins"]):
+            agent = "maps"
+        elif any(k in low for k in ["[website]", "[agent 2:", "shop website", "cloudflare", "turnstile", "anti-bot", "email extraction", "domain", "socials"]):
+            agent = "website"
+        elif any(k in low for k in ["[linkedin]", "[agent 3:", "[org intelligence]", "linkedin", "employee", "personnel", "org hierarchy"]):
+            agent = "linkedin"
+        elif any(k in low for k in ["[platform", "[agent 4:", "[tab 4", "fresha", "airbnb", "yelp", "tripadvisor", "directory scout", "proximity census"]):
+            agent = "platform"
+        else:
+            agent = "system"
+
+    entry = {"time": t_str, "message": clean_msg, "agent": agent}
+    recent_logs.append(entry)
+    if agent in recent_agent_logs:
+        recent_agent_logs[agent].append(entry)
+
+    logger.info(f"[{agent.upper()}] {clean_msg}")
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(broadcast({"type": "log", "agent": agent, "data": clean_msg, "time": t_str}))
+    except Exception:
+        pass
 
 tables_split_task: Optional[asyncio.Task] = None
 tables_split_pending: bool = False
@@ -222,6 +293,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "proximity_metrics": proximity_metrics,
             "places": all_leads,
             "logs": list(recent_logs),
+            "agent_logs": {k: list(v) for k, v in recent_agent_logs.items()},
             "frame_maps": last_live_frame_maps,
             "frame_website": last_live_frame_website,
             "frame_linkedin": last_live_frame_linkedin,
@@ -253,7 +325,31 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     etype = event.get("type")
                     edata = event.get("data")
                     if etype == "place_scraped":
-                        save_lead(edata)
+                        db_id = save_lead(edata)
+                        if db_id and not edata.get("id"):
+                            edata["id"] = db_id
+                        p_name = edata.get("name", "Unknown")
+                        p_cat = edata.get("category", "Business")
+                        p_phone = edata.get("phone", "N/A")
+                        p_web = edata.get("website", "N/A")
+                        p_email = edata.get("email") or (", ".join(edata.get("emails", [])) if edata.get("emails") else "") or "N/A"
+                        socs = []
+                        if edata.get("instagram"): socs.append(f"IG: {edata['instagram']}")
+                        if edata.get("facebook"): socs.append(f"FB: {edata['facebook']}")
+                        if edata.get("linkedin"): socs.append(f"LI: {edata['linkedin']}")
+                        if edata.get("twitter"): socs.append(f"X: {edata['twitter']}")
+                        if edata.get("youtube"): socs.append(f"YT: {edata['youtube']}")
+                        if edata.get("tiktok"): socs.append(f"TT: {edata['tiktok']}")
+                        soc_str = f" | 🔗 {', '.join(socs)}" if socs else ""
+                        extra_parts = []
+                        if edata.get("platform_name") or edata.get("booking_url"):
+                            extra_parts.append(f"📅 {edata.get('platform_name') or 'Booking'}: {edata.get('booking_url')}")
+                        if edata.get("order_url"):
+                            extra_parts.append("🛍️ Order Online")
+                        if edata.get("notes"):
+                            extra_parts.append(f"📝 {edata.get('notes')}")
+                        extra_str = f" | {', '.join(extra_parts)}" if extra_parts else ""
+                        logger.info(f"💾 [LIVE HARVEST: MAPS -> DB #{edata.get('id', db_id)}] '{p_name}' ({p_cat}) | 📞 {p_phone} | ✉️ {p_email} | 🌐 {p_web}{soc_str}{extra_str} | ⭐ {edata.get('rating', 'N/A')}")
                     elif etype == "website_navigated":
                         url = edata.get("url") if isinstance(edata, dict) else None
                         if url:
@@ -268,11 +364,29 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                             facebook=edata.get("facebook", ""),
                             linkedin=edata.get("linkedin", ""),
                             twitter=edata.get("twitter", ""),
+                            youtube=edata.get("youtube", ""),
+                            tiktok=edata.get("tiktok", ""),
                             screenshot=edata.get("screenshot", ""),
                             bot_protection=edata.get("bot_protection", ""),
                             cookie_status=edata.get("cookie_status", ""),
                             website_status=edata.get("website_status", "found")
                         )
+                        if not edata.get("id"):
+                            found_id = get_lead_id_by_name(edata.get("name", ""), edata.get("address", ""), edata.get("website", ""))
+                            if found_id:
+                                edata["id"] = found_id
+                        u_name = edata.get("name", "Shop")
+                        u_email = edata.get("email") or (", ".join(edata.get("emails", [])) if edata.get("emails") else "") or "N/A"
+                        u_web = edata.get("website", "N/A")
+                        socs = []
+                        if edata.get("instagram"): socs.append(f"IG: {edata['instagram']}")
+                        if edata.get("facebook"): socs.append(f"FB: {edata['facebook']}")
+                        if edata.get("linkedin"): socs.append(f"LI: {edata['linkedin']}")
+                        if edata.get("twitter"): socs.append(f"X: {edata['twitter']}")
+                        if edata.get("youtube"): socs.append(f"YT: {edata['youtube']}")
+                        if edata.get("tiktok"): socs.append(f"TT: {edata['tiktok']}")
+                        soc_str = f" | 🔗 {', '.join(socs)}" if socs else ""
+                        logger.info(f"🌐 [LIVE HARVEST: WEBSITE -> DB #{edata.get('id', '')}] '{u_name}' | ✉️ {u_email} | 🌐 {u_web}{soc_str} | 🛡️ {edata.get('bot_protection', 'None')}")
                     elif etype == "org_updated":
                         update_lead_linkedin_data(
                             name=edata.get("company", ""),
@@ -281,10 +395,38 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                             linkedin_status="scraped",
                             org_scraped=1
                         )
+                        found_id = get_lead_id_by_name(edata.get("company", ""))
+                        if found_id:
+                            edata["id"] = found_id
+                            edata["lead_id"] = found_id
+                        logger.info(f"🌳 [LIVE HARVEST: LINKEDIN -> DB #{edata.get('id', '')}] '{edata.get('company')}' | 👥 Employees: {edata.get('employee_count', 0)} | 🔗 {edata.get('linkedin_url', '')}")
                         add_log(f"🌳 [Org Intelligence] Mapped {edata.get('employee_count', 0)} employees for {edata.get('company', '')}")
                     elif etype == "platform_listing_found":
                         p_name = edata.get("platform", "Platform")
                         c_name = edata.get("company_name", "") or edata.get("name", "")
+                        if not edata.get("id"):
+                            cand_plat = {
+                                "platform": p_name,
+                                "listing_id": edata.get("listing_id", ""),
+                                "title": c_name,
+                                "category": edata.get("category", "Directory"),
+                                "url": edata.get("listing_url", ""),
+                                "booking_url": edata.get("booking_url", ""),
+                                "rating": edata.get("rating", 0.0),
+                                "reviews_count": edata.get("review_count", 0),
+                                "price_info": edata.get("price_range", ""),
+                                "address": edata.get("address", ""),
+                                "screenshot": edata.get("screenshot", ""),
+                                "verified": 1 if edata.get("verified") else 0
+                            }
+                            plat_id = save_platform_listing(cand_plat)
+                            if plat_id:
+                                edata["id"] = plat_id
+                        m_id = get_lead_id_by_name(c_name, edata.get("address", ""))
+                        if m_id:
+                            edata["lead_id"] = m_id
+                            edata["matched_lead_id"] = m_id
+                        logger.info(f"🟣 [LIVE HARVEST: {p_name.upper()} -> DB #{edata.get('id', '')}] '{c_name}' | ⭐ {edata.get('rating', '')} ★ | 🔗 {edata.get('listing_url', '')} | 📅 Booking: {edata.get('booking_url', 'N/A')}")
                         add_log(f"🟣 [Platform Directory] Verified {p_name} listing for {c_name}: {edata.get('rating', '')} ★")
                     elif etype == "proximity_total":
                         p = edata.get("platform", "Google Maps")
@@ -359,16 +501,18 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                     elif etype == "status":
                         current_status = str(edata)
                     elif etype == "log":
-                        add_log(str(edata))
+                        agent = event.get("agent")
+                        add_log(str(edata), agent=agent)
+                        continue
                     elif etype == "live_frame":
-                        tab = edata.get("tab")
+                        tab = (edata.get("tab") or edata.get("stream_type") or "").lower()
                         if tab == "platform" or edata.get("is_platform"):
                             last_live_frame_platform = edata
                         elif tab == "linkedin" or edata.get("is_linkedin"):
                             last_live_frame_linkedin = edata
                         elif tab == "website" or edata.get("is_website"):
                             last_live_frame_website = edata
-                        else:
+                        elif tab == "maps" or edata.get("is_maps"):
                             last_live_frame_maps = edata
                     await broadcast(event)
                     if etype in ["place_scraped", "place_updated", "org_updated", "platform_listing_found"]:
@@ -380,16 +524,21 @@ async def read_process_output(proc: asyncio.subprocess.Process):
     except Exception as e:
         logger.error(f"Error reading process stdout: {e}")
     finally:
-        await proc.wait()
+        ret = await proc.wait()
+        if ret != 0 and current_status != "Stopped":
+            add_log(f"⚠️ Scraper process exited with return code {ret}")
         is_scraping = False
-        current_status = "Finished"
         active_process = None
         if tables_split_task and not tables_split_task.done():
             tables_split_task.cancel()
         tables_split_fresh = get_tables_split_data()
         await broadcast({"type": "tables_split", "data": tables_split_fresh})
-        add_log("🏁 Scraping session finished. All places and org hierarchies saved to database.")
-        await broadcast({"type": "status", "data": "Finished"})
+        if current_status != "Stopped":
+            current_status = "Finished"
+            add_log("🏁 Scraping session finished. All places and org hierarchies saved to database.")
+            await broadcast({"type": "status", "data": "Finished"})
+        else:
+            await broadcast({"type": "status", "data": "Stopped"})
         await broadcast({"type": "job_finished", "data": {"total": get_lead_count()}})
 
 
@@ -414,6 +563,7 @@ async def start_scraping(payload: Dict[str, Any]):
     global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
+    kill_all_scraper_processes()
 
     query = payload.get("query", "").strip()
     scrape_all = bool(payload.get("scrape_all", False))
@@ -459,6 +609,9 @@ async def start_scraping(payload: Dict[str, Any]):
     proximity_metrics["percent"] = 0
 
     recent_logs.clear()
+    for ag_key in recent_agent_logs:
+        recent_agent_logs[ag_key].clear()
+    await broadcast({"type": "logs_cleared"})
     last_live_frame_maps = None
     last_live_frame_website = None
     last_live_frame_linkedin = None
@@ -476,6 +629,7 @@ async def start_scraping(payload: Dict[str, Any]):
     sub_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     cmd = [
         sys.executable,
+        "-u",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_scraper.py"),
         "--query", query,
         "--max", str(max_results),
@@ -558,24 +712,21 @@ async def start_scraping(payload: Dict[str, Any]):
 
     li_target_url = "https://www.linkedin.com/feed/" if enable_linkedin else None
 
-    # Dispatch to Extension to open live tabs directly in user's active Chrome window
-    await send_to_extension("START_HARVESTER", {
-        "maps_url": maps_target_url,
-        "linkedin_url": li_target_url,
-        "platform_url": plat_target_url,
-        "enable_maps": enable_maps,
-        "enable_linkedin": enable_linkedin,
-        "enable_platform": enable_platform
-    })
+    # Note: Tabs are driven directly via Playwright over CDP to avoid duplicate tab spawning
 
     try:
         active_process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             env=sub_env,
             limit=10 * 1024 * 1024,
         )
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.pid"), "w") as f:
+                f.write(str(active_process.pid))
+        except Exception:
+            pass
         asyncio.create_task(read_process_output(active_process))
         return {"status": "started", "query": query, "scrape_all": scrape_all}
     except Exception as e:
@@ -590,6 +741,7 @@ async def start_companies_scraping(payload: Dict[str, Any]):
     global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
+    kill_all_scraper_processes()
 
     companies = payload.get("companies", "").strip()
     if not companies:
@@ -598,6 +750,9 @@ async def start_companies_scraping(payload: Dict[str, Any]):
     visible_browser = bool(payload.get("visible_browser", True))
 
     recent_logs.clear()
+    for ag_key in recent_agent_logs:
+        recent_agent_logs[ag_key].clear()
+    await broadcast({"type": "logs_cleared"})
     last_live_frame_maps = None
     last_live_frame_website = None
     last_live_frame_linkedin = None
@@ -608,6 +763,7 @@ async def start_companies_scraping(payload: Dict[str, Any]):
     sub_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     cmd = [
         sys.executable,
+        "-u",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_scraper.py"),
         "--standalone-companies", companies,
     ]
@@ -618,10 +774,15 @@ async def start_companies_scraping(payload: Dict[str, Any]):
         active_process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             env=sub_env,
             limit=10 * 1024 * 1024,
         )
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.pid"), "w") as f:
+                f.write(str(active_process.pid))
+        except Exception:
+            pass
         asyncio.create_task(read_process_output(active_process))
         return {"status": "started", "mode": "standalone_companies", "companies": companies}
     except Exception as e:
@@ -634,19 +795,13 @@ async def start_companies_scraping(payload: Dict[str, Any]):
 async def stop_scraping():
     global active_process, is_scraping, current_status
     await send_to_extension("CLOSE_SHOP_TAB")
-    if active_process and active_process.returncode is None:
-        try:
-            active_process.terminate()
-        except Exception:
-            pass
-        add_log("⏹️ Scraping stopped by user.")
-        await broadcast({"type": "log", "data": "⏹️ Scraping stopped by user."})
-        current_status = "Stopped"
-        await broadcast({"type": "status", "data": "Stopped"})
-        is_scraping = False
-        return {"status": "stopping"}
     is_scraping = False
-    return {"status": "idle"}
+    current_status = "Stopped"
+    kill_all_scraper_processes()
+    add_log("⏹️ Scraping stopped by user.")
+    await broadcast({"type": "log", "data": "⏹️ Scraping stopped by user."})
+    await broadcast({"type": "status", "data": "Stopped"})
+    return {"status": "stopped"}
 
 @app.get("/api/status")
 async def get_status():
@@ -766,18 +921,89 @@ def check_cdp_port_live() -> bool:
     except Exception:
         return False
 
+_primary_cdp_cache = {"val": True, "ts": 0.0}
+
+def is_primary_profile_cdp() -> bool:
+    global _primary_cdp_cache
+    now = time.time()
+    if now - _primary_cdp_cache["ts"] < 10.0:
+        return _primary_cdp_cache["val"]
+    try:
+        out = subprocess.run(
+            ['powershell', '-NoProfile', '-Command', 
+             '(Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\'" | Where-Object { $_.CommandLine -like "*remote-debugging-port=9222*" } | Select-Object -ExpandProperty CommandLine) -join " "'],
+            capture_output=True, text=True, timeout=2.0
+        ).stdout
+        res = "ChromeAutomation" not in out
+        _primary_cdp_cache = {"val": res, "ts": now}
+        return res
+    except Exception:
+        return _primary_cdp_cache["val"]
+
 @app.get("/api/chrome/status")
 @app.get("/api/chrome-status")
 async def get_chrome_status():
     cdp_active = await asyncio.to_thread(check_cdp_port_live)
     ext_active = (extension_ws is not None)
+    is_primary = await asyncio.to_thread(is_primary_profile_cdp) if cdp_active else False
     return {
         "active": cdp_active,
         "cdp_active": cdp_active,
+        "is_primary": is_primary,
         "extension_active": ext_active,
-        "browser": "Chrome (Port 9222 Active)" if cdp_active else ("Chrome Extension Connected (Attach Port 9222)" if ext_active else None),
-        "message": "Connected to active Chrome (Port 9222)" if cdp_active else "Chrome Port 9222 not connected"
+        "browser": "Chrome (Port 9222 Active)" if (cdp_active and is_primary) else ("Secondary Chrome (C:\\ChromeAutomation)" if cdp_active else ("Chrome Extension Connected" if ext_active else None)),
+        "message": "Connected to your primary Chrome (Port 9222)" if (cdp_active and is_primary) else ("Port 9222 on secondary Chrome window" if cdp_active else "Chrome Port 9222 not connected")
     }
+
+@app.post("/api/chrome/restart-with-debug")
+async def restart_chrome_with_debug():
+    chrome_exe = get_chrome_executable_path()
+    if not chrome_exe:
+        raise HTTPException(status_code=404, detail="Google Chrome executable not found at standard path.")
+
+    user_data_path = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+    pref_path = os.path.join(user_data_path, "Default", "Preferences")
+    if os.path.exists(pref_path):
+        try:
+            with open(pref_path, "r", encoding="utf-8", errors="ignore") as f:
+                pref_data = json.load(f)
+            if "profile" in pref_data:
+                pref_data["profile"]["exit_type"] = "Normal"
+                pref_data["profile"]["exited_cleanly"] = True
+            with open(pref_path, "w", encoding="utf-8") as f:
+                json.dump(pref_data, f)
+        except Exception:
+            pass
+
+    add_log("🔄 Restarting Google Chrome with Port 9222 attached to your active profile...")
+    await broadcast({"type": "log", "data": "🔄 Restarting Google Chrome with Port 9222 attached to your active profile..."})
+
+    # Kill Chrome processes to free the profile lock and port 9222
+    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+    await asyncio.sleep(1.0)
+
+    launch_args = [
+        chrome_exe,
+        "--remote-debugging-port=9222",
+        f"--user-data-dir={user_data_path}",
+        "--remote-allow-origins=*",
+        "--restore-last-session",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--start-maximized",
+        "http://localhost:8080"
+    ]
+    subprocess.Popen(launch_args)
+
+    for _ in range(25):
+        await asyncio.sleep(0.3)
+        if await asyncio.to_thread(check_cdp_port_live):
+            return {
+                "status": "success",
+                "message": "Chrome successfully restarted on Port 9222 with all your tabs restored!"
+            }
+
+    return {"status": "started", "message": "Chrome launched on Port 9222."}
 
 @app.post("/api/chrome/launch")
 async def launch_chrome_debug():
@@ -844,6 +1070,86 @@ async def launch_chrome_debug():
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to launch Chrome: {e}")
+
+def force_foreground_chrome_window():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        found_hwnds = []
+        def enum_cb(hwnd, extra):
+            if user32.IsWindowVisible(hwnd):
+                cls_buff = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, cls_buff, 256)
+                if "Chrome_WidgetWin" in cls_buff.value:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                        val = buff.value
+                        if "Visual Studio Code" not in val and "Antigravity" not in val:
+                            found_hwnds.append(hwnd)
+            return True
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+        for hwnd in found_hwnds:
+            try:
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+@app.post("/api/activate-tab")
+async def activate_chrome_tab_endpoint(payload: Dict[str, Any]):
+    target_tag = (payload.get("tab") or "").lower().strip()
+    if not target_tag:
+        return {"status": "error", "message": "Tab name required"}
+
+    # 1. Attempt direct CDP activation via Port 9222
+    try:
+        req = urllib.request.Request("http://localhost:9222/json/list")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            tabs = json.loads(resp.read().decode())
+
+        target_id = None
+        for t in tabs:
+            u = t.get("url", "").lower()
+            title = t.get("title", "").lower()
+            if target_tag == "maps" and ("maps.google" in u or "/maps" in u or "google maps" in title):
+                target_id = t.get("id")
+                break
+            elif target_tag == "linkedin" and ("linkedin.com" in u or "linkedin" in title):
+                target_id = t.get("id")
+                break
+            elif target_tag == "platform" and any(p in u for p in ["fresha.com", "airbnb.com", "yelp.com", "tripadvisor.com", "treatwell", "booking.com"]):
+                target_id = t.get("id")
+                break
+            elif target_tag == "website":
+                if u.startswith("http") and not any(x in u for x in ["localhost:8080", "maps.google", "linkedin.com", "fresha.com", "airbnb.com", "yelp.com", "tripadvisor.com"]):
+                    target_id = t.get("id")
+                    break
+
+        if target_id:
+            act_req = urllib.request.Request(f"http://localhost:9222/json/activate/{target_id}")
+            with urllib.request.urlopen(act_req, timeout=1.0) as act_resp:
+                pass
+            force_foreground_chrome_window()
+            return {"status": "success", "tab": target_tag, "target_id": target_id}
+    except Exception as e:
+        logger.warning(f"CDP activate notice: {e}")
+
+    # 2. Fallback to extension if active
+    if extension_ws:
+        await send_to_extension("ACTIVATE_TAB", {"tab": target_tag})
+        force_foreground_chrome_window()
+        return {"status": "success", "via": "extension", "tab": target_tag}
+
+    return {"status": "not_found", "tab": target_tag}
 
 @app.get("/api/platform-listings")
 async def get_all_platform_directory_listings(platform: Optional[str] = None, lead_id: Optional[int] = None):
@@ -1034,8 +1340,8 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
     fieldnames = [
         "table_partition", "id", "name_or_title", "status_tag", "platform_source", "category",
         "phone", "email", "address", "rating", "reviews_count", "price_info",
-        "website_url", "booking_url", "listing_url", "bot_security", "cookie_status",
-        "employee_count", "instagram", "facebook", "linkedin", "twitter",
+        "website_url", "booking_url", "order_url", "listing_url", "notes", "bot_security", "cookie_status",
+        "employee_count", "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok",
         "screenshot_url", "screenshot_file_path", "created_at"
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -1072,7 +1378,9 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "price_info": lead.get("price", ""),
             "website_url": lead.get("website", ""),
             "booking_url": lead.get("booking_url", ""),
+            "order_url": lead.get("order_url", ""),
             "listing_url": lead.get("maps_url", ""),
+            "notes": lead.get("notes", ""),
             "bot_security": lead.get("bot_protection", ""),
             "cookie_status": lead.get("cookie_status", ""),
             "employee_count": lead.get("employee_count", ""),
@@ -1080,6 +1388,8 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "facebook": lead.get("facebook", ""),
             "linkedin": lead.get("linkedin", ""),
             "twitter": lead.get("twitter", ""),
+            "youtube": lead.get("youtube", ""),
+            "tiktok": lead.get("tiktok", ""),
             "screenshot_url": screen_url,
             "screenshot_file_path": screen_path,
             "created_at": lead.get("created_at", "")
@@ -1110,7 +1420,9 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "price_info": item.get("price_info", ""),
             "website_url": item.get("url", ""),
             "booking_url": item.get("booking_url", ""),
+            "order_url": "",
             "listing_url": item.get("url", ""),
+            "notes": item.get("notes", "") or item.get("price_info", ""),
             "bot_security": "N/A",
             "cookie_status": "N/A",
             "employee_count": "",
@@ -1118,6 +1430,8 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "facebook": "",
             "linkedin": "",
             "twitter": "",
+            "youtube": "",
+            "tiktok": "",
             "screenshot_url": screen_url,
             "screenshot_file_path": screen_path,
             "created_at": item.get("created_at", "")
