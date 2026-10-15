@@ -171,6 +171,7 @@ def init_db():
                 linkedin_url TEXT DEFAULT '',
                 order_url TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
+                whatsapp TEXT DEFAULT '',
                 UNIQUE(name, address)
             )
         """)
@@ -211,6 +212,8 @@ def init_db():
             ("tiktok", "TEXT DEFAULT ''"),
             ("order_url", "TEXT DEFAULT ''"),
             ("notes", "TEXT DEFAULT ''"),
+            ("website_scraped_at", "TEXT DEFAULT ''"),
+            ("whatsapp", "TEXT DEFAULT ''"),
         ]
         for col_name, col_def in new_platform_cols:
             try:
@@ -591,6 +594,7 @@ def save_lead(lead: Dict[str, Any]) -> bool:
     platform_name = str(lead.get("platform_name", "") or "").strip()
     order_url = str(lead.get("order_url", "") or "").strip()
     notes = str(lead.get("notes", "") or "").strip()
+    whatsapp = str(lead.get("whatsapp", "") or "").strip()
 
     with get_connection() as conn:
         try:
@@ -629,7 +633,8 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                         booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
                         platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
                         order_url = CASE WHEN ? != '' THEN ? ELSE order_url END,
-                        notes = CASE WHEN ? != '' THEN ? ELSE notes END
+                        notes = CASE WHEN ? != '' THEN ? ELSE notes END,
+                        whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END
                     WHERE id = ?
                 """, (
                     category, category, category,
@@ -658,6 +663,7 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                     platform_name, platform_name,
                     order_url, order_url,
                     notes, notes,
+                    whatsapp, whatsapp,
                     matching_id
                 ))
                 conn.commit()
@@ -666,9 +672,9 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                 # Insert brand-new lead
                 w_status = "pending" if (website and website.startswith("http")) else "no_website"
                 cursor = conn.execute("""
-                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name, order_url, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, w_status, booking_url, platform_name, order_url, notes))
+                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name, order_url, notes, whatsapp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, w_status, booking_url, platform_name, order_url, notes, whatsapp))
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
@@ -1011,14 +1017,18 @@ def update_lead_website_data(
     screenshot: str = "",
     bot_protection: str = "",
     cookie_status: str = "",
-    website_status: str = "found"
+    website_status: str = "found",
+    booking_url: str = "",
+    platform_name: str = "",
+    website_scraped_at: str = "",
+    whatsapp: str = ""
 ) -> bool:
     """
     Updates website-extracted metadata for an existing lead using robust multi-tier matching:
     1. Match by website URL if known
     2. Fallback to name + flexible address match
     3. Fallback to name match
-    Merges emails and social media without duplicates or data loss.
+    Merges emails, social media, and booking platforms without duplicates or data loss.
     """
     clean_n = str(name or "").strip()
     clean_addr = str(address or "").strip()
@@ -1032,6 +1042,10 @@ def update_lead_website_data(
     bot_protection = normalize_bot_protection_status(bot_protection, email, clean_web)
     if cookie_status == "Inspecting...":
         cookie_status = "None"
+
+    if not website_scraped_at and website_status not in ["pending", ""]:
+        import datetime
+        website_scraped_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_connection() as conn:
         try:
@@ -1050,7 +1064,7 @@ def update_lead_website_data(
             if not target_id:
                 return False
 
-            existing = conn.execute("SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok FROM leads WHERE id = ?", (target_id,)).fetchone()
+            existing = conn.execute("SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok, booking_url, platform_name, website_scraped_at FROM leads WHERE id = ?", (target_id,)).fetchone()
             if not existing:
                 return False
 
@@ -1068,6 +1082,10 @@ def update_lead_website_data(
             final_yt = youtube or existing["youtube"] or ""
             final_tt = tiktok or existing["tiktok"] or ""
 
+            # Platform & booking merging
+            final_booking = booking_url or existing["booking_url"] or ""
+            final_platform = platform_name or existing["platform_name"] or ""
+
             conn.execute("""
                 UPDATE leads SET
                     email = ?,
@@ -1080,7 +1098,11 @@ def update_lead_website_data(
                     screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                     bot_protection = CASE WHEN ? != '' THEN ? ELSE bot_protection END,
                     cookie_status = CASE WHEN ? != '' THEN ? ELSE cookie_status END,
-                    website_status = CASE WHEN ? != '' THEN ? ELSE website_status END
+                    website_status = CASE WHEN ? != '' THEN ? ELSE website_status END,
+                    booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
+                    platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
+                    website_scraped_at = CASE WHEN ? != '' THEN ? ELSE website_scraped_at END,
+                    whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END
                 WHERE id = ?
             """, (
                 final_email,
@@ -1094,8 +1116,14 @@ def update_lead_website_data(
                 bot_protection, bot_protection,
                 cookie_status, cookie_status,
                 website_status, website_status,
+                final_booking, final_booking,
+                final_platform, final_platform,
+                website_scraped_at, website_scraped_at,
+                whatsapp, whatsapp,
                 target_id
             ))
+            conn.commit()
+            return True
             conn.commit()
             return True
         except Exception as e:
@@ -1140,8 +1168,13 @@ def get_all_leads() -> List[Dict[str, Any]]:
                    COALESCE(booking_url, '') AS booking_url,
                    COALESCE(platform_price, '') AS platform_price,
                    COALESCE(platform_verified, 0) AS platform_verified,
+                   COALESCE(maps_status, 'captured') AS maps_status,
+                   COALESCE(website_status, 'pending') AS website_status,
+                   COALESCE(linkedin_status, 'pending') AS linkedin_status,
+                   COALESCE(website_scraped_at, '') AS website_scraped_at,
                    COALESCE(order_url, '') AS order_url,
                    COALESCE(notes, '') AS notes,
+                   COALESCE(whatsapp, '') AS whatsapp,
                    created_at
             FROM leads ORDER BY id DESC
         """)
@@ -1182,12 +1215,12 @@ def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
             SELECT id, name, address, website
             FROM leads
             WHERE website IS NOT NULL AND website != 'N/A' AND website LIKE 'http%'
-              AND (bot_protection = 'Inspecting...' OR (email = 'N/A' AND (bot_protection IS NULL OR bot_protection = 'None')))
+              AND (website_status = 'pending' OR website_status IS NULL OR website_status = '' OR bot_protection = 'Inspecting...')
             ORDER BY id ASC
             LIMIT 500
         """).fetchall()
         for r in rows_web:
-            pending_web.append({"index": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]})
+            pending_web.append({"index": r[0], "lead_id": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]})
 
         # Leads where LinkedIn employee roster was not yet harvested
         rows_li = conn.execute("""
@@ -1257,7 +1290,7 @@ def clear_leads():
 ALLOWED_LEAD_UPDATE_FIELDS = {
     "name", "category", "email", "phone", "address", "hours", "price",
     "plus_code", "rating", "reviews", "website", "maps_url", "lat", "lon",
-    "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "screenshot",
+    "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "whatsapp", "screenshot",
     "bot_protection", "cookie_status", "employee_count", "platform_name",
     "platform_url", "platform_rating", "platform_reviews", "booking_url",
     "platform_price", "platform_verified"
@@ -1744,7 +1777,8 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         tw = str(l.get("twitter", "") or "").strip()
         yt = str(l.get("youtube", "") or "").strip()
         tt = str(l.get("tiktok", "") or "").strip()
-        has_s = bool(ig or fb or li or tw or yt or tt)
+        wa = str(l.get("whatsapp", "") or "").strip()
+        has_s = bool(ig or fb or li or tw or yt or tt or wa)
         bot = str(l.get("bot_protection", "") or "").strip()
         w_status = str(l.get("website_status", "") or "pending").strip()
 

@@ -18,6 +18,117 @@ function escapeHtml(str) {
 }
 window.escapeHtml = escapeHtml;
 
+function formatDateTime(dateStr) {
+  if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
+  try {
+    const cleanStr = String(dateStr).trim().replace(' ', 'T');
+    const d = new Date(cleanStr);
+    if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+    const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.75rem; white-space:nowrap;">
+      <span style="color:#e2e8f0; font-weight:500;">📅 ${datePart}</span>
+      <span style="color:#94a3b8; font-size:0.7rem;">🕒 ${timePart}</span>
+    </div>`;
+  } catch (e) {
+    return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
+  }
+}
+window.formatDateTime = formatDateTime;
+
+function formatWebAgentDualDateTime(mapsDateStr, webDateStr, websiteStatus, websiteUrl) {
+  function formatCompact(dStr) {
+    if (!dStr || dStr === 'N/A' || dStr === '') return null;
+    try {
+      const cleanStr = String(dStr).trim().replace(' ', 'T');
+      let d = new Date(cleanStr);
+      if (isNaN(d.getTime())) d = new Date(cleanStr + 'Z');
+      if (isNaN(d.getTime())) return null;
+      const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+      const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return { datePart, timePart };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const mapsFormatted = formatCompact(mapsDateStr);
+  const webFormatted = formatCompact(webDateStr);
+
+  const mapsHtml = mapsFormatted
+    ? `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(56, 189, 248, 0.08); border:1px solid rgba(56, 189, 248, 0.22); border-radius:5px;" title="Maps Agent Discovered: ${escapeHtml(mapsDateStr || '')}">
+         <span style="color:#38bdf8; font-weight:700; font-size:0.68rem; letter-spacing:0.3px; display:inline-flex; align-items:center; gap:3px;">
+           <span>🗺️</span> Maps
+         </span>
+         <span style="font-size:0.72rem; color:#e2e8f0; font-weight:500; white-space:nowrap;">
+           ${mapsFormatted.datePart} <span style="color:#94a3b8; font-size:0.67rem;">${mapsFormatted.timePart}</span>
+         </span>
+       </div>`
+    : `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(100, 116, 139, 0.08); border:1px solid rgba(100, 116, 139, 0.2); border-radius:5px;">
+         <span style="color:#94a3b8; font-weight:700; font-size:0.68rem;">🗺️ Maps</span>
+         <span style="color:#64748b; font-size:0.72rem;">—</span>
+       </div>`;
+
+  let webHtml = '';
+  const hasWebUrl = Boolean(websiteUrl && websiteUrl !== 'N/A' && String(websiteUrl).trim() !== '');
+
+  if (webFormatted) {
+    webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(74, 222, 128, 0.08); border:1px solid rgba(74, 222, 128, 0.24); border-radius:5px;" title="Web Agent Inspected: ${escapeHtml(webDateStr || '')}">
+         <span style="color:#4ade80; font-weight:700; font-size:0.68rem; letter-spacing:0.3px; display:inline-flex; align-items:center; gap:3px;">
+           <span>🌐</span> Web
+         </span>
+         <span style="font-size:0.72rem; color:#bbf7d0; font-weight:500; white-space:nowrap;">
+           ${webFormatted.datePart} <span style="color:#86efac; font-size:0.67rem;">${webFormatted.timePart}</span>
+         </span>
+       </div>`;
+  } else if (!hasWebUrl) {
+    webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(148, 163, 184, 0.06); border:1px dashed rgba(148, 163, 184, 0.2); border-radius:5px;">
+         <span style="color:#94a3b8; font-weight:700; font-size:0.68rem;">🌐 Web</span>
+         <span style="color:#64748b; font-size:0.70rem; font-style:italic;">No Website on Map</span>
+       </div>`;
+  } else if (websiteStatus === 'failed') {
+    webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:5px;">
+         <span style="color:#f87171; font-weight:700; font-size:0.68rem;">🌐 Web</span>
+         <span style="color:#fca5a5; font-size:0.70rem; font-weight:600;">⚠️ Unreachable</span>
+       </div>`;
+  } else {
+    webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(245, 158, 11, 0.08); border:1px dashed rgba(245, 158, 11, 0.3); border-radius:5px;">
+         <span style="color:#fbbf24; font-weight:700; font-size:0.68rem;">🌐 Web</span>
+         <span style="color:#fde68a; font-size:0.70rem;">⏳ Pending Queue</span>
+       </div>`;
+  }
+
+  return `
+    <div style="display:flex; flex-direction:column; gap:4px; min-width:180px; max-width:235px;">
+      ${mapsHtml}
+      ${webHtml}
+    </div>
+  `;
+}
+window.formatWebAgentDualDateTime = formatWebAgentDualDateTime;
+
+function getItemTimeValue(item) {
+  if (!item) return 0;
+  let raw = '';
+  if (window.currentTableTab === 'website' && item.website_scraped_at && item.website_scraped_at !== 'N/A') {
+    raw = item.website_scraped_at;
+  }
+  if (!raw) {
+    raw = item.created_at || item.found_datetime || item.scraped_at || item.timestamp || item.updated_at;
+  }
+  if (raw) {
+    let cleanStr = String(raw).trim().replace(' ', 'T');
+    let ms = new Date(cleanStr).getTime();
+    if (isNaN(ms)) {
+      ms = new Date(cleanStr + 'Z').getTime();
+    }
+    if (!isNaN(ms) && ms > 0) return ms;
+  }
+  const idNum = parseInt(item.id, 10);
+  return !isNaN(idNum) && idNum > 0 ? idNum : 0;
+}
+window.getItemTimeValue = getItemTimeValue;
+
 // =======================================================================
 // TABLE EXTENSION & PLATFORM DIRECTORY MANAGER (LIVE 3-TABLES & MODAL)
 // =======================================================================
@@ -644,14 +755,22 @@ window.renderTableHeader = function() {
       ${selectAllTh}
       <th style="width: 35px;">#</th>
       <th>Business Name</th>
-      <th>Status Tag</th>
-      <th>Website URL</th>
+      <th>Category</th>
+      <th>Website Status</th>
       <th>Extracted Emails</th>
       <th>Social Media</th>
+      <th>Platform / Booking</th>
       <th>Anti-Bot Shield</th>
       <th>Cookie Diagnostics</th>
       <th>Screenshot</th>
-      <th>Actions</th>
+      <th>Notes</th>
+      <th>Phone</th>
+      <th>Address</th>
+      <th>Rating & Reviews</th>
+      <th>Website URL</th>
+      <th>Maps Link</th>
+      <th title="Maps capture timestamp & Web Agent inspection timestamp">Found Date & Time (Maps & Web)</th>
+      ${actionsTh}
     `;
   } else if (window.currentTableTab === 'linkedin') {
     theadTr.innerHTML = `
@@ -663,7 +782,8 @@ window.renderTableHeader = function() {
       <th>Workforce Size</th>
       <th>Employees & Key People</th>
       <th>Org Chart View</th>
-      <th>Actions</th>
+      <th>Found Date & Time</th>
+      ${actionsTh}
     `;
   } else {
     // master normalized
@@ -696,6 +816,7 @@ window.renderTableHeader = function() {
 // =======================================================================
 
 window.tableFilters = {
+  timeSort: 'latest',
   search: '',
   category: '',
   platform: '',
@@ -716,10 +837,13 @@ window.tableFilters = {
 window.renderFiltersForCurrentTable = function() {
   const tab = window.currentTableTab;
   const searchInput = document.getElementById('filter-search-input');
+  const wrapTime = document.getElementById('filter-wrapper-time');
   const wrapPlatform = document.getElementById('filter-wrapper-platform');
   const wrapBot = document.getElementById('filter-wrapper-bot');
   const wrapCookie = document.getElementById('filter-wrapper-cookie');
   const wrapPrice = document.getElementById('filter-wrapper-price');
+
+  if (wrapTime) wrapTime.style.display = 'inline-flex';
 
   const pillEmail = document.getElementById('filter-pill-hasEmail');
   const pillPhone = document.getElementById('filter-pill-hasPhone');
@@ -786,6 +910,7 @@ window.renderFiltersForCurrentTable = function() {
 
 window.onFilterChange = function() {
   const searchEl = document.getElementById('filter-search-input');
+  const timeSortEl = document.getElementById('filter-time-sort-select');
   const catEl = document.getElementById('filter-category-select');
   const platEl = document.getElementById('filter-platform-select');
   const ratEl = document.getElementById('filter-rating-select');
@@ -798,6 +923,7 @@ window.onFilterChange = function() {
     window.tableFilters.search = searchEl.value.trim().toLowerCase();
     if (clearBtn) clearBtn.style.display = window.tableFilters.search ? 'inline-flex' : 'none';
   }
+  if (timeSortEl) window.tableFilters.timeSort = timeSortEl.value || 'latest';
   if (catEl) window.tableFilters.category = catEl.value;
   if (platEl) window.tableFilters.platform = platEl.value;
   if (ratEl) window.tableFilters.minRating = parseFloat(ratEl.value) || 0;
@@ -825,6 +951,7 @@ window.toggleFilterPill = function(key) {
 
 window.resetTableFilters = function() {
   window.tableFilters = {
+    timeSort: 'latest',
     search: '',
     category: '',
     platform: '',
@@ -846,6 +973,9 @@ window.resetTableFilters = function() {
   if (searchEl) searchEl.value = '';
   const clearBtn = document.getElementById('filter-search-clear');
   if (clearBtn) clearBtn.style.display = 'none';
+
+  const timeSortEl = document.getElementById('filter-time-sort-select');
+  if (timeSortEl) timeSortEl.value = 'latest';
 
   const catEl = document.getElementById('filter-category-select');
   if (catEl) catEl.value = '';
@@ -1025,10 +1155,29 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
   if (place.twitter) socialsList.push(`<a href="${encodeURI(place.twitter)}" target="_blank" class="badge-social badge-tw" title="Twitter/X: ${escapeHtml(place.twitter)}" onclick="event.stopPropagation();">🐦</a>`);
   if (place.youtube) socialsList.push(`<a href="${encodeURI(place.youtube)}" target="_blank" class="badge-social badge-yt" title="YouTube: ${escapeHtml(place.youtube)}" onclick="event.stopPropagation();">▶️</a>`);
   if (place.tiktok) socialsList.push(`<a href="${encodeURI(place.tiktok)}" target="_blank" class="badge-social badge-tt" title="TikTok: ${escapeHtml(place.tiktok)}" onclick="event.stopPropagation();">🎵</a>`);
+  if (place.whatsapp && place.whatsapp !== 'N/A') {
+    const waDigits = String(place.whatsapp).replace(/[^0-9]/g, '');
+    const waUrl = place.whatsapp.startsWith('http') ? place.whatsapp : `https://wa.me/${waDigits || place.whatsapp}`;
+    socialsList.push(`<a href="${encodeURI(waUrl)}" target="_blank" class="badge-social badge-wa" title="WhatsApp: ${escapeHtml(place.whatsapp)}" onclick="event.stopPropagation();">💬</a>`);
+  }
 
   const socialsHtml = socialsList.length > 0
     ? `<div style="display:flex; gap:5px;" onclick="event.stopPropagation();">${socialsList.join('')}</div>`
     : '<span class="badge badge-none">—</span>';
+
+  // Phone & WhatsApp HTML for table cells
+  const phoneParts = [];
+  if (place.phone && place.phone !== 'N/A') {
+    phoneParts.push(`<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none; white-space:nowrap;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>`);
+  }
+  if (place.whatsapp && place.whatsapp !== 'N/A') {
+    const waDigits = String(place.whatsapp).replace(/[^0-9]/g, '');
+    const waUrl = place.whatsapp.startsWith('http') ? place.whatsapp : `https://wa.me/${waDigits || place.whatsapp}`;
+    phoneParts.push(`<a href="${encodeURI(waUrl)}" target="_blank" class="badge-wa-chip" title="Chat on WhatsApp: ${escapeHtml(place.whatsapp)}" onclick="event.stopPropagation();">💬 WhatsApp</a>`);
+  }
+  const phoneHtml = phoneParts.length > 0
+    ? `<div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">${phoneParts.join('')}</div>`
+    : '<span style="color:#64748b;">N/A</span>';
 
   // Platform & Booking badge HTML
   const platBadges = [];
@@ -1146,7 +1295,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${socialsHtml}</td>
       <td>${platformBookingHtml}</td>
       <td>${notesHtml}</td>
-      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td>${phoneHtml}</td>
       <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
       <td>${ratingHtml}</td>
       <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
@@ -1167,13 +1316,21 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
       <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td>${categoryHtml}</td>
       <td>${wStatusBadge}</td>
-      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
       <td>${emailHtml}</td>
       <td>${socialsHtml}</td>
+      <td>${platformBookingHtml}</td>
       <td>${botHtml}</td>
       <td>${cookieHtml}</td>
       <td>${screenHtml}</td>
+      <td>${notesHtml}</td>
+      <td>${phoneHtml}</td>
+      <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
+      <td>${ratingHtml}</td>
+      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${window.formatWebAgentDualDateTime(place.created_at, place.website_scraped_at, place.website_status, place.website)}</td>
       ${actionsTd}
     `;
   } else if (curTab === 'linkedin') {
@@ -1199,6 +1356,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${employeeBadgeHtml}</td>
       <td style="font-size:0.8rem; color:#cbd5e1;">${keyPeopleHtml}</td>
       <td>${orgChartBtn}</td>
+      <td>${window.formatDateTime(place.created_at)}</td>
       ${actionsTd}
     `;
   } else if (curTab === 'platform') {
@@ -1245,7 +1403,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${screenHtml}</td>
       <td><span class="rating-pill">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span></td>
       <td>${place.price_info || place.price_range ? `<span style="font-size:0.75rem; color:#34d399; font-weight:600;">💰 ${escapeHtml(place.price_info || place.price_range)}</span>` : '<span class="badge badge-none">—</span>'}</td>
-      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td>${phoneHtml}</td>
       <td style="color:#94a3b8; font-size:0.8rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address || 'N/A')}</td>
       <td>${bookLink}</td>
       <td>${listLink}</td>
@@ -1296,7 +1454,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${employeeBadgeHtml}</td>
       <td>${orgChartBtn}</td>
       <td>${screenHtml}</td>
-      <td>${place.phone && place.phone !== 'N/A' ? `<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>` : '<span style="color:#64748b;">N/A</span>'}</td>
+      <td>${phoneHtml}</td>
       <td style="color:#94a3b8; font-size:0.82rem; max-width:180px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address)}</td>
       <td>${ratingHtml}</td>
       <td>${platformHtml}</td>
@@ -1380,6 +1538,11 @@ window.updateOrPrependLiveRow = function(tabName, item) {
 
   // If the user is currently viewing this tab, update DOM live!
   if (window.currentTableTab === tabName) {
+    if (window.tableFilters && window.tableFilters.timeSort === 'oldest') {
+      window.renderTable();
+      return;
+    }
+
     const emptyRow = document.getElementById('empty-row');
     if (emptyRow) emptyRow.remove();
 
@@ -1597,6 +1760,19 @@ window.renderTable = function() {
     return true;
   });
 
+  // Universal Time Arrangement: Latest First vs Oldest First across all tables
+  const timeSortOrder = (window.tableFilters && window.tableFilters.timeSort) ? window.tableFilters.timeSort : 'latest';
+  filteredList.sort((a, b) => {
+    const tA = window.getItemTimeValue(a);
+    const tB = window.getItemTimeValue(b);
+    if (tA !== tB) {
+      return timeSortOrder === 'oldest' ? tA - tB : tB - tA;
+    }
+    const idA = parseInt(a.id, 10) || 0;
+    const idB = parseInt(b.id, 10) || 0;
+    return timeSortOrder === 'oldest' ? idA - idB : idB - idA;
+  });
+
   const countBadge = document.getElementById('places-count-badge');
   if (countBadge) {
     if (isFiltered) {
@@ -1624,22 +1800,6 @@ window.renderTable = function() {
   }
 
   tbody.innerHTML = '';
-
-  function formatDateTime(dateStr) {
-    if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
-    try {
-      const d = new Date(dateStr.replace(' ', 'T'));
-      if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
-      const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
-      const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.75rem; white-space:nowrap;">
-        <span style="color:#e2e8f0; font-weight:500;">📅 ${datePart}</span>
-        <span style="color:#94a3b8; font-size:0.7rem;">🕒 ${timePart}</span>
-      </div>`;
-    } catch (e) {
-      return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
-    }
-  }
 
   filteredList.forEach((place, index) => {
     tbody.appendChild(window.buildSinglePlaceRow(place, index, window.currentTableTab));
@@ -1939,6 +2099,10 @@ window.openEditRowModal = function(type, id) {
   document.getElementById('edit-field-name').value = record.title || record.name || '';
   document.getElementById('edit-field-category').value = record.category || '';
   document.getElementById('edit-field-phone').value = (record.phone && record.phone !== 'N/A') ? record.phone : '';
+  const waInput = document.getElementById('edit-field-whatsapp');
+  if (waInput) {
+    waInput.value = (record.whatsapp && record.whatsapp !== 'N/A') ? record.whatsapp : '';
+  }
   document.getElementById('edit-field-address').value = (record.address && record.address !== 'N/A') ? record.address : '';
   document.getElementById('edit-field-rating').value = (record.rating && record.rating !== 'N/A') ? record.rating : '';
 
@@ -2001,6 +2165,7 @@ window.saveRowEdit = async function(e) {
   const nameVal = document.getElementById('edit-field-name').value.trim();
   const catVal = document.getElementById('edit-field-category').value.trim();
   const phoneVal = document.getElementById('edit-field-phone').value.trim();
+  const waVal = document.getElementById('edit-field-whatsapp') ? document.getElementById('edit-field-whatsapp').value.trim() : '';
   const addrVal = document.getElementById('edit-field-address').value.trim();
   const ratingVal = document.getElementById('edit-field-rating').value.trim();
   const priceVal = document.getElementById('edit-field-price').value.trim();
@@ -2027,6 +2192,7 @@ window.saveRowEdit = async function(e) {
       name: nameVal,
       category: catVal,
       phone: phoneVal,
+      whatsapp: waVal,
       email: emailVal,
       address: addrVal,
       rating: ratingVal,

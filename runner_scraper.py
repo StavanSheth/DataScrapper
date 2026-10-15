@@ -403,7 +403,7 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
     3. <meta> tags (og:see_also, twitter:site, twitter:creator, etc.)
     4. Regex pattern matching across page source code.
     """
-    socials = {"instagram": "", "facebook": "", "linkedin": "", "twitter": "", "youtube": "", "tiktok": ""}
+    socials = {"instagram": "", "facebook": "", "linkedin": "", "twitter": "", "youtube": "", "tiktok": "", "whatsapp": ""}
     if not html:
         return socials
 
@@ -413,7 +413,8 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
         "linkedin": [],
         "twitter": [],
         "youtube": [],
-        "tiktok": []
+        "tiktok": [],
+        "whatsapp": []
     }
 
     try:
@@ -426,7 +427,9 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
                 continue
             lower = href.lower()
 
-            if "instagram.com/" in lower:
+            if "wa.me/" in lower or "api.whatsapp.com/send" in lower or "web.whatsapp.com/send" in lower or "whatsapp://" in lower:
+                candidates["whatsapp"].append(href)
+            elif "instagram.com/" in lower:
                 candidates["instagram"].append(href)
             elif "facebook.com/" in lower or "fb.me/" in lower:
                 candidates["facebook"].append(href)
@@ -505,10 +508,23 @@ def extract_socials_from_text(html: str) -> Dict[str, str]:
         for m in tt_matches:
             candidates["tiktok"].append(f"https://www.tiktok.com/@{m}")
 
+        wa_matches = re.findall(r'(?:https?://(?:wa\.me|api\.whatsapp\.com/send\?(?:[^"\'\s>]*&)?phone=)|whatsapp://send\?(?:[^"\'\s>]*&)?phone=)(\+?[0-9]{7,15})', html, re.IGNORECASE)
+        for m in wa_matches:
+            candidates["whatsapp"].append(f"https://wa.me/{m.lstrip('+')}")
+
     except Exception:
         pass
 
     # 5. Filter & Select Best Canonical URL for each platform
+    # WhatsApp
+    for raw in candidates["whatsapp"]:
+        m = re.search(r'(?:wa\.me/|phone=|\b)(\+?[0-9]{7,15})\b', raw)
+        if m:
+            clean_digits = re.sub(r'[^0-9]', '', m.group(1))
+            if 7 <= len(clean_digits) <= 15:
+                socials["whatsapp"] = clean_digits
+                break
+
     # Instagram
     for raw in candidates["instagram"]:
         cleaned = clean_social_url(raw)
@@ -694,6 +710,7 @@ async def clear_fixed_viewport(page):
 
 async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Event, website_page=None, maps_page=None, linkedin_queue: asyncio.Queue = None, pages_dict: Dict = None, cdp_connected: bool = False):
     tab_page = website_page
+    explored_domains_cache: Dict[str, Dict[str, Any]] = {}
     """
     Dedicated Worker for Tab 2: Visually loads shop websites in parallel, checks Cloudflare/anti-bot,
     takes landing page screenshots, extracts emails and social media accounts simultaneously.
@@ -708,6 +725,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             break
 
         idx = item.get("index")
+        lead_db_id = item.get("lead_id")
         name = item.get("name")
         address = item.get("address")
         website_url = item.get("website")
@@ -715,6 +733,123 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         if not website_url or not website_url.startswith("http"):
             queue.task_done()
             continue
+
+        clean_target_dom = clean_domain(website_url)
+
+        # 1. In-session domain cache check (prevents re-checking same website in the same run)
+        if clean_target_dom and clean_target_dom in explored_domains_cache:
+            cached_data = explored_domains_cache[clean_target_dom]
+            emit_event("log", f"⚡ [Agent 2: Website] #{idx} '{name}' shares domain '{clean_target_dom}' already crawled in this session. Reusing verified data.")
+            try:
+                update_lead_website_data(
+                    name=name,
+                    address=address,
+                    website=website_url,
+                    email=cached_data.get("email", ""),
+                    instagram=cached_data.get("instagram", ""),
+                    facebook=cached_data.get("facebook", ""),
+                    linkedin=cached_data.get("linkedin", ""),
+                    twitter=cached_data.get("twitter", ""),
+                    youtube=cached_data.get("youtube", ""),
+                    tiktok=cached_data.get("tiktok", ""),
+                    screenshot=cached_data.get("screenshot", ""),
+                    bot_protection=cached_data.get("bot_protection", "Clean"),
+                    cookie_status=cached_data.get("cookie_status", "None"),
+                    website_status=cached_data.get("website_status", "clean"),
+                    booking_url=cached_data.get("booking_url", ""),
+                    platform_name=cached_data.get("platform_name", ""),
+                    website_scraped_at=cached_data.get("website_scraped_at", ""),
+                    whatsapp=cached_data.get("whatsapp", "")
+                )
+                emit_event("place_updated", {
+                    "id": lead_db_id,
+                    "name": name,
+                    "address": address,
+                    "website": website_url,
+                    **cached_data
+                })
+            except Exception:
+                pass
+            queue.task_done()
+            continue
+
+        # 2. Database check for previously completed crawl (across past sessions)
+        try:
+            with get_connection() as conn:
+                existing_lead = None
+                if lead_db_id:
+                    existing_lead = conn.execute(
+                        "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name FROM leads WHERE id = ?",
+                        (lead_db_id,)
+                    ).fetchone()
+                if not existing_lead and name:
+                    existing_lead = conn.execute(
+                        "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name FROM leads WHERE name = ? AND address = ?",
+                        (name, address)
+                    ).fetchone()
+
+                if existing_lead:
+                    w_st = str(existing_lead["website_status"] or "").strip().lower()
+                    if w_st in ["emails_found", "clean", "social", "socials_found", "failed"]:
+                        emit_event("log", f"⏩ [Agent 2: Website] #{idx} '{name}' was already explored ({w_st}). Skipping redundant crawl.")
+                        if clean_target_dom:
+                            explored_domains_cache[clean_target_dom] = {
+                                "email": existing_lead["email"] or "",
+                                "instagram": existing_lead["instagram"] or "",
+                                "facebook": existing_lead["facebook"] or "",
+                                "linkedin": existing_lead["linkedin"] or "",
+                                "twitter": existing_lead["twitter"] or "",
+                                "youtube": existing_lead["youtube"] or "",
+                                "tiktok": existing_lead["tiktok"] or "",
+                                "screenshot": existing_lead["screenshot"] or "",
+                                "bot_protection": existing_lead["bot_protection"] or "Clean",
+                                "cookie_status": existing_lead["cookie_status"] or "None",
+                                "website_status": w_st,
+                                "booking_url": existing_lead["booking_url"] or "",
+                                "platform_name": existing_lead["platform_name"] or ""
+                            }
+                        queue.task_done()
+                        continue
+
+                # Also check if this exact domain was already explored under another lead in DB
+                if clean_target_dom and clean_target_dom not in ("facebook.com", "instagram.com", "google.com"):
+                    prior_dom_lead = conn.execute("""
+                        SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok, 
+                               screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name 
+                        FROM leads 
+                        WHERE website LIKE ? 
+                          AND website_status IN ('emails_found', 'clean', 'social', 'socials_found')
+                        ORDER BY (screenshot IS NOT NULL AND screenshot != 'N/A' AND screenshot != '') DESC, id DESC
+                        LIMIT 1
+                    """, (f"%{clean_target_dom}%",)).fetchone()
+                    if prior_dom_lead:
+                        w_st = str(prior_dom_lead["website_status"] or "clean").strip().lower()
+                        emit_event("log", f"⏩ [Agent 2: Website] Domain '{clean_target_dom}' for #{idx} '{name}' was already explored in database ({w_st}). Reusing verified data.")
+                        data_to_copy = {
+                            "email": prior_dom_lead["email"] or "",
+                            "instagram": prior_dom_lead["instagram"] or "",
+                            "facebook": prior_dom_lead["facebook"] or "",
+                            "linkedin": prior_dom_lead["linkedin"] or "",
+                            "twitter": prior_dom_lead["twitter"] or "",
+                            "youtube": prior_dom_lead["youtube"] or "",
+                            "tiktok": prior_dom_lead["tiktok"] or "",
+                            "screenshot": prior_dom_lead["screenshot"] or "",
+                            "bot_protection": prior_dom_lead["bot_protection"] or "Clean",
+                            "cookie_status": prior_dom_lead["cookie_status"] or "None",
+                            "website_status": w_st,
+                            "booking_url": prior_dom_lead["booking_url"] or "",
+                            "platform_name": prior_dom_lead["platform_name"] or ""
+                        }
+                        explored_domains_cache[clean_target_dom] = data_to_copy
+                        update_lead_website_data(
+                            name=name, address=address, website=website_url,
+                            **data_to_copy
+                        )
+                        emit_event("place_updated", {"id": lead_db_id, "name": name, "address": address, "website": website_url, **data_to_copy})
+                        queue.task_done()
+                        continue
+        except Exception:
+            pass
 
         # Prevent opening Meta platforms (Instagram, Facebook, Threads, Meta) in Tab 2
         w_low = website_url.lower()
@@ -741,6 +876,31 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             queue.task_done()
             continue
 
+        # Associated booking / directory platform detection (Airbnb, Fresha, Treatwell, Booksy, Practo, etc.)
+        platform_mapping = {
+            "airbnb.": "Airbnb",
+            "fresha.com": "Fresha",
+            "treatwell.": "Treatwell",
+            "booksy.com": "Booksy",
+            "practo.com": "Practo",
+            "opentable.": "OpenTable",
+            "zomato.com": "Zomato",
+            "zoma.to": "Zomato",
+            "swiggy.com": "Swiggy",
+            "eazydiner.com": "EazyDiner",
+            "booking.com": "Booking.com",
+            "tripadvisor.": "TripAdvisor",
+            "mindbodyonline.com": "Mindbody",
+            "vagaro.com": "Vagaro",
+            "resy.com": "Resy",
+            "phorest.com": "Phorest"
+        }
+        detected_primary_plat = ""
+        for plat_domain, p_name in platform_mapping.items():
+            if plat_domain in w_low:
+                detected_primary_plat = p_name
+                break
+
         emit_event("log", f"🌐 [Agent 2: Website] Inspecting shop website for #{idx} '{name}': {website_url}")
         emit_event("status", f"Browsing website #{idx}: {name}")
         emit_event("website_navigated", {"url": website_url, "name": name, "index": idx})
@@ -759,6 +919,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     pages_dict["website"] = tab_page
 
             # Navigate dedicated tab to shop website with complete DOM & load state wait (Fast 7s timeout)
+            nav_success = False
             try:
                 await tab_page.goto(website_url, wait_until="domcontentloaded", timeout=7000)
                 try:
@@ -766,8 +927,42 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 except Exception:
                     pass
                 await tab_page.wait_for_timeout(300)
+                nav_success = True
             except Exception as e:
                 emit_event("log", f"⚠️ [Agent 2: Website] Navigation notice on #{idx} '{name}': {str(e)[:50]}")
+
+            curr_url = tab_page.url or ""
+            target_dom = clean_domain(website_url)
+            curr_dom = clean_domain(curr_url)
+            if not nav_success and (not curr_dom or (target_dom and target_dom not in curr_dom)):
+                emit_event("log", f"🚫 [Agent 2: Website] #{idx} '{name}' website unreachable: {website_url}. Skipping extraction to prevent stale page bleed.")
+                try:
+                    await tab_page.goto("about:blank")
+                except Exception:
+                    pass
+                try:
+                    fail_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    update_lead_website_data(
+                        name=name,
+                        address=address,
+                        website=website_url,
+                        bot_protection="Unreachable (Navigation Failed)",
+                        website_status="failed",
+                        website_scraped_at=fail_time
+                    )
+                    emit_event("place_updated", {
+                        "id": lead_db_id,
+                        "name": name,
+                        "address": address,
+                        "website": website_url,
+                        "bot_protection": "Unreachable (Navigation Failed)",
+                        "website_status": "failed",
+                        "website_scraped_at": fail_time
+                    })
+                except Exception:
+                    pass
+                queue.task_done()
+                continue
 
             # Automatically accept cookies / consent banner if presented
             cookie_status = await detect_and_handle_cookies(tab_page)
@@ -942,18 +1137,44 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             email_list = sorted(list(emails))
             primary_email = email_list[0] if email_list else ""
 
+            # 6. Extract Associated Booking & Directory Platform links (Airbnb, Fresha, Treatwell, Booksy, Practo, OpenTable, Zomato, etc.)
+            found_booking_url = ""
+            found_platform_name = detected_primary_plat
+            if not found_booking_url and detected_primary_plat:
+                found_booking_url = website_url
+            try:
+                soup_page = BeautifulSoup(fresh_html, "html.parser")
+                for a in soup_page.find_all("a", href=True):
+                    h_link = a["href"].strip()
+                    if not h_link.startswith("http"): continue
+                    h_link_low = h_link.lower()
+                    for plat_domain, p_name in platform_mapping.items():
+                        if plat_domain in h_link_low:
+                            if not found_platform_name:
+                                found_platform_name = p_name
+                                found_booking_url = h_link
+                            elif not found_booking_url:
+                                found_booking_url = h_link
+                            break
+                    if found_platform_name and found_booking_url:
+                        break
+            except Exception:
+                pass
+
             # If emails were successfully extracted from the page, confirm Access Granted
             if primary_email and "Access Denied" in bot_status:
                 bot_status = bot_status.replace("Access Denied", "Access Granted")
                 emit_event("log", f"🎉 [Agent 2: Website] Contact emails successfully extracted from #{idx} '{name}'!")
 
             # Immediately update lead record in SQLite database!
-            w_status = "found"
+            w_status = "clean"
             if email_list:
                 w_status = "emails_found"
             elif any(socials.get(k) for k in ["instagram", "facebook", "twitter", "linkedin", "youtube", "tiktok"]):
                 w_status = "socials_found"
 
+            now_scraped_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            found_wa = socials.get("whatsapp", "")
             try:
                 update_lead_website_data(
                     name=name,
@@ -969,13 +1190,39 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     screenshot=rel_screenshot_path,
                     bot_protection=bot_status,
                     cookie_status=cookie_status,
-                    website_status=w_status
+                    website_status=w_status,
+                    booking_url=found_booking_url,
+                    platform_name=found_platform_name,
+                    website_scraped_at=now_scraped_at,
+                    whatsapp=found_wa
                 )
             except Exception as dbe:
                 pass
 
+            # Cache extracted domain data for current session
+            if clean_target_dom:
+                explored_domains_cache[clean_target_dom] = {
+                    "email": primary_email,
+                    "emails": email_list,
+                    "instagram": socials.get("instagram", ""),
+                    "facebook": socials.get("facebook", ""),
+                    "linkedin": socials.get("linkedin", ""),
+                    "twitter": socials.get("twitter", ""),
+                    "youtube": socials.get("youtube", ""),
+                    "tiktok": socials.get("tiktok", ""),
+                    "screenshot": rel_screenshot_path,
+                    "bot_protection": bot_status,
+                    "cookie_status": cookie_status,
+                    "website_status": w_status,
+                    "booking_url": found_booking_url,
+                    "platform_name": found_platform_name,
+                    "website_scraped_at": now_scraped_at,
+                    "whatsapp": found_wa
+                }
+
             # Emit update event for this place!
             emit_event("place_updated", {
+                "id": lead_db_id,
                 "name": name,
                 "address": address,
                 "website": website_url,
@@ -990,7 +1237,11 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 "screenshot": rel_screenshot_path,
                 "bot_protection": bot_status,
                 "cookie_status": cookie_status,
-                "website_status": w_status
+                "website_status": w_status,
+                "booking_url": found_booking_url,
+                "platform_name": found_platform_name,
+                "website_scraped_at": now_scraped_at,
+                "whatsapp": found_wa
             })
 
             log_parts = []
@@ -1001,6 +1252,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             if socials.get("twitter"): log_parts.append(f"🐦 X: {socials['twitter']}")
             if socials.get("youtube"): log_parts.append(f"▶️ YT: {socials['youtube']}")
             if socials.get("tiktok"): log_parts.append(f"🎵 TT: {socials['tiktok']}")
+            if found_platform_name and found_booking_url: log_parts.append(f"📅 Booking: {found_platform_name}")
             if bot_status != "Clean": log_parts.append(f"🛡️ {bot_status}")
             if cookie_status != "None": log_parts.append(f"🍪 {cookie_status}")
             msg = " | ".join(log_parts) if log_parts else "No contact emails/socials detected on page"
@@ -1022,12 +1274,14 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         except Exception as err:
             emit_event("log", f"⚠️ Error processing website for #{idx}: {str(err)[:60]}")
             try:
+                err_scraped_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 update_lead_website_data(
                     name=name,
                     address=address,
                     website=website_url,
                     bot_protection=f"Unreachable ({str(err)[:20]})",
-                    website_status="failed"
+                    website_status="failed",
+                    website_scraped_at=err_scraped_at
                 )
                 emit_event("place_updated", {
                     "index": idx,
@@ -1035,7 +1289,8 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     "address": address,
                     "website": website_url,
                     "bot_protection": f"Unreachable ({str(err)[:20]})",
-                    "website_status": "failed"
+                    "website_status": "failed",
+                    "website_scraped_at": err_scraped_at
                 })
             except Exception:
                 pass
@@ -2529,7 +2784,18 @@ async def run_scraper(
             else:
                 from database import get_all_leads
                 db_leads = get_all_leads()
-                site_list = [l["website"] for l in db_leads if l.get("website") and l["website"].startswith("http")][:10]
+                # Prioritize unexplored leads (pending status or missing emails/screenshots)
+                site_list = [
+                    l["website"] for l in db_leads
+                    if l.get("website") and l["website"].startswith("http") and (
+                        not l.get("website_status")
+                        or l.get("website_status") in ["pending", "None", "", "failed"]
+                        or not l.get("screenshot")
+                        or l.get("email") in ["N/A", "", None]
+                    )
+                ][:25]
+                if not site_list:
+                    site_list = [l["website"] for l in db_leads if l.get("website") and l["website"].startswith("http")][:10]
                 if not site_list:
                     site_list = ["https://grind.co.uk"]
 
@@ -3130,6 +3396,9 @@ async def run_scraper(
                                         d.yt = cleanHref;
                                     } else if (lower.includes('tiktok.com/') && !d.tt) {
                                         d.tt = cleanHref;
+                                    } else if ((lower.includes('wa.me/') || lower.includes('api.whatsapp.com/send') || lower.includes('whatsapp://')) && !d.whatsapp) {
+                                        const mWa = cleanHref.match(/(?:wa\.me\/|phone=|\b)(\+?[0-9]{7,15})\b/);
+                                        if (mWa) d.whatsapp = mWa[1].replace(/[^0-9]/g, '');
                                     }
                                 });
                             }
@@ -3401,6 +3670,7 @@ async def run_scraper(
                         "platform_name": maps_b_plat,
                         "order_url": maps_o_url,
                         "notes": maps_notes,
+                        "whatsapp": detail_data.get("whatsapp", ""),
                         "screenshot": "",
                         "bot_protection": "Social Profile" if is_social_site else ("Inspecting..." if (enable_website and extract_emails and website and not is_social_site) else "N/A"),
                         "cookie_status": "None" if is_social_site else ("Inspecting..." if (enable_website and extract_emails and website and not is_social_site) else "None"),
@@ -3455,6 +3725,7 @@ async def run_scraper(
                         emit_event("log", f"➡️ [Agent 1: Maps] Dispatched #{idx} '{place_title}' to [Agent 2: Website] for contact discovery")
                         website_queue.put_nowait({
                             "index": idx,
+                            "lead_id": place_info.get("id") or lead_db_id,
                             "name": place_title,
                             "address": address or "N/A",
                             "website": website,
@@ -3463,6 +3734,7 @@ async def run_scraper(
                         emit_event("log", f"➡️ [Agent 1: Maps] Dispatched #{idx} '{place_title}' to [Agent 3: LinkedIn] for org intelligence")
                         linkedin_queue.put_nowait({
                             "index": idx,
+                            "lead_id": place_info.get("id") or lead_db_id,
                             "name": place_title,
                             "address": address or "N/A",
                             "website": website if (website and website != "N/A") else "",

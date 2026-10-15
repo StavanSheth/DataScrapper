@@ -22,6 +22,7 @@ chrome_profile/
 
 # Credentials & Session cookies
 linkedin_cookies.json
+*.pid
 
 # Editor and OS files
 .vscode/

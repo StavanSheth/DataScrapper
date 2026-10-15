@@ -369,7 +369,11 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                             screenshot=edata.get("screenshot", ""),
                             bot_protection=edata.get("bot_protection", ""),
                             cookie_status=edata.get("cookie_status", ""),
-                            website_status=edata.get("website_status", "found")
+                            website_status=edata.get("website_status", "clean"),
+                            booking_url=edata.get("booking_url", ""),
+                            platform_name=edata.get("platform_name", ""),
+                            website_scraped_at=edata.get("website_scraped_at", ""),
+                            whatsapp=edata.get("whatsapp", "")
                         )
                         if not edata.get("id"):
                             found_id = get_lead_id_by_name(edata.get("name", ""), edata.get("address", ""), edata.get("website", ""))
@@ -386,7 +390,8 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         if edata.get("youtube"): socs.append(f"YT: {edata['youtube']}")
                         if edata.get("tiktok"): socs.append(f"TT: {edata['tiktok']}")
                         soc_str = f" | 🔗 {', '.join(socs)}" if socs else ""
-                        logger.info(f"🌐 [LIVE HARVEST: WEBSITE -> DB #{edata.get('id', '')}] '{u_name}' | ✉️ {u_email} | 🌐 {u_web}{soc_str} | 🛡️ {edata.get('bot_protection', 'None')}")
+                        plat_str = f" | 📅 {edata.get('platform_name')}: {edata.get('booking_url')}" if (edata.get("platform_name") and edata.get("booking_url")) else ""
+                        logger.info(f"🌐 [LIVE HARVEST: WEBSITE -> DB #{edata.get('id', '')}] '{u_name}' | ✉️ {u_email} | 🌐 {u_web}{soc_str}{plat_str} | 🛡️ {edata.get('bot_protection', 'None')}")
                     elif etype == "org_updated":
                         update_lead_linkedin_data(
                             name=edata.get("company", ""),
@@ -1339,7 +1344,7 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
 
     fieldnames = [
         "table_partition", "id", "name_or_title", "status_tag", "platform_source", "category",
-        "phone", "email", "address", "rating", "reviews_count", "price_info",
+        "phone", "whatsapp", "email", "address", "rating", "reviews_count", "price_info",
         "website_url", "booking_url", "order_url", "listing_url", "notes", "bot_security", "cookie_status",
         "employee_count", "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok",
         "screenshot_url", "screenshot_file_path", "created_at"
@@ -1371,6 +1376,7 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "platform_source": plat_source,
             "category": lead.get("category", ""),
             "phone": lead.get("phone", ""),
+            "whatsapp": lead.get("whatsapp", ""),
             "email": lead.get("email", ""),
             "address": lead.get("address", ""),
             "rating": lead.get("rating", ""),
@@ -1413,6 +1419,7 @@ async def export_csv(request: Request, table: str = "all", ids: Optional[str] = 
             "platform_source": item.get("platform", ""),
             "category": item.get("category", ""),
             "phone": item.get("phone", ""),
+            "whatsapp": "",
             "email": "",
             "address": item.get("address", ""),
             "rating": item.get("rating", ""),

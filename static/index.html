@@ -706,6 +706,14 @@
               <button class="filter-clear-btn" id="filter-search-clear" onclick="clearSearchInput()" title="Clear search">✕</button>
             </div>
 
+            <!-- Time Arrangement Filter: Latest First vs Oldest First (Universal across all tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-time" title="Arrange records by Time (Latest / Oldest)">
+              <select id="filter-time-sort-select" class="filter-select" onchange="onFilterChange()">
+                <option value="latest">⏱️ Latest First (Newest)</option>
+                <option value="oldest">⏱️ Oldest First</option>
+              </select>
+            </div>
+
             <!-- Column Filter: Category -->
             <div class="filter-select-wrapper" id="filter-wrapper-category" title="Filter by Category column">
               <select id="filter-category-select" class="filter-select" onchange="onFilterChange()">
@@ -1142,21 +1150,26 @@
             <label for="edit-field-category" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Category</label>
             <input type="text" id="edit-field-category" class="form-input-edit" placeholder="e.g. Beauty Salon, Cafe" />
           </div>
-          <div class="form-group">
-            <label for="edit-field-phone" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Phone Number</label>
-            <input type="text" id="edit-field-phone" class="form-input-edit" placeholder="e.g. +1 234 567 8900" />
-          </div>
-        </div>
-
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-          <div class="form-group" id="edit-group-email">
-            <label for="edit-field-email" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Email Address</label>
-            <input type="text" id="edit-field-email" class="form-input-edit" placeholder="info@example.com" />
-          </div>
           <div class="form-group" id="edit-group-rating">
             <label for="edit-field-rating" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Rating (0.0 - 5.0)</label>
             <input type="text" id="edit-field-rating" class="form-input-edit" placeholder="e.g. 4.8" />
           </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="edit-field-phone" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Phone Number</label>
+            <input type="text" id="edit-field-phone" class="form-input-edit" placeholder="e.g. +1 234 567 8900" />
+          </div>
+          <div class="form-group" id="edit-group-whatsapp">
+            <label for="edit-field-whatsapp" style="font-size:0.8rem; font-weight:600; color:#4ade80;">💬 WhatsApp Number</label>
+            <input type="text" id="edit-field-whatsapp" class="form-input-edit" placeholder="e.g. +91 98765 43210 or 919876543210" />
+          </div>
+        </div>
+
+        <div class="form-group" id="edit-group-email">
+          <label for="edit-field-email" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Email Address</label>
+          <input type="text" id="edit-field-email" class="form-input-edit" placeholder="info@example.com" />
         </div>
 
         <div class="form-group">
