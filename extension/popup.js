@@ -109,21 +109,39 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 0. Launch Live Agent in This Window
   const btnLaunchAgent = document.getElementById("btn-launch-agent");
+  const agentQueryInput = document.getElementById("agent-query-input");
   if (btnLaunchAgent) {
-    btnLaunchAgent.addEventListener("click", () => {
-      const q = prompt("Enter search query for Google Maps:", "coffee shops in London");
-      if (!q) return;
-      const encoded = encodeURIComponent(q.trim());
-      const mapsUrl = `https://www.google.com/maps/search/${encoded}?hl=en`;
-      chrome.runtime.sendMessage({
-        action: "LAUNCH_LIVE_TAB",
-        url: mapsUrl,
-        query: q.trim(),
-        max: 20,
-        scrapeWebsites: true
-      }, (res) => {
-        showResults("🚀 Live Agent started!\nA new Google Maps tab was opened in your active Chrome window.\nWatch the agent work live on screen and stream leads into your database!");
-      });
+    btnLaunchAgent.addEventListener("click", async () => {
+      const q = (agentQueryInput && agentQueryInput.value.trim()) ? agentQueryInput.value.trim() : "dentist in mumbai";
+      btnLaunchAgent.disabled = true;
+      btnLaunchAgent.innerHTML = "<span>⏳</span> <span>Starting Agents...</span>";
+      showResults(`🚀 Starting Live Agent for "${q}"...\nTriggering Mavon backend and opening tabs in this window.`);
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: q,
+            max_results: 20,
+            visible_browser: true,
+            enable_maps: true,
+            enable_website: true,
+            enable_linkedin: true
+          })
+        });
+        const res = await resp.json();
+        if (resp.ok) {
+          showResults(`✅ Live Agent started for "${q}"!\nTabs are now actively running in this Chrome profile.`);
+        } else {
+          showResults(`⚠️ Server notice: ${res.detail || res.status || "Could not start"}`);
+        }
+      } catch (err) {
+        showResults(`⚠️ Failed to connect to backend on ${API_BASE}. Ensure the Mavon server is running.`);
+      } finally {
+        btnLaunchAgent.disabled = false;
+        btnLaunchAgent.innerHTML = "<span>🚀</span> <span>Launch Live Agent in This Window</span>";
+      }
     });
   }
 

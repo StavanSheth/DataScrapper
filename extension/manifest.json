@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mavon Leads Scraper - Chrome Assistant",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Premium Chrome assistant for Mavon Leads: 1-click DOM extraction, Google Maps place inspector, Cloudflare email decoding, phone harvesting, and instant sync to Mavon Leads Database.",
   "permissions": [
     "activeTab",

@@ -1,5 +1,6 @@
 let placesData = [];
     let isRunning = false;
+    let isActionPending = false;
     let currentMode = 'maps'; // 'maps' or 'companies'
     let leafletMap = null;
     let searchMarker = null;
@@ -20,25 +21,391 @@ let placesData = [];
       currentMode = mode;
       const mapsTab = document.getElementById('tab-mode-maps');
       const compTab = document.getElementById('tab-mode-companies');
+      const webTab = document.getElementById('tab-mode-website-list');
       const mapsControls = document.getElementById('controls-maps');
       const compControls = document.getElementById('controls-companies');
+      const webControls = document.getElementById('controls-website-list');
       const startBtn = document.getElementById('start-btn');
 
+      if (mapsTab) mapsTab.classList.toggle('active', mode === 'maps');
+      if (compTab) compTab.classList.toggle('active', mode === 'companies');
+      if (webTab) webTab.classList.toggle('active', mode === 'website_list');
+
+      if (mapsControls) mapsControls.style.display = (mode === 'maps') ? 'flex' : 'none';
+      if (compControls) compControls.style.display = (mode === 'companies') ? 'flex' : 'none';
+      if (webControls) webControls.style.display = (mode === 'website_list') ? 'flex' : 'none';
+
       if (mode === 'maps') {
-        mapsTab.classList.add('active');
-        compTab.classList.remove('active');
-        mapsControls.style.display = 'flex';
-        compControls.style.display = 'none';
         startBtn.className = 'btn btn-primary';
         startBtn.innerHTML = '<span>🚀 Start Maps Agent</span>';
         setTimeout(() => { if (leafletMap) leafletMap.invalidateSize(); }, 200);
-      } else {
-        compTab.classList.add('active');
-        mapsTab.classList.remove('active');
-        mapsControls.style.display = 'none';
-        compControls.style.display = 'flex';
+      } else if (mode === 'companies') {
         startBtn.className = 'btn btn-linkedin-theme';
         startBtn.innerHTML = '<span>💼 Launch LinkedIn Org Harvester</span>';
+      } else if (mode === 'website_list') {
+        startBtn.className = 'btn btn-website-theme';
+        startBtn.innerHTML = '<span>🌐 Launch Direct Website Scraper</span>';
+        if (typeof window.switchTableTab === 'function') {
+          window.switchTableTab('website');
+        }
+      }
+    }
+
+    let uploadedWebsiteRows = [];
+
+    function extractUrlsFromText(text) {
+      if (!text) return [];
+      const lines = text.split(/[\r\n,]+/);
+      const urls = [];
+      const seen = new Set();
+      lines.forEach(raw => {
+        let u = raw.trim();
+        if (!u) return;
+        u = u.replace(/^["'\[]+|["'\]]+$/g, '').trim();
+        if (!u) return;
+        if (!u.startsWith('http://') && !u.startsWith('https://')) {
+          if (u.includes('.') && !u.includes(' ')) {
+            u = 'https://' + u;
+          }
+        }
+        if (u.startsWith('http://') || u.startsWith('https://')) {
+          if (!seen.has(u.toLowerCase())) {
+            seen.add(u.toLowerCase());
+            urls.push(u);
+          }
+        }
+      });
+      return urls;
+    }
+
+    function onWebsiteInputChanged() {
+      const textarea = document.getElementById('website-list-input');
+      const badge = document.getElementById('website-count-badge');
+      if (!textarea || !badge) return;
+      const urls = extractUrlsFromText(textarea.value);
+      const count = uploadedWebsiteRows.length > 0 ? uploadedWebsiteRows.length : urls.length;
+      badge.innerText = `${count} URL${count === 1 ? '' : 's'} detected`;
+      badge.style.background = count > 0 ? 'rgba(16,185,129,0.2)' : 'rgba(16,185,129,0.08)';
+      badge.style.color = count > 0 ? '#10b981' : '#94a3b8';
+    }
+
+    function addWebsiteChip(url) {
+      const textarea = document.getElementById('website-list-input');
+      if (!textarea) return;
+      const current = textarea.value.trim();
+      if (current.includes(url)) return;
+      textarea.value = current ? `${current}\n${url}` : url;
+      uploadedWebsiteRows = [];
+      onWebsiteInputChanged();
+    }
+
+    function clearWebsiteInput() {
+      const textarea = document.getElementById('website-list-input');
+      if (textarea) textarea.value = '';
+      uploadedWebsiteRows = [];
+      onWebsiteInputChanged();
+    }
+
+    function handleFileDragOver(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const dropzone = document.getElementById('website-dropzone');
+      if (dropzone) dropzone.classList.add('dragover');
+    }
+
+    function handleFileDragLeave(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const dropzone = document.getElementById('website-dropzone');
+      if (dropzone) dropzone.classList.remove('dragover');
+    }
+
+    function handleFileDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const dropzone = document.getElementById('website-dropzone');
+      if (dropzone) dropzone.classList.remove('dragover');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        parseUploadedFile(e.dataTransfer.files[0]);
+      }
+    }
+
+    function handleFileSelect(e) {
+      if (e.target && e.target.files && e.target.files.length > 0) {
+        parseUploadedFile(e.target.files[0]);
+      }
+    }
+
+    function parseUploadedFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      const isCsv = file.name.toLowerCase().endsWith('.csv');
+      reader.onload = function(evt) {
+        const content = evt.target.result;
+        if (!content) return;
+        if (isCsv) {
+          parseCsvContent(content, file.name);
+        } else {
+          parseTxtContent(content, file.name);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function parseTxtContent(content, filename) {
+      const urls = extractUrlsFromText(content);
+      uploadedWebsiteRows = urls.map(u => ({ url: u, name: '', phone: '', category: '' }));
+      const textarea = document.getElementById('website-list-input');
+      if (textarea) {
+        textarea.value = urls.join('\n');
+      }
+      onWebsiteInputChanged();
+      logMessage(`📄 Imported ${urls.length} target websites from '${filename}'`);
+    }
+
+    function parseCsvContent(content, filename) {
+      const lines = content.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length === 0) return;
+
+      const headerLine = lines[0];
+      const headers = headerLine.split(',').map(h => h.trim().replace(/^["']|["']$/g, '').toLowerCase());
+
+      let urlColIdx = headers.findIndex(h => ['website', 'url', 'link', 'site', 'web', 'domain', 'website_url'].includes(h));
+      if (urlColIdx === -1) {
+        urlColIdx = headers.findIndex(h => h.includes('url') || h.includes('site') || h.includes('web'));
+      }
+      if (urlColIdx === -1) {
+        urlColIdx = 0;
+      }
+
+      const nameColIdx = headers.findIndex(h => ['name', 'business', 'company', 'title', 'shop'].includes(h));
+      const phoneColIdx = headers.findIndex(h => ['phone', 'tel', 'mobile', 'telephone', 'contact'].includes(h));
+      const catColIdx = headers.findIndex(h => ['category', 'type', 'industry', 'tag'].includes(h));
+      const addrColIdx = headers.findIndex(h => ['address', 'location', 'addr', 'city'].includes(h));
+
+      const parsedRows = [];
+      const urlListForPreview = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const rowCols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.trim().replace(/^["']|["']$/g, ''));
+        const rawUrl = rowCols[urlColIdx] || '';
+        let u = rawUrl.trim();
+        if (!u) continue;
+        if (!u.startsWith('http://') && !u.startsWith('https://')) {
+          if (u.includes('.') && !u.includes(' ')) {
+            u = 'https://' + u;
+          }
+        }
+        if (u.startsWith('http://') || u.startsWith('https://')) {
+          const item = {
+            url: u,
+            name: nameColIdx !== -1 ? (rowCols[nameColIdx] || '') : '',
+            phone: phoneColIdx !== -1 ? (rowCols[phoneColIdx] || '') : '',
+            category: catColIdx !== -1 ? (rowCols[catColIdx] || '') : '',
+            address: addrColIdx !== -1 ? (rowCols[addrColIdx] || 'N/A') : 'N/A'
+          };
+          parsedRows.push(item);
+          urlListForPreview.push(u);
+        }
+      }
+
+      uploadedWebsiteRows = parsedRows;
+      const textarea = document.getElementById('website-list-input');
+      if (textarea) {
+        textarea.value = urlListForPreview.join('\n');
+      }
+      onWebsiteInputChanged();
+      logMessage(`📊 Successfully imported ${parsedRows.length} websites from CSV '${filename}' (Detected columns: URL column ${urlColIdx + 1}${nameColIdx !== -1 ? ', Name' : ''}${phoneColIdx !== -1 ? ', Phone' : ''})`);
+    }
+
+    let pendingDuplicateCheck = null;
+
+    function closeDuplicateModal() {
+      const modal = document.getElementById('duplicate-websites-modal');
+      if (modal) modal.style.display = 'none';
+      pendingDuplicateCheck = null;
+    }
+    window.closeDuplicateModal = closeDuplicateModal;
+
+    function toggleAllDuplicates(checked) {
+      const cbs = document.querySelectorAll('.dup-site-cb');
+      cbs.forEach(cb => cb.checked = checked);
+      updateDuplicateCounts();
+    }
+    window.toggleAllDuplicates = toggleAllDuplicates;
+
+    function updateDuplicateCounts() {
+      const cbs = Array.from(document.querySelectorAll('.dup-site-cb'));
+      const selected = cbs.filter(cb => cb.checked).length;
+      const countEl = document.getElementById('dup-selected-count');
+      const btnCountEl = document.getElementById('dup-btn-count');
+      if (countEl) countEl.innerText = selected;
+      if (btnCountEl) btnCountEl.innerText = selected;
+      const selectAll = document.getElementById('dup-select-all');
+      if (selectAll && cbs.length > 0) {
+        selectAll.checked = (selected === cbs.length);
+        selectAll.indeterminate = (selected > 0 && selected < cbs.length);
+      }
+    }
+    window.updateDuplicateCounts = updateDuplicateCounts;
+
+    async function proceedDuplicateDecision(decision) {
+      if (!pendingDuplicateCheck) return;
+      const { existing, new_targets, visibleBrowser, deepCrawl } = pendingDuplicateCheck;
+      closeDuplicateModal();
+
+      let finalTargets = [];
+      if (decision === 'rescrape_all') {
+        finalTargets = [
+          ...existing.map(e => ({ id: e.id, name: e.name, url: e.website, address: e.target_data?.address || "N/A" })),
+          ...new_targets
+        ];
+      } else if (decision === 'skip_existing') {
+        finalTargets = [...new_targets];
+      } else if (decision === 'rescrape_selected') {
+        const cbs = Array.from(document.querySelectorAll('.dup-site-cb'));
+        const checkedIds = new Set(cbs.filter(cb => cb.checked).map(cb => parseInt(cb.value)));
+        const selectedExisting = existing
+          .filter(e => checkedIds.has(e.id))
+          .map(e => ({ id: e.id, name: e.name, url: e.website, address: e.target_data?.address || "N/A" }));
+        finalTargets = [...selectedExisting, ...new_targets];
+      }
+
+      if (finalTargets.length === 0) {
+        alert("No websites selected to scrape. All existing sites were skipped and there are no new sites.");
+        setScrapingState(false, "Ready");
+        return;
+      }
+
+      await executeStartWebsiteList(finalTargets, visibleBrowser, deepCrawl, true);
+    }
+    window.proceedDuplicateDecision = proceedDuplicateDecision;
+
+    async function startWebsiteListScraping() {
+      const textarea = document.getElementById('website-list-input');
+      const textUrls = textarea ? extractUrlsFromText(textarea.value) : [];
+
+      let finalTargets = [];
+      if (uploadedWebsiteRows.length > 0 && uploadedWebsiteRows.length === textUrls.length) {
+        finalTargets = uploadedWebsiteRows;
+      } else {
+        finalTargets = textUrls.map(u => ({ url: u }));
+      }
+
+      if (finalTargets.length === 0) {
+        alert("Please enter at least one website URL or upload a CSV/TXT file.");
+        return;
+      }
+
+      const visibleBrowser = document.getElementById('visible-browser-toggle')?.checked ?? true;
+      const deepCrawl = document.getElementById('website-deep-crawl-toggle')?.checked ?? true;
+
+      // Check database for existing scraped websites
+      try {
+        const checkResp = await fetch('/api/leads/check-urls', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: finalTargets })
+        });
+        if (checkResp.ok) {
+          const checkData = await checkResp.json();
+          const existing = checkData.existing || [];
+          const newTargets = checkData.new_targets || [];
+
+          if (existing.length > 0) {
+            pendingDuplicateCheck = {
+              existing: existing,
+              new_targets: newTargets,
+              visibleBrowser: visibleBrowser,
+              deepCrawl: deepCrawl
+            };
+
+            const tbody = document.getElementById('duplicate-websites-table-body');
+            if (tbody) {
+              tbody.innerHTML = existing.map(item => {
+                const statusBadge = item.website_status === 'contacts_found'
+                  ? '<span class="status-badge status-green">Contacts Found</span>'
+                  : (item.website_status === 'not_loading'
+                    ? '<span class="status-badge status-red">Not Loading</span>'
+                    : `<span class="status-badge">${item.website_status}</span>`);
+
+                const contactsText = (item.email && item.email !== 'N/A')
+                  ? `<span style="color:#38bdf8;">✉️ ${item.email}</span>`
+                  : ((item.phone && item.phone !== 'N/A') ? `<span style="color:#a78bfa;">📞 ${item.phone}</span>` : '<span style="color:#64748b;">No contacts yet</span>');
+
+                return `
+                  <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:10px 12px; text-align:center;">
+                      <input type="checkbox" class="dup-site-cb" value="${item.id}" checked onchange="updateDuplicateCounts()" style="accent-color:#0ea5e9;">
+                    </td>
+                    <td style="padding:10px 12px;">
+                      <div style="font-weight:600; color:#f1f5f9;">${item.name || item.domain}</div>
+                      <a href="${item.website}" target="_blank" style="color:#38bdf8; text-decoration:none; font-size:0.75rem;">${item.website}</a>
+                    </td>
+                    <td style="padding:10px 12px;">${statusBadge}</td>
+                    <td style="padding:10px 12px;">${contactsText}</td>
+                  </tr>
+                `;
+              }).join('');
+            }
+
+            const totalEl = document.getElementById('dup-total-count');
+            if (totalEl) totalEl.innerText = existing.length;
+            const badgeEl = document.getElementById('dup-new-count-badge');
+            if (badgeEl) badgeEl.innerText = `+${newTargets.length} brand new sites will be scraped`;
+            const skipBtn = document.getElementById('dup-btn-skip');
+            if (skipBtn) skipBtn.innerText = `⏭️ Skip Existing (${newTargets.length} New Only)`;
+
+            updateDuplicateCounts();
+
+            const modal = document.getElementById('duplicate-websites-modal');
+            if (modal) modal.style.display = 'flex';
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn("Could not check duplicate URLs:", err);
+      }
+
+      await executeStartWebsiteList(finalTargets, visibleBrowser, deepCrawl, false);
+    }
+
+    async function executeStartWebsiteList(finalTargets, visibleBrowser, deepCrawl, forceFresh = true) {
+      setScrapingState(true, `Launching Tab 2 for ${finalTargets.length} websites...`);
+      logMessage(`🌐 Launching Direct Website Scraper for ${finalTargets.length} targets (Deep crawl: ${deepCrawl})...`);
+
+      if (typeof window.switchTableTab === 'function') {
+        window.switchTableTab('website');
+      }
+
+      try {
+        const resp = await fetch('/api/start-website-list', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            urls: finalTargets,
+            visible_browser: visibleBrowser,
+            deep_crawl: deepCrawl,
+            force_fresh: forceFresh
+          })
+        });
+        let res = {};
+        const text = await resp.text();
+        try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
+
+        if (!resp.ok) {
+          alert(res.detail || "Error starting website list scraper");
+          setScrapingState(false, "Ready");
+        } else if (res.status === 'already_running') {
+          logMessage("ℹ️ Scraper is already running in background. Click 'Stop' if you wish to cancel.");
+          setScrapingState(true, "Live Agent Running");
+          setTimeout(pollStatus, 300);
+        } else {
+          setTimeout(pollStatus, 300);
+        }
+      } catch (err) {
+        alert("Error connecting to server: " + err.message);
+        setScrapingState(false, "Ready");
       }
     }
 
@@ -351,71 +718,65 @@ let placesData = [];
     function handleMaxSliderInput(val) {
       const v = parseInt(val);
       const maxLabel = document.getElementById('max-label');
+      const scrapeAllToggle = document.getElementById('scrape-all-toggle');
       if (v >= 500) {
         isInfinityMode = true;
-        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
+        if (scrapeAllToggle) scrapeAllToggle.checked = true;
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Continuous)</span>';
       } else {
         isInfinityMode = false;
-        if (maxLabel) maxLabel.innerText = v;
+        if (scrapeAllToggle) scrapeAllToggle.checked = false;
+        if (maxLabel) maxLabel.innerHTML = `${v} <span style="font-size:0.75rem; color:#a5b4fc;">places</span>`;
       }
     }
 
     function setMaxLimit(val) {
-      const scrapeAll = document.getElementById('scrape-all-toggle')?.checked;
-      if (scrapeAll) {
-        // If scrape all is active, notify user it is already infinite
-        logMessage("ℹ️ 'Scrape ALL Shops (Continuous)' is ON: Scraper will already harvest all places without limits.");
-        return;
-      }
       const slider = document.getElementById('max-slider');
       const maxLabel = document.getElementById('max-label');
+      const scrapeAllToggle = document.getElementById('scrape-all-toggle');
       if (val === 'infinity') {
         isInfinityMode = true;
         if (slider) slider.value = 500;
-        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
-        logMessage("♾️ Max Places Limit set to Unlimited / Infinity.");
+        if (scrapeAllToggle) scrapeAllToggle.checked = true;
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Continuous)</span>';
+        logMessage("♾️ Max Places Limit set to Unlimited (Continuous).");
       } else {
         isInfinityMode = false;
-        if (slider) slider.value = val;
-        if (maxLabel) maxLabel.innerText = val;
-        logMessage(`🎯 Max Places Limit set to ${val} places.`);
+        const numVal = parseInt(val);
+        if (slider) slider.value = numVal;
+        if (scrapeAllToggle) scrapeAllToggle.checked = false;
+        if (maxLabel) maxLabel.innerHTML = `${numVal} <span style="font-size:0.75rem; color:#a5b4fc;">places</span>`;
+        logMessage(`🎯 Max Places Limit set to ${numVal} places.`);
       }
     }
 
     function toggleInfinityMode() {
-      const scrapeAll = document.getElementById('scrape-all-toggle')?.checked;
-      if (scrapeAll) return;
       if (isInfinityMode) {
-        setMaxLimit(20);
+        setMaxLimit(50);
       } else {
         setMaxLimit('infinity');
       }
     }
 
-    // Toggle All Shops
-    document.getElementById('scrape-all-toggle').addEventListener('change', function(e) {
-      const group = document.getElementById('max-results-group');
+    // Toggle All Shops (Continuous)
+    document.getElementById('scrape-all-toggle')?.addEventListener('change', function(e) {
       const qInput = document.getElementById('query-input');
       const maxLabel = document.getElementById('max-label');
       const slider = document.getElementById('max-slider');
       if (e.target.checked) {
-        group.style.opacity = '0.7';
-        group.style.pointerEvents = 'none';
-        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Continuous - Scraping ALL Area Shops)</span>';
-        qInput.placeholder = 'All Shops in Selected Area (No keyword needed)';
         isInfinityMode = true;
+        if (slider) slider.value = 500;
+        if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Continuous)</span>';
+        if (qInput && !qInput.value) qInput.placeholder = 'All Shops in Selected Area (No keyword needed)';
+        logMessage("♾️ Continuous Harvesting ON: Max Places Limit set to Unlimited.");
       } else {
-        group.style.opacity = '1';
-        group.style.pointerEvents = 'auto';
-        const v = parseInt(slider?.value || 20);
-        if (v >= 500) {
-          isInfinityMode = true;
-          if (maxLabel) maxLabel.innerHTML = '∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Infinity)</span>';
-        } else {
-          isInfinityMode = false;
-          if (maxLabel) maxLabel.innerText = v;
-        }
-        qInput.placeholder = 'e.g. Barber, Bakery, Dentist';
+        isInfinityMode = false;
+        const v = parseInt(slider?.value || 50);
+        const targetVal = v >= 500 ? 50 : v;
+        if (slider) slider.value = targetVal;
+        if (maxLabel) maxLabel.innerHTML = `${targetVal} <span style="font-size:0.75rem; color:#a5b4fc;">places</span>`;
+        if (qInput) qInput.placeholder = 'e.g. Barber, Bakery, Dentist';
+        logMessage(`🎯 Continuous Harvesting OFF: Max Places Limit set to ${targetVal} places.`);
       }
     });
 
@@ -1081,6 +1442,7 @@ let placesData = [];
     }
 
     function setScrapingState(running, statusText = '') {
+      const stateChanged = (isRunning !== running);
       isRunning = running;
       window.isScrapingRunning = running;
       const startBtn = document.getElementById('start-btn');
@@ -1088,10 +1450,13 @@ let placesData = [];
       if (startBtn) {
         startBtn.style.display = running ? 'none' : 'flex';
         startBtn.disabled = false;
-        if (!running) {
+        if (!running && stateChanged) {
           if (currentMode === 'companies') {
             startBtn.className = 'btn btn-linkedin-theme';
             startBtn.innerHTML = '<span>💼 Launch LinkedIn Org Harvester</span>';
+          } else if (currentMode === 'website_list') {
+            startBtn.className = 'btn btn-website-theme';
+            startBtn.innerHTML = '<span>🌐 Launch Direct Website Scraper</span>';
           } else if (typeof handleAgentToggleChange === 'function') {
             handleAgentToggleChange();
           } else {
@@ -1109,11 +1474,11 @@ let placesData = [];
       if (running) {
         if (dot) dot.classList.add('active');
         const st = document.getElementById('status-text');
-        if (st) st.innerText = statusText || "Live Agent Running";
+        if (st && statusText) st.innerText = statusText;
       } else {
         if (dot) dot.classList.remove('active');
         const st = document.getElementById('status-text');
-        if (st) st.innerText = statusText || "Ready";
+        if (st && statusText) st.innerText = statusText;
       }
     }
 
@@ -1518,9 +1883,14 @@ let placesData = [];
               }
               updateKPIs();
             } else if (msg.type === 'status') {
-              const terminalStatuses = ['Finished', 'Ready', 'Stopped', 'Idle', 'Failed', 'Failed to launch'];
-              const isTerminal = terminalStatuses.includes(msg.data);
-              setScrapingState(!isTerminal, msg.data);
+              if (!isActionPending) {
+                const terminalStatuses = ['Finished', 'Ready', 'Stopped', 'Idle', 'Failed', 'Failed to launch'];
+                const isTerminal = terminalStatuses.includes(msg.data);
+                setScrapingState(!isTerminal, msg.data);
+              }
+            } else if (msg.type === 'job_finished') {
+              isActionPending = false;
+              setScrapingState(false, 'Finished');
             } else if (msg.type === 'log') {
               logMessage(msg.data, msg.time, msg.agent);
             } else if (msg.type === 'logs_cleared') {
@@ -1546,12 +1916,15 @@ let placesData = [];
     }
 
     async function pollStatus() {
+      if (isActionPending) return;
       try {
         const resp = await fetch('/api/status');
         if (!resp.ok) return;
         const data = await resp.json();
 
-        setScrapingState(data.is_scraping, data.status);
+        if (!isActionPending) {
+          setScrapingState(data.is_scraping, data.status);
+        }
 
         if (data.frame_maps) updateLiveStream(data.frame_maps);
         if (data.frame_website) updateLiveStream(data.frame_website);
@@ -1595,32 +1968,142 @@ let placesData = [];
     }
 
     async function startScraping() {
-      const visibleBrowser = document.getElementById('visible-browser-toggle').checked;
+      if (isActionPending) return;
+      isActionPending = true;
+      try {
+        const visibleBrowser = document.getElementById('visible-browser-toggle').checked;
 
-      if (currentMode === 'companies') {
-        const companies = document.getElementById('companies-input').value.trim();
-        if (!companies) {
-          alert("Please enter at least one company name to search on LinkedIn.");
+        if (currentMode === 'website_list') {
+          await startWebsiteListScraping();
           return;
         }
 
-        setScrapingState(true, "Launching Tab 3 for LinkedIn Intelligence...");
-        logMessage(`🏢 Launching Standalone LinkedIn Org Harvester for: "${companies}"...`);
+        if (currentMode === 'companies') {
+          const companies = document.getElementById('companies-input').value.trim();
+          if (!companies) {
+            alert("Please enter at least one company name to search on LinkedIn.");
+            return;
+          }
+
+          setScrapingState(true, "Launching Tab 3 for LinkedIn Intelligence...");
+          logMessage(`🏢 Launching Standalone LinkedIn Org Harvester for: "${companies}"...`);
+
+          try {
+            const resp = await fetch('/api/start-companies', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                companies: companies,
+                visible_browser: visibleBrowser
+              })
+            });
+            let res = {};
+            const text = await resp.text();
+            try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
+            if (!resp.ok) {
+              alert(res.detail || "Error starting company harvester");
+              setScrapingState(false, "Ready");
+            } else if (res.status === 'already_running') {
+              logMessage("ℹ️ Scraper is already active in background. Click 'Stop' if you wish to restart.");
+              setScrapingState(true, "Live Agent Running");
+              setTimeout(pollStatus, 300);
+            } else {
+              setTimeout(pollStatus, 300);
+            }
+          } catch (err) {
+            alert("Error connecting to server: " + err.message);
+            setScrapingState(false, "Ready");
+          }
+          return;
+        }
+
+        // Maps / Multi-Agent Mode
+        let query = document.getElementById('query-input').value.trim();
+        const scrapeAll = document.getElementById('scrape-all-toggle').checked;
+        if (!query || ['all', 'all businesses', 'all shops', '*', 'shop', 'shops', 'places'].includes(query.toLowerCase())) {
+          query = "businesses";
+        }
+
+        let rawMax = parseInt(document.getElementById('max-slider')?.value || 20);
+        const maxResults = (scrapeAll || isInfinityMode || rawMax >= 500) ? 999999 : rawMax;
+        const lat = parseFloat(document.getElementById('lat-input').value);
+        const lon = parseFloat(document.getElementById('lon-input').value);
+
+        const radiusKm = parseFloat(document.getElementById('radius-slider').value) || 5.0;
+        const agentMaps = document.getElementById('agent-maps-toggle').checked;
+        const agentWebsite = document.getElementById('agent-website-toggle').checked;
+        const agentLinkedin = document.getElementById('agent-linkedin-toggle').checked;
+        const agentPlatform = document.getElementById('agent-platform-toggle')?.checked || false;
+        const selectedPlatforms = getSelectedPlatforms();
+        const platformName = selectedPlatforms[0] || "Fresha";
+        const platformCustomUrl = document.getElementById('platform-custom-url')?.value.trim() || "";
+        const dedupArea = document.getElementById('dedup-area-toggle').checked;
+        const skipExisting = document.getElementById('skip-existing-toggle').checked;
+
+        if (!agentMaps && !agentWebsite && !agentLinkedin && !agentPlatform) {
+          alert("Please enable at least one agent (Maps, Website, LinkedIn, or Platform) to start scraping!");
+          isActionPending = false;
+          return;
+        }
+
+        setScrapingState(true, "Launching Chrome window...");
+        setTimeout(() => { isActionPending = false; }, 400);
+
+        if (visibleBrowser) {
+          try {
+            const chk = await fetch('/api/chrome/status');
+            const cData = await chk.json();
+            if (cData.extension_active) {
+              logMessage("⚡ Chrome Extension active: Agent tabs will open directly inside this Chrome profile.");
+            } else if (cData.cdp_active) {
+              logMessage("⚡ Remote Debugging active on Port 9222.");
+            }
+          } catch (e) {}
+        }
+        const parts = [];
+        if (agentMaps) parts.push("Maps");
+        if (agentWebsite) parts.push("Website");
+        if (agentLinkedin) parts.push("LinkedIn");
+        if (agentPlatform) parts.push(platformName);
+        logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
+
+        if (typeof window.switchTableTab === 'function') {
+          if (agentMaps) window.switchTableTab('maps');
+          else if (agentPlatform) window.switchTableTab('platform');
+          else if (agentWebsite) window.switchTableTab('website');
+          else if (agentLinkedin) window.switchTableTab('linkedin');
+        }
 
         try {
-          const resp = await fetch('/api/start-companies', {
+          const resp = await fetch('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              companies: companies,
-              visible_browser: visibleBrowser
+              query: query,
+              max_results: maxResults,
+              scrape_all: scrapeAll,
+              visible_browser: visibleBrowser,
+              extract_emails: agentWebsite,
+              lat: lat,
+              lon: lon,
+              zoom: 14,
+              radius_km: radiusKm,
+              enable_maps: agentMaps,
+              enable_website: agentWebsite,
+              enable_linkedin: agentLinkedin,
+              enable_platform: agentPlatform,
+              platforms: selectedPlatforms,
+              platform_name: platformName,
+              platform_custom_url: platformCustomUrl,
+              dedup_area: dedupArea,
+              skip_existing_db: skipExisting
             })
           });
           let res = {};
           const text = await resp.text();
           try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
           if (!resp.ok) {
-            alert(res.detail || "Error starting company harvester");
+            alert(res.detail || "Error starting scraper");
             setScrapingState(false, "Ready");
           } else if (res.status === 'already_running') {
             logMessage("ℹ️ Scraper is already active in background. Click 'Stop' if you wish to restart.");
@@ -1633,133 +2116,35 @@ let placesData = [];
           alert("Error connecting to server: " + err.message);
           setScrapingState(false, "Ready");
         }
-        return;
-      }
-
-      // Maps / Multi-Agent Mode
-      let query = document.getElementById('query-input').value.trim();
-      const scrapeAll = document.getElementById('scrape-all-toggle').checked;
-      if (!query || ['all', 'all businesses', 'all shops', '*', 'shop', 'shops', 'places'].includes(query.toLowerCase())) {
-        query = "businesses";
-      }
-
-      let rawMax = parseInt(document.getElementById('max-slider')?.value || 20);
-      const maxResults = (scrapeAll || isInfinityMode || rawMax >= 500) ? 999999 : rawMax;
-      const lat = parseFloat(document.getElementById('lat-input').value);
-      const lon = parseFloat(document.getElementById('lon-input').value);
-
-      const radiusKm = parseFloat(document.getElementById('radius-slider').value) || 5.0;
-      const agentMaps = document.getElementById('agent-maps-toggle').checked;
-      const agentWebsite = document.getElementById('agent-website-toggle').checked;
-      const agentLinkedin = document.getElementById('agent-linkedin-toggle').checked;
-      const agentPlatform = document.getElementById('agent-platform-toggle')?.checked || false;
-      const selectedPlatforms = getSelectedPlatforms();
-      const platformName = selectedPlatforms[0] || "Fresha";
-      const platformCustomUrl = document.getElementById('platform-custom-url')?.value.trim() || "";
-      const dedupArea = document.getElementById('dedup-area-toggle').checked;
-      const skipExisting = document.getElementById('skip-existing-toggle').checked;
-
-      if (!agentMaps && !agentWebsite && !agentLinkedin && !agentPlatform) {
-        alert("Please enable at least one agent (Maps, Website, LinkedIn, or Platform) to start scraping!");
-        return;
-      }
-
-      setScrapingState(true, "Launching Chrome window...");
-
-      if (visibleBrowser) {
-        try {
-          const chk = await fetch('/api/chrome/status');
-          const cData = await chk.json();
-          if (!cData.cdp_active || !cData.is_primary) {
-            const attach = confirm(
-              "⚡ Run Agent Tabs Directly in THIS Chrome Window?\n\n" +
-              "Currently, Remote Debugging (Port 9222) is not attached to this personal Chrome window.\n\n" +
-              "• Click OK to restart Chrome on Port 9222 so all tabs (Google Maps, Website, LinkedIn, Directory) open directly in THIS window.\n" +
-              "  (All your current open tabs, logins, and accounts will be restored automatically!)\n\n" +
-              "• Click Cancel to run in a separate automation window."
-            );
-            if (attach) {
-              setScrapingState(false, "Ready");
-              await attachPrimaryChrome(true);
-              return;
-            }
-          }
-        } catch (e) {}
-      }
-      const parts = [];
-      if (agentMaps) parts.push("Maps");
-      if (agentWebsite) parts.push("Website");
-      if (agentLinkedin) parts.push("LinkedIn");
-      if (agentPlatform) parts.push(platformName);
-      logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
-
-      if (typeof window.switchTableTab === 'function') {
-        if (agentMaps) window.switchTableTab('maps');
-        else if (agentPlatform) window.switchTableTab('platform');
-        else if (agentWebsite) window.switchTableTab('website');
-        else if (agentLinkedin) window.switchTableTab('linkedin');
-      }
-
-
-
-
-      try {
-        const resp = await fetch('/api/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: query,
-            max_results: maxResults,
-            scrape_all: scrapeAll,
-            visible_browser: visibleBrowser,
-            extract_emails: agentWebsite,
-            lat: lat,
-            lon: lon,
-            zoom: 14,
-            radius_km: radiusKm,
-            enable_maps: agentMaps,
-            enable_website: agentWebsite,
-            enable_linkedin: agentLinkedin,
-            enable_platform: agentPlatform,
-            platforms: selectedPlatforms,
-            platform_name: platformName,
-            platform_custom_url: platformCustomUrl,
-            dedup_area: dedupArea,
-            skip_existing_db: skipExisting
-          })
-        });
-        let res = {};
-        const text = await resp.text();
-        try { res = JSON.parse(text); } catch (_) { res = { detail: text || ("Status " + resp.status) }; }
-        if (!resp.ok) {
-          alert(res.detail || "Error starting scraper");
-          setScrapingState(false, "Ready");
-        } else if (res.status === 'already_running') {
-          logMessage("ℹ️ Scraper is already active in background. Click 'Stop' if you wish to restart.");
-          setScrapingState(true, "Live Agent Running");
-          setTimeout(pollStatus, 300);
-        } else {
-          setTimeout(pollStatus, 300);
-        }
-      } catch (err) {
-        alert("Error connecting to server: " + err.message);
-        setScrapingState(false, "Ready");
+      } finally {
+        isActionPending = false;
       }
     }
 
     async function stopScraping() {
+      if (isActionPending) return;
+      isActionPending = true;
       const stopBtn = document.getElementById('stop-btn');
       if (stopBtn) {
         stopBtn.disabled = true;
         stopBtn.innerHTML = '<span>⏳ Stopping...</span>';
       }
       try {
-        await fetch('/api/stop', { method: 'POST' });
-        setScrapingState(false, "Stopped");
-        logMessage("⏹️ Scraping stopped.");
+        const resp = await fetch('/api/stop', { method: 'POST' });
+        const res = await resp.json().catch(() => ({}));
+        if (res.status === 'stopping') {
+          logMessage("⏹️ Stop requested: Gracefully completing current website before stopping...");
+          const st = document.getElementById('status-text');
+          if (st) st.innerText = "Stopping gracefully...";
+        } else {
+          setScrapingState(false, "Stopped");
+          logMessage("⏹️ Scraping stopped.");
+        }
       } catch (e) {
         console.error(e);
         setScrapingState(false, "Stopped");
+      } finally {
+        isActionPending = false;
       }
     }
 
@@ -1809,12 +2194,11 @@ let placesData = [];
           btn.className = 'btn-chrome-pill';
           text.innerText = 'Port 9222 (Separate Window)';
           btn.title = 'Port 9222 is currently bound to a separate ChromeAutomation window. Click "Use This Chrome" to switch it directly to this window!';
-          if (attachBtn) attachBtn.style.display = 'inline-flex';
         } else if (data.extension_active) {
           btn.className = 'btn-chrome-pill';
-          text.innerText = 'Mavon Extension (Synced)';
-          btn.title = 'Mavon Chrome Assistant is connected and live syncing your active browser sessions.';
-          if (attachBtn) attachBtn.style.display = 'inline-flex';
+          text.innerText = 'Connected: This Chrome (Extension)';
+          btn.title = 'Mavon Chrome Assistant is connected! All tabs open right here inside this Chrome profile.';
+          if (attachBtn) attachBtn.style.display = 'none';
         } else {
           btn.className = 'btn-chrome-pill disconnected';
           text.innerText = 'Port 9222 Not Attached';

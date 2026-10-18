@@ -22,7 +22,8 @@ function formatDateTime(dateStr) {
   if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
   try {
     const cleanStr = String(dateStr).trim().replace(' ', 'T');
-    const d = new Date(cleanStr);
+    let d = new Date(cleanStr);
+    if (isNaN(d.getTime())) d = new Date(cleanStr + 'Z');
     if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
     const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
     const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -35,6 +36,63 @@ function formatDateTime(dateStr) {
   }
 }
 window.formatDateTime = formatDateTime;
+
+function getLeadWebsiteStatusTag(place) {
+  if (!place) return 'In Queue';
+  if (place.status_tag) return place.status_tag;
+
+  const ws = String(place.website_status || '').toLowerCase().trim();
+  const hasW = Boolean(place.website && place.website !== 'N/A' && String(place.website).trim() !== '');
+  const hasE = Boolean(place.email && place.email !== 'N/A' && String(place.email).trim() !== '');
+  const hasS = Boolean(
+    (place.instagram && place.instagram !== 'N/A') ||
+    (place.facebook && place.facebook !== 'N/A') ||
+    (place.linkedin && place.linkedin !== 'N/A') ||
+    (place.twitter && place.twitter !== 'N/A') ||
+    (place.youtube && place.youtube !== 'N/A') ||
+    (place.tiktok && place.tiktok !== 'N/A') ||
+    (place.whatsapp && place.whatsapp !== 'N/A')
+  );
+  const bot = String(place.bot_protection || '').trim();
+
+  if (!hasW || ws === 'no_website') return 'No Website';
+  if (ws === 'pending' || (!ws && !place.website_scraped_at)) return 'In Queue';
+  if (ws === 'unsafe_ssl') return 'Unsafe / SSL Error';
+  if (ws === 'not_loading' || ws === 'unresponsive' || ws === 'failed') return 'Not Loading';
+  if (ws === 'bot_blocked' || ((bot.includes('Denied') || bot.includes('Captcha')) && !hasE && !hasS)) return 'Bot Blocked';
+  if (ws === 'bot_extracted' || ((bot.includes('Denied') || bot.includes('Captcha') || bot.includes('Cloudflare')) && (hasE || hasS))) return 'Bot Shield (Data Extracted)';
+  if (ws === 'contacts_found' || ws === 'emails_found' || ws === 'socials_found' || ws === 'social' || hasE || hasS) return 'Contacts Found';
+  if (ws === 'no_contacts' || ws === 'clean' || ws === 'found' || ws === 'scraped' || place.website_scraped_at) return 'No Contacts Found';
+  return 'In Queue';
+}
+window.getLeadWebsiteStatusTag = getLeadWebsiteStatusTag;
+
+function renderWebsiteStatusBadge(tag) {
+  const t = String(tag || '').toLowerCase();
+  if (t.includes('contacts found')) {
+    return '<span class="badge" style="background:rgba(16,185,129,0.2); color:#34d399; border:1px solid rgba(16,185,129,0.4);">🟢 Contacts Found</span>';
+  }
+  if (t.includes('no contact')) {
+    return '<span class="badge" style="background:rgba(59,130,246,0.2); color:#60a5fa; border:1px solid rgba(59,130,246,0.4);">🔵 No Contacts Found</span>';
+  }
+  if (t.includes('bot shield') || t.includes('extracted')) {
+    return '<span class="badge" style="background:rgba(245,158,11,0.2); color:#fbbf24; border:1px solid rgba(245,158,11,0.4);">🟡 Bot Shield (Extracted)</span>';
+  }
+  if (t.includes('bot blocked')) {
+    return '<span class="badge" style="background:rgba(168,85,247,0.2); color:#c084fc; border:1px solid rgba(168,85,247,0.4);">🟣 Bot Blocked</span>';
+  }
+  if (t.includes('not loading') || t.includes('unresponsive') || t.includes('failed')) {
+    return '<span class="badge" style="background:rgba(239,68,68,0.2); color:#f87171; border:1px solid rgba(239,68,68,0.4);">🔴 Not Loading</span>';
+  }
+  if (t.includes('unsafe') || t.includes('ssl')) {
+    return '<span class="badge" style="background:rgba(249,115,22,0.2); color:#fb923c; border:1px solid rgba(249,115,22,0.4);">🟠 Unsafe / SSL Error</span>';
+  }
+  if (t.includes('no website')) {
+    return '<span class="badge" style="background:rgba(100,116,139,0.15); color:#64748b; border:1px solid rgba(100,116,139,0.25);">⚪ No Website</span>';
+  }
+  return '<span class="badge" style="background:rgba(100,116,139,0.2); color:#94a3b8; border:1px solid rgba(100,116,139,0.3);">⏳ In Queue</span>';
+}
+window.renderWebsiteStatusBadge = renderWebsiteStatusBadge;
 
 function formatWebAgentDualDateTime(mapsDateStr, webDateStr, websiteStatus, websiteUrl) {
   function formatCompact(dStr) {
@@ -86,10 +144,21 @@ function formatWebAgentDualDateTime(mapsDateStr, webDateStr, websiteStatus, webs
          <span style="color:#94a3b8; font-weight:700; font-size:0.68rem;">🌐 Web</span>
          <span style="color:#64748b; font-size:0.70rem; font-style:italic;">No Website on Map</span>
        </div>`;
-  } else if (websiteStatus === 'failed') {
+  } else if (websiteStatus === 'failed' || websiteStatus === 'not_loading' || websiteStatus === 'unresponsive') {
     webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:5px;">
          <span style="color:#f87171; font-weight:700; font-size:0.68rem;">🌐 Web</span>
          <span style="color:#fca5a5; font-size:0.70rem; font-weight:600;">⚠️ Unreachable</span>
+       </div>`;
+  } else if (websiteStatus && websiteStatus !== 'pending') {
+    // Lead is already inspected but webDateStr was null: fallback gracefully to maps date
+    const fallbackDate = mapsFormatted ? `${mapsFormatted.datePart} <span style="color:#86efac; font-size:0.67rem;">${mapsFormatted.timePart}</span>` : 'Inspected';
+    webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(74, 222, 128, 0.08); border:1px solid rgba(74, 222, 128, 0.24); border-radius:5px;" title="Web Agent Inspected">
+         <span style="color:#4ade80; font-weight:700; font-size:0.68rem; letter-spacing:0.3px; display:inline-flex; align-items:center; gap:3px;">
+           <span>🌐</span> Web
+         </span>
+         <span style="font-size:0.72rem; color:#bbf7d0; font-weight:500; white-space:nowrap;">
+           ${fallbackDate}
+         </span>
        </div>`;
   } else {
     webHtml = `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:3px 7px; background:rgba(245, 158, 11, 0.08); border:1px dashed rgba(245, 158, 11, 0.3); border-radius:5px;">
@@ -385,38 +454,51 @@ window.updateSplitData = function(data) {
   if (qp.website) {
     const w = qp.website;
     const total = Math.max(1, w.total || totalMaps);
-    const inspected = w.inspected || 0;
-    const emailsFound = w.emails_found || 0;
+    const inQueue = (w.in_queue !== undefined) ? w.in_queue : (w.pending || 0);
+    const contactsFound = w.contacts_found || 0;
+    const noContacts = w.no_contacts || 0;
+    const botShield = w.bot_shield || 0;
+    const notLoading = (w.not_loading || 0) + (w.unsafe_ssl || 0);
     const noWeb = w.no_website || 0;
-    const foundWebsites = Math.max(0, inspected - noWeb);
-    const foundWithoutEmails = Math.max(0, foundWebsites - emailsFound);
-    const pending = (w.pending !== undefined) ? w.pending : Math.max(0, total - inspected);
+    const inspected = w.inspected || 0;
 
-    // Segment widths matching exact tag colors (Green = Found, Purple = Emails, Orange = No Web, Gray = Pending)
-    const pFound = (foundWithoutEmails / total) * 100;
-    const pEmails = (emailsFound / total) * 100;
+    // Segment widths matching exact layman tag colors
+    const pQueue = (inQueue / total) * 100;
+    const pContacts = (contactsFound / total) * 100;
+    const pNoContacts = (noContacts / total) * 100;
+    const pBot = (botShield / total) * 100;
+    const pNotLoading = (notLoading / total) * 100;
     const pNoWeb = (noWeb / total) * 100;
-    const pPending = (pending / total) * 100;
 
-    const sFound = document.getElementById('seg-web-found');
-    if (sFound) {
-      sFound.style.width = `${pFound.toFixed(1)}%`;
-      sFound.title = `Found Websites: ${foundWebsites}`;
+    const sQueue = document.getElementById('seg-web-pending');
+    if (sQueue) {
+      sQueue.style.width = `${pQueue.toFixed(1)}%`;
+      sQueue.title = `In Queue: ${inQueue}`;
     }
-    const sEmails = document.getElementById('seg-web-emails');
-    if (sEmails) {
-      sEmails.style.width = `${pEmails.toFixed(1)}%`;
-      sEmails.title = `Emails Discovered: ${emailsFound}`;
+    const sContacts = document.getElementById('seg-web-contacts');
+    if (sContacts) {
+      sContacts.style.width = `${pContacts.toFixed(1)}%`;
+      sContacts.title = `Contacts Found: ${contactsFound}`;
+    }
+    const sNoContacts = document.getElementById('seg-web-nocontacts');
+    if (sNoContacts) {
+      sNoContacts.style.width = `${pNoContacts.toFixed(1)}%`;
+      sNoContacts.title = `No Contacts Found: ${noContacts}`;
+    }
+    const sBot = document.getElementById('seg-web-bot');
+    if (sBot) {
+      sBot.style.width = `${pBot.toFixed(1)}%`;
+      sBot.title = `Bot Shield: ${botShield}`;
+    }
+    const sNotLoading = document.getElementById('seg-web-notloading');
+    if (sNotLoading) {
+      sNotLoading.style.width = `${pNotLoading.toFixed(1)}%`;
+      sNotLoading.title = `Not Loading / Unsafe: ${notLoading}`;
     }
     const sNoWeb = document.getElementById('seg-web-noweb');
     if (sNoWeb) {
       sNoWeb.style.width = `${pNoWeb.toFixed(1)}%`;
       sNoWeb.title = `No Website: ${noWeb}`;
-    }
-    const sPending = document.getElementById('seg-web-pending');
-    if (sPending) {
-      sPending.style.width = `${pPending.toFixed(1)}%`;
-      sPending.title = `In Queue: ${pending}`;
     }
 
     const bW = document.getElementById('sync-bar-web');
@@ -425,14 +507,18 @@ window.updateSplitData = function(data) {
     const sW = document.getElementById('sync-stat-web');
     if (sW) sW.innerText = `${w.percent || 0}% (${inspected} / ${total})`;
 
-    const cWFound = document.getElementById('sync-chip-web-found');
-    if (cWFound) cWFound.innerText = `✅ Found: ${foundWebsites}`;
-    const cWEmail = document.getElementById('sync-chip-web-emails');
-    if (cWEmail) cWEmail.innerText = `✉️ Emails: ${emailsFound}`;
-    const cWNo = document.getElementById('sync-chip-web-noweb');
-    if (cWNo) cWNo.innerText = `⚠️ No Web: ${noWeb}`;
-    const cWPending = document.getElementById('sync-chip-web-pending');
-    if (cWPending) cWPending.innerText = `⏳ In Queue: ${pending}`;
+    const cWQueue = document.getElementById('sync-chip-web-pending');
+    if (cWQueue) cWQueue.innerText = `⏳ In Queue: ${inQueue}`;
+    const cWContacts = document.getElementById('sync-chip-web-contacts');
+    if (cWContacts) cWContacts.innerText = `🟢 Contacts: ${contactsFound}`;
+    const cWNoContacts = document.getElementById('sync-chip-web-nocontacts');
+    if (cWNoContacts) cWNoContacts.innerText = `🔵 No Contacts: ${noContacts}`;
+    const cWBot = document.getElementById('sync-chip-web-bot');
+    if (cWBot) cWBot.innerText = `🟡 Bot Shield: ${botShield}`;
+    const cWNotLoading = document.getElementById('sync-chip-web-notloading');
+    if (cWNotLoading) cWNotLoading.innerText = `🔴 Not Loading: ${notLoading}`;
+    const cWNoWeb = document.getElementById('sync-chip-web-noweb');
+    if (cWNoWeb) cWNoWeb.innerText = `⚪ No Web: ${noWeb}`;
   }
 
   if (qp.linkedin) {
@@ -820,6 +906,7 @@ window.tableFilters = {
   search: '',
   category: '',
   platform: '',
+  statusTag: '',
   minRating: 0,
   botSecurity: '',
   cookieStatus: '',
@@ -839,6 +926,7 @@ window.renderFiltersForCurrentTable = function() {
   const searchInput = document.getElementById('filter-search-input');
   const wrapTime = document.getElementById('filter-wrapper-time');
   const wrapPlatform = document.getElementById('filter-wrapper-platform');
+  const wrapStatus = document.getElementById('filter-wrapper-status');
   const wrapBot = document.getElementById('filter-wrapper-bot');
   const wrapCookie = document.getElementById('filter-wrapper-cookie');
   const wrapPrice = document.getElementById('filter-wrapper-price');
@@ -854,10 +942,27 @@ window.renderFiltersForCurrentTable = function() {
   const pillBooking = document.getElementById('filter-pill-hasBooking');
   const pillAddr = document.getElementById('filter-pill-hasAddress');
 
-  if (tab === 'platform') {
+  if (tab === 'website') {
+    // Table: Website Inspector Leads
+    if (searchInput) searchInput.placeholder = "Filter website leads by name, email, socials, status...";
+    if (wrapStatus) wrapStatus.style.display = 'inline-flex';
+    if (wrapPlatform) wrapPlatform.style.display = 'none';
+    if (wrapBot) wrapBot.style.display = 'inline-flex';
+    if (wrapCookie) wrapCookie.style.display = 'inline-flex';
+    if (wrapPrice) wrapPrice.style.display = 'none';
+
+    if (pillEmail) pillEmail.style.display = 'inline-flex';
+    if (pillPhone) pillPhone.style.display = 'inline-flex';
+    if (pillWeb) pillWeb.style.display = 'inline-flex';
+    if (pillScreen) pillScreen.style.display = 'inline-flex';
+    if (pillSocial) pillSocial.style.display = 'inline-flex';
+    if (pillTeam) pillTeam.style.display = 'none';
+    if (pillBooking) pillBooking.style.display = 'none';
+    if (pillAddr) pillAddr.style.display = 'none';
+  } else if (tab === 'platform') {
     // Table 3: Platform Directory Listings
-    // Columns: Platform | Title | Category | Photo | Rating & Reviews | Price | Phone | Address | Booking URL | Listing Link | Date
     if (searchInput) searchInput.placeholder = "Filter by listing title, address, phone...";
+    if (wrapStatus) wrapStatus.style.display = 'none';
     if (wrapPlatform) wrapPlatform.style.display = 'inline-flex';
     if (wrapBot) wrapBot.style.display = 'none';
     if (wrapCookie) wrapCookie.style.display = 'none';
@@ -873,8 +978,8 @@ window.renderFiltersForCurrentTable = function() {
     if (pillAddr) pillAddr.style.display = 'inline-flex';
   } else if (tab === 'maps') {
     // Table 2: Google Maps Leads
-    // Columns: Name | Category | Email | Social Media | Bot Security | Cookies | Team/Staff | Landing Page | Phone | Address | Rating | Maps Link | Date
     if (searchInput) searchInput.placeholder = "Filter by business name, address, phone, email...";
+    if (wrapStatus) wrapStatus.style.display = 'none';
     if (wrapPlatform) wrapPlatform.style.display = 'none';
     if (wrapBot) wrapBot.style.display = 'inline-flex';
     if (wrapCookie) wrapCookie.style.display = 'inline-flex';
@@ -890,8 +995,8 @@ window.renderFiltersForCurrentTable = function() {
     if (pillAddr) pillAddr.style.display = 'none';
   } else {
     // Table 1: Master Normalized Leads
-    // Columns: Name | Category | Email | Social Media | Bot Security | Cookies | Team/Staff | Landing Page | Phone | Address | Rating | Platform Directory | Links | Date
     if (searchInput) searchInput.placeholder = "Filter master leads by name, address, phone, email...";
+    if (wrapStatus) wrapStatus.style.display = 'inline-flex';
     if (wrapPlatform) wrapPlatform.style.display = 'inline-flex';
     if (wrapBot) wrapBot.style.display = 'inline-flex';
     if (wrapCookie) wrapCookie.style.display = 'inline-flex';
@@ -913,6 +1018,7 @@ window.onFilterChange = function() {
   const timeSortEl = document.getElementById('filter-time-sort-select');
   const catEl = document.getElementById('filter-category-select');
   const platEl = document.getElementById('filter-platform-select');
+  const statusEl = document.getElementById('filter-status-select');
   const ratEl = document.getElementById('filter-rating-select');
   const botEl = document.getElementById('filter-bot-select');
   const cookieEl = document.getElementById('filter-cookie-select');
@@ -926,11 +1032,30 @@ window.onFilterChange = function() {
   if (timeSortEl) window.tableFilters.timeSort = timeSortEl.value || 'latest';
   if (catEl) window.tableFilters.category = catEl.value;
   if (platEl) window.tableFilters.platform = platEl.value;
+  if (statusEl) {
+    window.tableFilters.statusTag = statusEl.value;
+    window.activeTagFilter = statusEl.value || 'All';
+  }
   if (ratEl) window.tableFilters.minRating = parseFloat(ratEl.value) || 0;
   if (botEl) window.tableFilters.botSecurity = botEl.value;
   if (cookieEl) window.tableFilters.cookieStatus = cookieEl.value;
   if (priceEl) window.tableFilters.pricing = priceEl.value;
 
+  window.renderTable();
+};
+
+window.filterByStatusTag = function(tag) {
+  if (window.currentTableTab !== 'website' && window.currentTableTab !== 'master') {
+    if (typeof window.switchTableTab === 'function') {
+      window.switchTableTab('website');
+    }
+  }
+  const statusEl = document.getElementById('filter-status-select');
+  if (statusEl) {
+    statusEl.value = tag || '';
+  }
+  window.tableFilters.statusTag = tag || '';
+  window.activeTagFilter = tag || 'All';
   window.renderTable();
 };
 
@@ -955,6 +1080,7 @@ window.resetTableFilters = function() {
     search: '',
     category: '',
     platform: '',
+    statusTag: '',
     minRating: 0,
     botSecurity: '',
     cookieStatus: '',
@@ -982,6 +1108,10 @@ window.resetTableFilters = function() {
 
   const platEl = document.getElementById('filter-platform-select');
   if (platEl) platEl.value = '';
+
+  const statusEl = document.getElementById('filter-status-select');
+  if (statusEl) statusEl.value = '';
+  window.activeTagFilter = 'All';
 
   const ratEl = document.getElementById('filter-rating-select');
   if (ratEl) ratEl.value = '0';
@@ -1104,22 +1234,6 @@ Platform Directory Listings (Intact): ${counts.platform || 0}`;
   }
 };
 
-window.formatDateTime = function(dateStr) {
-  if (!dateStr || dateStr === 'N/A') return '<span class="badge badge-none">—</span>';
-  try {
-    const d = new Date(dateStr.replace(' ', 'T'));
-    if (isNaN(d.getTime())) return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
-    const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
-    const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.75rem; white-space:nowrap;">
-      <span style="color:#e2e8f0; font-weight:500;">📅 ${datePart}</span>
-      <span style="color:#94a3b8; font-size:0.7rem;">🕒 ${timePart}</span>
-    </div>`;
-  } catch (e) {
-    return `<span style="font-size:0.75rem; color:#94a3b8;">${escapeHtml(dateStr)}</span>`;
-  }
-};
-
 window.buildSinglePlaceRow = function(place, index, curTab) {
   curTab = curTab || window.currentTableTab || 'maps';
   const rowId = place.id || index;
@@ -1129,8 +1243,40 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
     tr.onclick = () => focusShop(rowId);
   }
 
+  let attr = {};
+  if (place.source_attribution) {
+    if (typeof place.source_attribution === 'string') {
+      try { attr = JSON.parse(place.source_attribution); } catch (e) { attr = {}; }
+    } else if (typeof place.source_attribution === 'object') {
+      attr = place.source_attribution;
+    }
+  }
+
+  const getSourceBadge = (field, fallback) => {
+    let src = attr[field] || fallback;
+    if (!src) {
+      if (field === 'phone' || field === 'website') src = place.maps_url ? 'maps' : 'web';
+      else if (field === 'email') src = (place.website_status && place.website_status !== 'no_website') ? 'web' : (place.maps_url ? 'maps' : 'web');
+    }
+    if (src === 'maps') return '<span class="source-chip-maps" title="1st discovered by 📍 Maps Agent">📍 Maps</span>';
+    if (src === 'web') return '<span class="source-chip-web" title="1st discovered by 🌐 Web Agent">🌐 Web</span>';
+    if (src === 'platform') return '<span class="source-chip-plat" title="1st discovered via Directory Platform">🟣 Plat</span>';
+    return '';
+  };
+
+  const getLeadOriginBadge = () => {
+    if (place.maps_url && place.maps_url.includes('google.com/maps')) {
+      return '<span class="source-chip-maps" title="Lead initially captured via 📍 Google Maps">📍 Maps</span>';
+    }
+    if (place.platform_name && place.platform_name !== 'N/A') {
+      return `<span class="source-chip-plat" title="Lead initially captured via 🟣 ${escapeHtml(place.platform_name)}">🟣 ${escapeHtml(place.platform_name)}</span>`;
+    }
+    return '<span class="source-chip-web" title="Lead initially captured via 🌐 Website Agent">🌐 Web</span>';
+  };
+
+  const emailSrc = getSourceBadge('email');
   const emailHtml = (place.email && place.email !== 'N/A')
-    ? `<span class="badge badge-email" title="Click to copy" onclick="event.stopPropagation(); navigator.clipboard.writeText('${place.email}'); alert('Copied: ${place.email}')">✉️ ${escapeHtml(place.email)}</span>`
+    ? `<div style="display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap;"><span class="badge badge-email" title="Click to copy" onclick="event.stopPropagation(); navigator.clipboard.writeText('${place.email}'); alert('Copied: ${place.email}')">✉️ ${escapeHtml(place.email)}</span>${emailSrc}</div>`
     : '<span class="badge badge-none">Not listed</span>';
 
   const categoryHtml = place.category
@@ -1141,39 +1287,77 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
     ? `<span class="rating-pill">⭐ ${place.rating} <small style="color:#94a3b8;">(${place.reviews || '0'})</small></span>`
     : '<span style="color:#64748b;">N/A</span>';
 
+  const siteSrc = getSourceBadge('website');
   const linksHtml = `
-    <div style="display:flex; gap:8px;" onclick="event.stopPropagation();">
-      ${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn">🌐 Site</a>` : ''}
+    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;" onclick="event.stopPropagation();">
+      ${place.website && place.website !== 'N/A' ? `<div style="display:inline-flex; align-items:center; gap:4px;"><a href="${encodeURI(place.website)}" target="_blank" class="link-btn">🌐 Site</a>${siteSrc}</div>` : ''}
       ${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn">🗺️ Maps</a>` : ''}
     </div>
   `;
 
-  const socialsList = [];
-  if (place.instagram) socialsList.push(`<a href="${encodeURI(place.instagram)}" target="_blank" class="badge-social badge-ig" title="Instagram: ${escapeHtml(place.instagram)}" onclick="event.stopPropagation();">📸</a>`);
-  if (place.facebook) socialsList.push(`<a href="${encodeURI(place.facebook)}" target="_blank" class="badge-social badge-fb" title="Facebook: ${escapeHtml(place.facebook)}" onclick="event.stopPropagation();">👥</a>`);
-  if (place.linkedin) socialsList.push(`<a href="${encodeURI(place.linkedin)}" target="_blank" class="badge-social badge-li" title="LinkedIn: ${escapeHtml(place.linkedin)}" onclick="event.stopPropagation();">💼</a>`);
-  if (place.twitter) socialsList.push(`<a href="${encodeURI(place.twitter)}" target="_blank" class="badge-social badge-tw" title="Twitter/X: ${escapeHtml(place.twitter)}" onclick="event.stopPropagation();">🐦</a>`);
-  if (place.youtube) socialsList.push(`<a href="${encodeURI(place.youtube)}" target="_blank" class="badge-social badge-yt" title="YouTube: ${escapeHtml(place.youtube)}" onclick="event.stopPropagation();">▶️</a>`);
-  if (place.tiktok) socialsList.push(`<a href="${encodeURI(place.tiktok)}" target="_blank" class="badge-social badge-tt" title="TikTok: ${escapeHtml(place.tiktok)}" onclick="event.stopPropagation();">🎵</a>`);
+  const socialEntries = [
+    { key: 'instagram', icon: '📸', url: place.instagram, title: 'Instagram', cls: 'badge-ig' },
+    { key: 'facebook', icon: '👥', url: place.facebook, title: 'Facebook', cls: 'badge-fb' },
+    { key: 'linkedin', icon: '💼', url: place.linkedin, title: 'LinkedIn', cls: 'badge-li' },
+    { key: 'twitter', icon: '🐦', url: place.twitter, title: 'Twitter/X', cls: 'badge-tw' },
+    { key: 'youtube', icon: '▶️', url: place.youtube, title: 'YouTube', cls: 'badge-yt' },
+    { key: 'tiktok', icon: '🎵', url: place.tiktok, title: 'TikTok', cls: 'badge-tt' }
+  ];
+
   if (place.whatsapp && place.whatsapp !== 'N/A') {
     const waDigits = String(place.whatsapp).replace(/[^0-9]/g, '');
     const waUrl = place.whatsapp.startsWith('http') ? place.whatsapp : `https://wa.me/${waDigits || place.whatsapp}`;
-    socialsList.push(`<a href="${encodeURI(waUrl)}" target="_blank" class="badge-social badge-wa" title="WhatsApp: ${escapeHtml(place.whatsapp)}" onclick="event.stopPropagation();">💬</a>`);
+    socialEntries.push({ key: 'whatsapp', icon: '💬', url: waUrl, title: 'WhatsApp', cls: 'badge-wa' });
   }
 
-  const socialsHtml = socialsList.length > 0
-    ? `<div style="display:flex; gap:5px;" onclick="event.stopPropagation();">${socialsList.join('')}</div>`
-    : '<span class="badge badge-none">—</span>';
+  const activeSocials = socialEntries.filter(s => s.url && s.url !== 'N/A' && s.url.trim() !== '');
+
+  let socialsHtml = '<span class="badge badge-none">—</span>';
+  if (activeSocials.length > 0) {
+    const mapsGroup = [];
+    const webGroup = [];
+
+    activeSocials.forEach(s => {
+      let src = attr[s.key];
+      if (!src) {
+        src = (place.website_scraped_at || (place.website_status && place.website_status !== 'no_website' && place.website_status !== 'pending')) ? 'web' : 'maps';
+      }
+      const iconHtml = `<a href="${encodeURI(s.url)}" target="_blank" class="badge-social ${s.cls}" title="${s.title}: ${escapeHtml(s.url)} (1st found by ${src === 'maps' ? '📍 Maps' : '🌐 Web'})" onclick="event.stopPropagation();">${s.icon}</a>`;
+      if (src === 'maps') mapsGroup.push(iconHtml);
+      else webGroup.push(iconHtml);
+    });
+
+    const groupParts = [];
+    if (mapsGroup.length > 0) {
+      groupParts.push(`
+        <div class="social-source-group" title="1st found by 📍 Maps Agent">
+          <div style="display:flex; gap:3px; align-items:center;">${mapsGroup.join('')}</div>
+          <span class="source-chip-maps">📍 Maps</span>
+        </div>
+      `);
+    }
+    if (webGroup.length > 0) {
+      groupParts.push(`
+        <div class="social-source-group" title="1st found by 🌐 Web Agent">
+          <div style="display:flex; gap:3px; align-items:center;">${webGroup.join('')}</div>
+          <span class="source-chip-web">🌐 Web</span>
+        </div>
+      `);
+    }
+    socialsHtml = `<div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">${groupParts.join('')}</div>`;
+  }
 
   // Phone & WhatsApp HTML for table cells
   const phoneParts = [];
+  const phoneSrc = getSourceBadge('phone');
   if (place.phone && place.phone !== 'N/A') {
-    phoneParts.push(`<a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none; white-space:nowrap;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>`);
+    phoneParts.push(`<div style="display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap;"><a href="tel:${place.phone}" style="color:#cbd5e1; text-decoration:none; white-space:nowrap;" onclick="event.stopPropagation();">📞 ${escapeHtml(place.phone)}</a>${phoneSrc}</div>`);
   }
   if (place.whatsapp && place.whatsapp !== 'N/A') {
     const waDigits = String(place.whatsapp).replace(/[^0-9]/g, '');
     const waUrl = place.whatsapp.startsWith('http') ? place.whatsapp : `https://wa.me/${waDigits || place.whatsapp}`;
-    phoneParts.push(`<a href="${encodeURI(waUrl)}" target="_blank" class="badge-wa-chip" title="Chat on WhatsApp: ${escapeHtml(place.whatsapp)}" onclick="event.stopPropagation();">💬 WhatsApp</a>`);
+    const waSrc = getSourceBadge('whatsapp');
+    phoneParts.push(`<div style="display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap;"><a href="${encodeURI(waUrl)}" target="_blank" class="badge-wa-chip" title="Chat on WhatsApp: ${escapeHtml(place.whatsapp)}" onclick="event.stopPropagation();">💬 WhatsApp</a>${waSrc}</div>`);
   }
   const phoneHtml = phoneParts.length > 0
     ? `<div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">${phoneParts.join('')}</div>`
@@ -1277,19 +1461,24 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
   if (isSelected) tr.classList.add('row-selected');
 
   const checkTd = `<td style="text-align:center;" onclick="event.stopPropagation();"><input type="checkbox" class="row-select-checkbox" data-id="${place.id}" ${isSelected ? 'checked' : ''} onchange="window.onRowSelectChange()" /></td>`;
-  const curType = curTab === 'maps' ? 'maps' : 'master';
+  const curType = curTab === 'platform' ? 'platform' : 'lead';
   const actionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
     <div style="display:flex; gap:6px; justify-content:center;">
-      <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('${curType}', ${place.id})" title="Edit lead">✏️</button>
-      <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('${curType}', ${place.id}, '${escapeHtml(place.name || 'Lead')}')" title="Delete lead">🗑️</button>
+      <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('${curType}', ${place.id})" title="Edit record">✏️</button>
+      <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('${curType}', ${place.id}, '${escapeHtml(place.name || place.title || 'Record')}')" title="Delete record">🗑️</button>
     </div>
   </td>`;
+
+  const originBadge = getLeadOriginBadge();
+  const siteHtml = (place.website && place.website !== 'N/A')
+    ? `<div style="display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap;"><a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>${siteSrc}</div>`
+    : '<span class="badge badge-none">—</span>';
 
   if (curTab === 'maps') {
     tr.innerHTML = `
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.name)}</span>${originBadge}</div></td>
       <td>${categoryHtml}</td>
       <td>${emailHtml}</td>
       <td>${socialsHtml}</td>
@@ -1298,24 +1487,20 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${phoneHtml}</td>
       <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
       <td>${ratingHtml}</td>
-      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${siteHtml}</td>
       <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
       <td><span class="badge badge-verified" style="background:rgba(34,197,94,0.15); color:#4ade80; border:1px solid rgba(34,197,94,0.3);">✓ Captured</span></td>
       <td>${window.formatDateTime(place.created_at)}</td>
       ${actionsTd}
     `;
   } else if (curTab === 'website') {
-    let wStatusBadge = '<span class="badge badge-none">Pending</span>';
-    if (place.website_status === 'emails_found') wStatusBadge = '<span class="badge badge-email">✉️ Emails Found</span>';
-    else if (place.website_status === 'clean') wStatusBadge = '<span class="badge badge-verified">✓ Clean</span>';
-    else if (place.website_status === 'social') wStatusBadge = '<span class="badge badge-social">📸 Social Profile</span>';
-    else if (place.website_status === 'failed') wStatusBadge = '<span class="badge badge-bot-denied">⚠️ Failed / Blocked</span>';
-    else if (place.website_status === 'no_website') wStatusBadge = '<span class="badge badge-none">No Website</span>';
+    const wStatusTag = window.getLeadWebsiteStatusTag ? window.getLeadWebsiteStatusTag(place) : (place.status_tag || 'In Queue');
+    const wStatusBadge = window.renderWebsiteStatusBadge ? window.renderWebsiteStatusBadge(wStatusTag) : renderWebsiteStatusBadge(wStatusTag);
 
     tr.innerHTML = `
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.name)}</span>${originBadge}</div></td>
       <td>${categoryHtml}</td>
       <td>${wStatusBadge}</td>
       <td>${emailHtml}</td>
@@ -1328,13 +1513,14 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td>${phoneHtml}</td>
       <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address)}">${escapeHtml(place.address)}</td>
       <td>${ratingHtml}</td>
-      <td>${place.website && place.website !== 'N/A' ? `<a href="${encodeURI(place.website)}" target="_blank" class="link-btn" title="${escapeHtml(place.website)}" onclick="event.stopPropagation();">🌐 ${cleanDisplayUrl(place.website)}</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${siteHtml}</td>
       <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
       <td>${window.formatWebAgentDualDateTime(place.created_at, place.website_scraped_at, place.website_status, place.website)}</td>
       ${actionsTd}
     `;
   } else if (curTab === 'linkedin') {
     const liUrl = place.company_linkedin || place.linkedin || '';
+    const liSrc = getSourceBadge('linkedin');
     let liStatusBadge = '<span class="badge badge-none">Pending</span>';
     if (empCount > 0 || place.founder_name) liStatusBadge = '<span class="badge badge-verified">🌳 Mapped</span>';
     else if (liUrl && liUrl !== 'N/A') liStatusBadge = '<span class="badge badge-category">Company Verified</span>';
@@ -1347,12 +1533,16 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       keyPeopleHtml = `<span style="color:#38bdf8; font-weight:600;">${empCount} members</span> extracted`;
     }
 
+    const companyLiHtml = (liUrl && liUrl !== 'N/A')
+      ? `<div style="display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap;"><a href="${encodeURI(liUrl)}" target="_blank" class="badge-social badge-li" style="text-decoration:none; padding:4px 8px; width:auto; border-radius:6px;" title="${escapeHtml(liUrl)}" onclick="event.stopPropagation();">💼 LinkedIn Page</a>${liSrc}</div>`
+      : '<span class="badge badge-none">—</span>';
+
     tr.innerHTML = `
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-      <td class="shop-title">${escapeHtml(place.name || place.company_name)}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.name || place.company_name)}</span>${originBadge}</div></td>
       <td>${liStatusBadge}</td>
-      <td>${liUrl && liUrl !== 'N/A' ? `<a href="${encodeURI(liUrl)}" target="_blank" class="badge-social badge-li" style="text-decoration:none; padding:4px 8px; width:auto; border-radius:6px;" title="${escapeHtml(liUrl)}" onclick="event.stopPropagation();">💼 LinkedIn Page</a>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${companyLiHtml}</td>
       <td>${employeeBadgeHtml}</td>
       <td style="font-size:0.8rem; color:#cbd5e1;">${keyPeopleHtml}</td>
       <td>${orgChartBtn}</td>
@@ -1398,7 +1588,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
       <td>${platformColHtml}</td>
       <td><span class="badge badge-verified" style="background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3);">🟣 Listed</span></td>
-      <td class="shop-title">${escapeHtml(place.title || place.name || place.company_name || 'Listing')}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.title || place.name || place.company_name || 'Listing')}</span>${originBadge}</div></td>
       <td><span class="badge badge-category">${escapeHtml(place.category || 'Listing')}</span></td>
       <td>${screenHtml}</td>
       <td><span class="rating-pill">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span></td>
@@ -1445,7 +1635,7 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
     tr.innerHTML = `
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
-      <td class="shop-title">${escapeHtml(place.name)}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.name)}</span>${originBadge}</div></td>
       <td>${categoryHtml}</td>
       <td>${emailHtml}</td>
       <td>${socialsHtml}</td>
@@ -1637,6 +1827,8 @@ window.renderTable = function() {
     f.search ||
     f.category ||
     f.platform ||
+    f.statusTag ||
+    (window.activeTagFilter && window.activeTagFilter !== 'All') ||
     (f.minRating > 0) ||
     f.botSecurity ||
     f.cookieStatus ||
@@ -1652,9 +1844,13 @@ window.renderTable = function() {
   );
 
   const filteredList = activeList.filter(item => {
-    // 0. Status Tag Filter (for Website & LinkedIn tabs)
-    if (window.activeTagFilter && window.activeTagFilter !== 'All') {
-      if (item.status_tag !== window.activeTagFilter) return false;
+    // 0. Status Tag Filter (for Website, LinkedIn & Master tabs)
+    const effectiveTagFilter = f.statusTag || (window.activeTagFilter !== 'All' ? window.activeTagFilter : '');
+    if (effectiveTagFilter) {
+      const itemTag = window.getLeadWebsiteStatusTag ? window.getLeadWebsiteStatusTag(item) : (item.status_tag || '');
+      if (itemTag.toLowerCase() !== effectiveTagFilter.toLowerCase() && (item.status_tag || '').toLowerCase() !== effectiveTagFilter.toLowerCase()) {
+        return false;
+      }
     }
     // 1. Search keyword (matches Title/Name, Address, Phone, Email, Platform)
     if (f.search) {
@@ -1839,10 +2035,10 @@ window.addEventListener('DOMContentLoaded', () => {
 window.selectedRowIds = new Set();
 
 window.toggleSelectAll = function(checked) {
-  const checkboxes = document.querySelectorAll('.row-select-checkbox');
-  checkboxes.forEach(cb => {
+  const visibleCheckboxes = document.querySelectorAll('#places-tbody tr:not([style*="display: none"]):not(#empty-row) .row-select-checkbox');
+  visibleCheckboxes.forEach(cb => {
     cb.checked = checked;
-    const id = parseInt(cb.getAttribute('data-id'));
+    const id = parseInt(cb.getAttribute('data-id'), 10);
     const tr = cb.closest('tr');
     if (id) {
       if (checked) {
@@ -1858,11 +2054,11 @@ window.toggleSelectAll = function(checked) {
 };
 
 window.onRowSelectChange = function() {
-  const checkboxes = document.querySelectorAll('.row-select-checkbox');
+  const visibleCheckboxes = document.querySelectorAll('#places-tbody tr:not([style*="display: none"]):not(#empty-row) .row-select-checkbox');
   window.selectedRowIds.clear();
   let checkedCount = 0;
-  checkboxes.forEach(cb => {
-    const id = parseInt(cb.getAttribute('data-id'));
+  visibleCheckboxes.forEach(cb => {
+    const id = parseInt(cb.getAttribute('data-id'), 10);
     const tr = cb.closest('tr');
     if (cb.checked) {
       checkedCount++;
@@ -1875,8 +2071,8 @@ window.onRowSelectChange = function() {
 
   const selAll = document.getElementById('select-all-checkbox');
   if (selAll) {
-    selAll.checked = checkedCount > 0 && checkedCount === checkboxes.length;
-    selAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+    selAll.checked = (visibleCheckboxes.length > 0 && checkedCount === visibleCheckboxes.length);
+    selAll.indeterminate = (checkedCount > 0 && checkedCount < visibleCheckboxes.length);
   }
   window.updateBatchBar();
 };
@@ -1907,16 +2103,16 @@ window.updateBatchBar = function() {
   const selectBtnIcon = document.getElementById('select-btn-icon');
 
   const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
-  const allBoxes = document.querySelectorAll('.row-select-checkbox');
+  const visibleBoxes = document.querySelectorAll('#places-tbody tr:not([style*="display: none"]):not(#empty-row) .row-select-checkbox');
 
   // Update top "Select All" button state
   if (selectBtnText && selectBtnIcon) {
-    if (allBoxes.length > 0 && count === allBoxes.length) {
+    if (visibleBoxes.length > 0 && count >= visibleBoxes.length) {
       selectBtnIcon.innerText = '❎';
       selectBtnText.innerText = 'Deselect All';
     } else {
       selectBtnIcon.innerText = '☑️';
-      selectBtnText.innerText = count > 0 ? `Select All (${allBoxes.length})` : 'Select All';
+      selectBtnText.innerText = visibleBoxes.length > 0 ? `Select All (${visibleBoxes.length})` : 'Select All';
     }
   }
 
@@ -1925,19 +2121,18 @@ window.updateBatchBar = function() {
     bar.style.display = 'flex';
     if (countEl) countEl.innerText = `${count} ${count === 1 ? 'record' : 'records'} selected`;
 
-    // Dynamic label for Edit button: single edit vs batch edit
     if (editBtn && editBtnText) {
       if (count === 1) {
         editBtnText.innerText = 'Edit Record';
         editBtn.title = 'Open full editor for this selected record';
       } else {
-        editBtnText.innerText = 'Batch Edit';
-        editBtn.title = `Batch edit ${count} selected records`;
+        editBtnText.innerText = 'Mass Edit';
+        editBtn.title = `Mass edit ${count} selected records`;
       }
     }
 
     if (deleteBtnText) {
-      deleteBtnText.innerText = count === 1 ? '🗑️ Delete Record' : `🗑️ Delete Selected (${count})`;
+      deleteBtnText.innerText = count === 1 ? '🗑️ Delete Record' : `🗑️ Mass Delete Selected (${count})`;
     }
   } else {
     bar.style.display = 'none';
@@ -1945,25 +2140,25 @@ window.updateBatchBar = function() {
 };
 
 window.handleEditSelectedClick = function() {
-  const count = window.selectedRowIds.size;
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
   if (count === 0) {
     alert('Please select at least one record using a checkbox.');
     return;
   }
   if (count === 1) {
     const id = Array.from(window.selectedRowIds)[0];
-    const curType = window.currentTableTab === 'platform' ? 'platform' : (window.currentTableTab === 'maps' ? 'maps' : 'master');
+    const curType = window.currentTableTab === 'platform' ? 'platform' : 'lead';
     window.openEditRowModal(curType, id);
   } else {
-    window.openBatchEditCategoryModal();
+    window.openBatchEditModal();
   }
 };
 
 window.toggleSelectAllButton = function() {
-  const allBoxes = document.querySelectorAll('.row-select-checkbox');
-  if (allBoxes.length === 0) return;
-  const checkedCount = document.querySelectorAll('.row-select-checkbox:checked').length;
-  const shouldSelect = checkedCount < allBoxes.length;
+  const visibleBoxes = Array.from(document.querySelectorAll('#places-tbody tr:not([style*="display: none"]):not(#empty-row) .row-select-checkbox'));
+  if (visibleBoxes.length === 0) return;
+  const checkedCount = visibleBoxes.filter(cb => cb.checked).length;
+  const shouldSelect = checkedCount < visibleBoxes.length;
   window.toggleSelectAll(shouldSelect);
 
   const headerCb = document.getElementById('select-all-checkbox');
@@ -1974,17 +2169,26 @@ window.toggleSelectAllButton = function() {
 };
 
 window.batchDeleteSelected = async function() {
-  const count = window.selectedRowIds.size;
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
   if (count === 0) return;
-  const tableLabel = window.currentTableTab === 'platform' ? 'Platform Directory Listings' : 'Leads';
+  const isPlatform = (window.currentTableTab === 'platform');
+  const tableLabel = isPlatform ? 'Platform Directory Listings' : 'Leads';
   if (!confirm(`Are you sure you want to permanently delete ${count} selected ${tableLabel}? This action cannot be undone.`)) {
     return;
   }
 
   const ids = Array.from(window.selectedRowIds);
-  const endpoint = window.currentTableTab === 'platform'
+  const endpoint = isPlatform
     ? '/api/platform-listings/batch-delete'
     : '/api/leads/batch-delete';
+
+  // Instant visual feedback: dim rows being deleted
+  ids.forEach(id => {
+    document.querySelectorAll(`tr#row-${id}, input.row-select-checkbox[data-id="${id}"]`).forEach(el => {
+      const tr = el.closest('tr') || el;
+      tr.style.opacity = '0.3';
+    });
+  });
 
   try {
     const res = await fetch(endpoint, {
@@ -1994,69 +2198,137 @@ window.batchDeleteSelected = async function() {
     });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
     const data = await res.json();
+
+    // Remove rows from DOM immediately
+    ids.forEach(id => {
+      document.querySelectorAll(`tr#row-${id}`).forEach(tr => tr.remove());
+      if (window.tablesSplitData) {
+        ['master_leads', 'unmatched_maps', 'website_leads', 'linkedin_leads', 'unmatched_platform'].forEach(k => {
+          if (Array.isArray(window.tablesSplitData[k])) {
+            window.tablesSplitData[k] = window.tablesSplitData[k].filter(item => item.id !== id);
+          }
+        });
+      }
+      if (Array.isArray(window.placesData)) {
+        window.placesData = window.placesData.filter(item => item.id !== id);
+      }
+    });
+
     window.deselectAllRows();
-    if (typeof loadDatabase === 'function') {
-      await loadDatabase();
+    if (typeof window.refreshTablesSplit === 'function') {
+      await window.refreshTablesSplit();
+    } else if (typeof window.renderTable === 'function') {
+      window.renderTable();
     }
     alert(`Successfully deleted ${data.deleted_count || count} records.`);
   } catch (err) {
     console.error('Batch delete failed:', err);
     alert('Failed to delete selected records: ' + err.message);
+    if (typeof window.renderTable === 'function') window.renderTable();
   }
 };
 
-window.openBatchEditCategoryModal = function() {
-  const count = window.selectedRowIds.size;
+window.openBatchEditModal = function() {
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
   if (count === 0) {
-    alert('Please select at least one record to update.');
+    alert('Please select at least one record to edit.');
     return;
   }
-  const modal = document.getElementById('batch-cat-modal');
-  const desc = document.getElementById('batch-cat-desc');
-  const input = document.getElementById('batch-cat-input');
-  if (desc) desc.innerText = `Set a new category for the ${count} selected record${count > 1 ? 's' : ''}:`;
-  if (input) input.value = '';
+  const modal = document.getElementById('batch-edit-modal');
+  const desc = document.getElementById('batch-edit-desc');
+  if (desc) {
+    desc.innerHTML = `Update fields across <strong>${count}</strong> selected records. <em>Leave any field blank to keep its existing value.</em>`;
+  }
+  const catInput = document.getElementById('batch-edit-category');
+  if (catInput) catInput.value = '';
+  const statusInput = document.getElementById('batch-edit-status');
+  if (statusInput) statusInput.value = '';
+  const phoneInput = document.getElementById('batch-edit-phone');
+  if (phoneInput) phoneInput.value = '';
+  const cityInput = document.getElementById('batch-edit-city');
+  if (cityInput) cityInput.value = '';
+  const notesInput = document.getElementById('batch-edit-notes');
+  if (notesInput) notesInput.value = '';
+
   if (modal) modal.style.display = 'flex';
 };
 
-window.closeBatchCatModal = function() {
-  const modal = document.getElementById('batch-cat-modal');
+window.closeBatchEditModal = function() {
+  const modal = document.getElementById('batch-edit-modal');
   if (modal) modal.style.display = 'none';
 };
 
-window.submitBatchCategory = async function() {
-  const input = document.getElementById('batch-cat-input');
-  const newCat = (input ? input.value : '').trim();
-  if (!newCat) {
-    alert('Please enter a valid category name.');
+window.submitBatchEdit = async function(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
+  if (count === 0) {
+    alert('No records selected.');
     return;
   }
+
+  const catVal = (document.getElementById('batch-edit-category')?.value || '').trim();
+  const statusVal = (document.getElementById('batch-edit-status')?.value || '').trim();
+  const phoneVal = (document.getElementById('batch-edit-phone')?.value || '').trim();
+  const cityVal = (document.getElementById('batch-edit-city')?.value || '').trim();
+  const notesVal = (document.getElementById('batch-edit-notes')?.value || '').trim();
+
+  const updates = {};
+  if (catVal) updates.category = catVal;
+  if (statusVal) {
+    updates.status_tag = statusVal;
+    updates.website_status = statusVal;
+  }
+  if (phoneVal) updates.phone = phoneVal;
+  if (cityVal) updates.address = cityVal;
+  if (notesVal) updates.notes = notesVal;
+
+  if (Object.keys(updates).length === 0) {
+    alert('Please fill in at least one field to update, or click Cancel.');
+    return;
+  }
+
   const ids = Array.from(window.selectedRowIds);
-  const endpoint = window.currentTableTab === 'platform'
+  const isPlatform = (window.currentTableTab === 'platform');
+  const endpoint = isPlatform
     ? '/api/platform-listings/batch-update'
     : '/api/leads/batch-update';
+
+  const btnSubmit = document.getElementById('btn-submit-batch-edit');
+  if (btnSubmit) {
+    btnSubmit.disabled = true;
+    btnSubmit.innerText = 'Applying...';
+  }
 
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: ids, updates: { category: newCat } })
+      body: JSON.stringify({ ids: ids, updates: updates })
     });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    window.closeBatchCatModal();
+    const data = await res.json();
+
+    window.closeBatchEditModal();
     window.deselectAllRows();
-    if (typeof loadDatabase === 'function') {
-      await loadDatabase();
+    if (typeof window.refreshTablesSplit === 'function') {
+      await window.refreshTablesSplit();
+    } else if (typeof window.renderTable === 'function') {
+      window.renderTable();
     }
-    alert(`Successfully updated category to "${newCat}" for ${ids.length} records.`);
+    alert(`Successfully updated ${data.updated_count || ids.length} records!`);
   } catch (err) {
-    console.error('Batch category update failed:', err);
-    alert('Failed to update categories: ' + err.message);
+    console.error('Batch update failed:', err);
+    alert('Failed to update records: ' + err.message);
+  } finally {
+    if (btnSubmit) {
+      btnSubmit.disabled = false;
+      btnSubmit.innerText = 'Apply to All Selected';
+    }
   }
 };
 
 window.exportSelectedCSV = function() {
-  const count = window.selectedRowIds.size;
+  const count = window.selectedRowIds ? window.selectedRowIds.size : 0;
   if (count === 0) {
     alert('No rows selected. Please select rows using checkboxes.');
     return;
@@ -2070,15 +2342,39 @@ window.exportSelectedCSV = function() {
 // Individual Edit & Delete Operations
 // -----------------------------------------------------------------------
 
-window.openEditRowModal = function(type, id) {
+window.openEditRowModal = async function(type, id) {
   let record = null;
-  const numId = parseInt(id);
-  if (type === 'platform') {
-    record = (window.tablesSplitData.unmatched_platform || []).find(p => p.id === numId);
-  } else if (type === 'maps') {
-    record = (window.tablesSplitData.unmatched_maps || []).find(p => p.id === numId);
+  const numId = parseInt(id, 10);
+  const isPlatform = (type === 'platform' || window.currentTableTab === 'platform');
+  const split = window.tablesSplitData || {};
+
+  if (isPlatform) {
+    record = (split.unmatched_platform || []).find(p => p.id === numId);
+    if (!record && Array.isArray(window.placesData)) {
+      record = window.placesData.find(p => p.id === numId && (p.platform || p.platform_name));
+    }
   } else {
-    record = (window.tablesSplitData.master_leads || []).find(p => p.id === numId);
+    record = (split.master_leads || []).find(p => p.id === numId)
+          || (split.website_leads || []).find(p => p.id === numId)
+          || (split.unmatched_maps || []).find(p => p.id === numId)
+          || (split.linkedin_leads || []).find(p => p.id === numId);
+    if (!record && Array.isArray(window.placesData)) {
+      record = window.placesData.find(p => p.id === numId);
+    }
+  }
+
+  // Fallback to fetch from backend if not found in memory
+  if (!record) {
+    try {
+      const endpoint = isPlatform ? `/api/platform-listings/${numId}` : `/api/leads/${numId}`;
+      const res = await fetch(endpoint);
+      if (res.ok) {
+        const json = await res.json();
+        record = json.lead || json.listing || json.data || json;
+      }
+    } catch (e) {
+      console.warn('Could not fetch single record from backend:', e);
+    }
   }
 
   if (!record) {
@@ -2089,9 +2385,8 @@ window.openEditRowModal = function(type, id) {
   const modal = document.getElementById('edit-row-modal');
   const titleEl = document.getElementById('edit-modal-title');
   document.getElementById('edit-item-id').value = record.id;
-  document.getElementById('edit-item-type').value = type;
+  document.getElementById('edit-item-type').value = isPlatform ? 'platform' : 'lead';
 
-  const isPlatform = type === 'platform';
   if (titleEl) {
     titleEl.innerText = isPlatform ? `✏️ Edit Directory Listing: #${record.id}` : `✏️ Edit Lead Details: #${record.id}`;
   }
@@ -2147,6 +2442,16 @@ window.openEditRowModal = function(type, id) {
     priceInput.value = (record.price_info || record.price || record.platform_price || '');
   }
 
+  const statusInput = document.getElementById('edit-field-status');
+  if (statusInput) {
+    statusInput.value = record.status_tag || record.website_status || '';
+  }
+
+  const notesInput = document.getElementById('edit-field-notes');
+  if (notesInput) {
+    notesInput.value = record.notes || '';
+  }
+
   if (modal) modal.style.display = 'flex';
 };
 
@@ -2157,11 +2462,11 @@ window.closeEditRowModal = function() {
 
 window.saveRowEdit = async function(e) {
   e.preventDefault();
-  const id = parseInt(document.getElementById('edit-item-id').value);
+  const id = parseInt(document.getElementById('edit-item-id').value, 10);
   const type = document.getElementById('edit-item-type').value;
   if (!id) return;
 
-  const isPlatform = type === 'platform';
+  const isPlatform = (type === 'platform');
   const nameVal = document.getElementById('edit-field-name').value.trim();
   const catVal = document.getElementById('edit-field-category').value.trim();
   const phoneVal = document.getElementById('edit-field-phone').value.trim();
@@ -2169,6 +2474,8 @@ window.saveRowEdit = async function(e) {
   const addrVal = document.getElementById('edit-field-address').value.trim();
   const ratingVal = document.getElementById('edit-field-rating').value.trim();
   const priceVal = document.getElementById('edit-field-price').value.trim();
+  const statusVal = document.getElementById('edit-field-status') ? document.getElementById('edit-field-status').value.trim() : '';
+  const notesVal = document.getElementById('edit-field-notes') ? document.getElementById('edit-field-notes').value.trim() : '';
 
   let payload = {};
   let endpoint = '';
@@ -2199,6 +2506,13 @@ window.saveRowEdit = async function(e) {
       price: priceVal,
       website: websiteVal
     };
+    if (statusVal) {
+      payload.website_status = statusVal;
+      payload.status_tag = statusVal;
+    }
+    if (notesVal !== undefined) {
+      payload.notes = notesVal;
+    }
     endpoint = `/api/leads/${id}`;
   }
 
@@ -2216,8 +2530,10 @@ window.saveRowEdit = async function(e) {
     });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
     window.closeEditRowModal();
-    if (typeof loadDatabase === 'function') {
-      await loadDatabase();
+    if (typeof window.refreshTablesSplit === 'function') {
+      await window.refreshTablesSplit();
+    } else if (typeof window.renderTable === 'function') {
+      window.renderTable();
     }
   } catch (err) {
     console.error('Failed to save edit:', err);
@@ -2231,22 +2547,55 @@ window.saveRowEdit = async function(e) {
 };
 
 window.deleteSingleRow = async function(type, id, title) {
-  const isPlatform = type === 'platform';
+  const isPlatform = (type === 'platform' || window.currentTableTab === 'platform');
   const label = isPlatform ? 'Directory Listing' : 'Lead';
-  if (!confirm(`Are you sure you want to delete the ${label} "${title || '#' + id}"?`)) {
+  const numId = parseInt(id, 10);
+  if (!confirm(`Are you sure you want to delete the ${label} "${title || '#' + numId}"?`)) {
     return;
   }
 
-  const endpoint = isPlatform ? `/api/platform-listings/${id}` : `/api/leads/${id}`;
+  // Visual feedback: dim row immediately
+  const matchingRows = document.querySelectorAll(`tr#row-${numId}, input.row-select-checkbox[data-id="${numId}"]`);
+  matchingRows.forEach(el => {
+    const tr = el.closest('tr') || el;
+    tr.style.opacity = '0.3';
+  });
+
+  const endpoint = isPlatform ? `/api/platform-listings/${numId}` : `/api/leads/${numId}`;
   try {
     const res = await fetch(endpoint, { method: 'DELETE' });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    if (window.selectedRowIds) window.selectedRowIds.delete(id);
-    if (typeof loadDatabase === 'function') {
-      await loadDatabase();
+    if (window.selectedRowIds) window.selectedRowIds.delete(numId);
+
+    // Remove row from DOM
+    matchingRows.forEach(el => {
+      const tr = el.closest('tr') || el;
+      tr.remove();
+    });
+
+    // Remove from in-memory arrays
+    if (window.tablesSplitData) {
+      ['master_leads', 'unmatched_maps', 'website_leads', 'linkedin_leads', 'unmatched_platform'].forEach(k => {
+        if (Array.isArray(window.tablesSplitData[k])) {
+          window.tablesSplitData[k] = window.tablesSplitData[k].filter(item => item.id !== numId);
+        }
+      });
+    }
+    if (Array.isArray(window.placesData)) {
+      window.placesData = window.placesData.filter(item => item.id !== numId);
+    }
+
+    if (typeof window.updateBatchBar === 'function') window.updateBatchBar();
+
+    if (typeof window.refreshTablesSplit === 'function') {
+      await window.refreshTablesSplit();
+    } else if (typeof window.renderTable === 'function') {
+      window.renderTable();
     }
   } catch (err) {
     console.error('Failed to delete row:', err);
     alert('Failed to delete record: ' + err.message);
+    if (typeof window.renderTable === 'function') window.renderTable();
   }
 };
+

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="/static/css/app.css?v=2.2.2">
+  <link rel="stylesheet" href="/static/css/app.css?v=2.3.1">
 </head>
 <body>
   <header>
@@ -46,6 +46,9 @@
         </button>
         <button class="mode-tab-btn" id="tab-mode-companies" onclick="setMode('companies')">
           <span>🏢 Standalone LinkedIn Org</span>
+        </button>
+        <button class="mode-tab-btn" id="tab-mode-website-list" onclick="setMode('website_list')">
+          <span>🌐 Direct Website Scraper</span>
         </button>
       </div>
 
@@ -139,9 +142,9 @@
           </div>
         </div>
 
-        <div class="form-group" id="max-results-group" style="opacity: 0.7; pointer-events: none;">
+        <div class="form-group" id="max-results-group">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label style="margin:0;">Max Places Limit: <span id="max-label" style="color:var(--accent); font-weight:700;">∞ (Continuous - Scraping ALL Area Shops)</span></label>
+            <label style="margin:0;">Max Places Limit: <span id="max-label" style="color:var(--accent); font-weight:700;">∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Continuous)</span></span></label>
             <button type="button" id="infinity-badge-btn" class="btn" style="padding:2px 8px; font-size:0.7rem; background:rgba(99,102,241,0.2); border:1px solid #6366f1; color:#c7d2fe; border-radius:4px; cursor:pointer;" onclick="toggleInfinityMode()">
               ♾️ Unlimited
             </button>
@@ -293,6 +296,49 @@
         <div style="background:rgba(10, 102, 194, 0.12); border:1px solid rgba(10, 102, 194, 0.3); border-radius:10px; padding:12px 14px; font-size:0.8rem; color:#bae6fd; line-height:1.4;">
           <strong>💼 Tab 3 Active Chrome Profile Mode:</strong><br>
           Directly searches company LinkedIn accounts using your active logged-in Chrome profile session, crawls the People directory, classifies job roles into Seniority tiers (Executive, Management, Staff), and builds hierarchical tree charts.
+        </div>
+      </div>
+
+      <!-- Mode 3: Direct Website Scraper Controls -->
+      <div id="controls-website-list" style="display:none; flex-direction:column; gap:16px;">
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label style="margin:0;">Target Websites List (One URL per line)</label>
+            <span id="website-count-badge" class="badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-size:0.75rem; padding:2px 8px; border-radius:12px;">0 URLs detected</span>
+          </div>
+          <textarea id="website-list-input" rows="5" placeholder="Enter websites (one URL per line or comma-separated):&#10;e.g.&#10;https://grind.co.uk&#10;pret.co.uk&#10;https://monmouthcoffee.co.uk" style="resize:vertical; font-family:monospace; font-size:0.85rem;" oninput="onWebsiteInputChanged()"></textarea>
+          <div class="chips" style="margin-top:6px;">
+            <div class="chip" onclick="addWebsiteChip('https://grind.co.uk')">☕ Grind</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.pret.co.uk')">🥪 Pret</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.monmouthcoffee.co.uk')">☕ Monmouth Coffee</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.francomanca.co.uk')">🍕 Franco Manca</div>
+            <div class="chip" onclick="clearWebsiteInput()" style="color:#ef4444; border-color:rgba(239,68,68,0.3);">🗑️ Clear</div>
+          </div>
+        </div>
+
+        <!-- File Upload Dropzone -->
+        <div id="website-dropzone" class="dropzone" onclick="document.getElementById('website-file-input').click()" ondragover="handleFileDragOver(event)" ondragleave="handleFileDragLeave(event)" ondrop="handleFileDrop(event)">
+          <input type="file" id="website-file-input" accept=".csv, .txt" style="display:none;" onchange="handleFileSelect(event)">
+          <div style="font-size:1.6rem; margin-bottom:4px;">📁</div>
+          <div style="font-weight:600; font-size:0.85rem; color:#f1f5f9;">Drag & drop CSV or TXT file here, or <span style="color:var(--primary); text-decoration:underline;">browse</span></div>
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Auto-detects URL columns (Website, URL, Link, Site) and companion columns (Name, Phone, Category)</div>
+        </div>
+
+        <!-- Deep Crawl Toggle -->
+        <div class="toggle-row" style="background:rgba(255,255,255,0.02); border:1px solid var(--card-border); border-radius:10px; padding:10px 12px;">
+          <div class="toggle-info">
+            <span>🕷️ Deep Crawl Subpages</span>
+            <small>Inspects /contact and /about links for additional emails & phone numbers</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="website-deep-crawl-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div style="background:rgba(16, 185, 129, 0.08); border:1px solid rgba(16, 185, 129, 0.25); border-radius:10px; padding:10px 12px; font-size:0.78rem; color:#a7f3d0; line-height:1.4;">
+          <strong>🌐 Tab 2 Direct Scraper Highlights:</strong><br>
+          Extracts Emails, Phone, WhatsApp, Instagram, Facebook, LinkedIn, Twitter, YouTube, TikTok, Booking links, Bot shield status, Cookie banners & full-color Screenshots. Automatically deduplicates against existing records in <code>leads.db</code>.
         </div>
       </div>
 
@@ -592,17 +638,21 @@
               <span class="sync-stat" id="sync-stat-web">0% (0 / 0)</span>
             </div>
             <div class="sync-bar-wrap" id="sync-bar-wrap-web">
-              <div class="sync-bar-seg" id="seg-web-found" title="Found Websites" style="width: 0%; background: #10b981;"></div>
-              <div class="sync-bar-seg" id="seg-web-emails" title="Emails Discovered" style="width: 0%; background: #a855f7;"></div>
-              <div class="sync-bar-seg" id="seg-web-noweb" title="No Website" style="width: 0%; background: #f97316;"></div>
-              <div class="sync-bar-seg" id="seg-web-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar-seg" id="seg-web-pending" title="Click to filter: In Queue" style="width: 0%; background: #475569; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('In Queue')"></div>
+              <div class="sync-bar-seg" id="seg-web-contacts" title="Click to filter: Contacts Found" style="width: 0%; background: #10b981; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Contacts Found')"></div>
+              <div class="sync-bar-seg" id="seg-web-nocontacts" title="Click to filter: No Contacts Found" style="width: 0%; background: #3b82f6; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Contacts Found')"></div>
+              <div class="sync-bar-seg" id="seg-web-bot" title="Click to filter: Bot Shield" style="width: 0%; background: #f59e0b; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Bot Shield (Data Extracted)')"></div>
+              <div class="sync-bar-seg" id="seg-web-notloading" title="Click to filter: Not Loading / Unsafe" style="width: 0%; background: #ef4444; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Not Loading')"></div>
+              <div class="sync-bar-seg" id="seg-web-noweb" title="Click to filter: No Website" style="width: 0%; background: #64748b; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Website')"></div>
               <div class="sync-bar" id="sync-bar-web" style="display:none; width: 0%;"></div>
             </div>
             <div class="sync-chips">
-              <span class="chip-sm chip-green" id="sync-chip-web-found">✅ Found: 0</span>
-              <span class="chip-sm chip-purple" id="sync-chip-web-emails">✉️ Emails: 0</span>
-              <span class="chip-sm chip-orange" id="sync-chip-web-noweb">⚠️ No Web: 0</span>
-              <span class="chip-sm chip-gray" id="sync-chip-web-pending">⏳ In Queue: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-web-pending" style="cursor: pointer;" title="Click to filter: In Queue" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('In Queue')">⏳ In Queue: 0</span>
+              <span class="chip-sm chip-green" id="sync-chip-web-contacts" style="cursor: pointer;" title="Click to filter: Contacts Found" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Contacts Found')">🟢 Contacts: 0</span>
+              <span class="chip-sm chip-blue" id="sync-chip-web-nocontacts" style="cursor: pointer;" title="Click to filter: No Contacts Found" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Contacts Found')">🔵 No Contacts: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-web-bot" style="cursor: pointer;" title="Click to filter: Bot Shield" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Bot Shield (Data Extracted)')">🟡 Bot Shield: 0</span>
+              <span class="chip-sm chip-red" id="sync-chip-web-notloading" style="cursor: pointer;" title="Click to filter: Not Loading / Unsafe" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Not Loading')">🔴 Not Loading: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-web-noweb" style="cursor: pointer;" title="Click to filter: No Website" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Website')">⚪ No Web: 0</span>
             </div>
           </div>
 
@@ -743,6 +793,21 @@
               </select>
             </div>
 
+            <!-- Column Filter: Status Tag (Website Inspector & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-status" title="Filter by Status Tag" style="display:none;">
+              <select id="filter-status-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🏷️ All Status Tags</option>
+                <option value="Contacts Found">🟢 Contacts Found</option>
+                <option value="No Contacts Found">🔵 No Contacts Found</option>
+                <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+                <option value="Bot Blocked">🟣 Bot Blocked</option>
+                <option value="Not Loading">🔴 Not Loading</option>
+                <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+                <option value="No Website">⚪ No Website</option>
+                <option value="In Queue">⏳ In Queue</option>
+              </select>
+            </div>
+
             <!-- Column Filter: Bot Security (Maps & Master Tables) -->
             <div class="filter-select-wrapper" id="filter-wrapper-bot" title="Filter by Bot Security column">
               <select id="filter-bot-select" class="filter-select" onchange="onFilterChange()">
@@ -801,11 +866,11 @@
             <button class="btn-batch-single-edit" id="btn-edit-selected" onclick="handleEditSelectedClick()" title="Edit details of the selected item(s)">
               <span id="btn-edit-selected-icon">✏️</span> <span id="btn-edit-selected-text">Edit Record</span>
             </button>
-            <button class="btn-batch-category" onclick="openBatchEditCategoryModal()" title="Batch change category for selected items">
-              <span>🏷️ Change Category</span>
+            <button class="btn-batch-category" onclick="openBatchEditModal()" title="Mass Edit fields for selected items">
+              <span>✏️ Mass Edit Selected</span>
             </button>
-            <button class="btn-batch-delete" id="btn-delete-selected" onclick="batchDeleteSelected()" title="Delete selected record(s)">
-              <span id="btn-delete-selected-text">🗑️ Delete Selected</span>
+            <button class="btn-batch-delete" id="btn-delete-selected" onclick="batchDeleteSelected()" title="Mass delete selected record(s)">
+              <span id="btn-delete-selected-text">🗑️ Mass Delete Selected</span>
             </button>
             <button class="btn-batch-export" onclick="exportSelectedCSV()" title="Export only selected rows to CSV">
               <span>📥 Export Selected CSV</span>
@@ -871,6 +936,67 @@
       </div>
       <div class="modal-body" style="text-align:center;">
         <img id="modal-img" src="" alt="Landing Page Screenshot" style="max-width:100%; max-height:75vh; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.6);" />
+      </div>
+    </div>
+  </div>
+
+  <!-- DUPLICATE WEBSITES REVIEW MODAL -->
+  <div id="duplicate-websites-modal" class="modal-overlay" onclick="closeDuplicateModal()" style="display:none; z-index:10000;">
+    <div class="modal-content" onclick="event.stopPropagation()" style="max-width:760px; max-height:85vh; display:flex; flex-direction:column; overflow:hidden; border:1px solid rgba(14,165,233,0.3); background:#0c1322; box-shadow:0 20px 60px rgba(0,0,0,0.8);">
+      <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.08); padding:16px 20px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.3rem;">⚠️</span>
+          <div>
+            <h3 style="margin:0; font-size:1.05rem; font-weight:700; color:#f8fafc;">Websites Already in Database</h3>
+            <small style="color:#94a3b8; font-size:0.78rem;">The following website(s) were previously scraped. Select which ones you want to re-scrape with fresh live data:</small>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeDuplicateModal()">&times;</button>
+      </div>
+
+      <div class="modal-body" style="padding:16px 20px; overflow-y:auto; flex:1;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; color:#cbd5e1; cursor:pointer;">
+            <input type="checkbox" id="dup-select-all" onchange="toggleAllDuplicates(this.checked)" checked style="accent-color:#0ea5e9;">
+            <span>Select All for Re-scrape (<span id="dup-selected-count">0</span>/<span id="dup-total-count">0</span>)</span>
+          </label>
+          <span id="dup-new-count-badge" style="font-size:0.75rem; background:rgba(16,185,129,0.15); color:#34d399; padding:3px 8px; border-radius:12px; border:1px solid rgba(16,185,129,0.3);">
+            +0 brand new sites will be scraped
+          </span>
+        </div>
+
+        <div style="max-height:360px; overflow-y:auto; border:1px solid rgba(255,255,255,0.06); border-radius:8px; background:rgba(0,0,0,0.25);">
+          <table style="width:100%; border-collapse:collapse; font-size:0.8rem; text-align:left;">
+            <thead>
+              <tr style="border-bottom:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.02); color:#94a3b8;">
+                <th style="padding:8px 12px; width:40px;"></th>
+                <th style="padding:8px 12px;">Website / Name</th>
+                <th style="padding:8px 12px;">Current Status</th>
+                <th style="padding:8px 12px;">Existing Contacts</th>
+              </tr>
+            </thead>
+            <tbody id="duplicate-websites-table-body">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="padding:14px 20px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; align-items:center; background:rgba(15,23,42,0.6);">
+        <button class="btn btn-secondary" onclick="closeDuplicateModal()" style="font-size:0.8rem; padding:7px 14px;">
+          Cancel
+        </button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary" id="dup-btn-skip" onclick="proceedDuplicateDecision('skip_existing')" style="font-size:0.8rem; padding:7px 14px; color:#94a3b8; border:1px solid rgba(255,255,255,0.1);">
+            ⏭️ Skip Existing (New Only)
+          </button>
+          <button class="btn btn-website-theme" id="dup-btn-rescrape-selected" onclick="proceedDuplicateDecision('rescrape_selected')" style="font-size:0.8rem; padding:7px 16px;">
+            🔄 Re-scrape Selected (<span id="dup-btn-count">0</span>)
+          </button>
+          <button class="btn btn-primary" onclick="proceedDuplicateDecision('rescrape_all')" style="font-size:0.8rem; padding:7px 16px;">
+            ⚡ Re-scrape All
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1055,8 +1181,8 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="/static/js/app.js?v=2.2.7"></script>
-  <script src="/static/js/table_ext.js?v=2.2.7"></script>
+  <script src="/static/js/app.js?v=2.3.2"></script>
+  <script src="/static/js/table_ext.js?v=2.3.2"></script>
 
   <!-- PLATFORM DIRECTORY MANAGEMENT MODAL (Triggered by KPI Card) -->
   <div class="modal-overlay" id="platform-modal" style="display:none;" onclick="if(event.target===this)closeDirectoryModal()">
@@ -1192,6 +1318,27 @@
           <input type="text" id="edit-field-price" class="form-input-edit" placeholder="e.g. $$, £30 - £50" />
         </div>
 
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;" id="edit-group-status-notes">
+          <div class="form-group" id="edit-group-status">
+            <label for="edit-field-status" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Status Tag</label>
+            <select id="edit-field-status" class="form-input-edit" style="background:#1e293b; color:#cbd5e1;">
+              <option value="">(Keep Existing / None)</option>
+              <option value="Contacts Found">🟢 Contacts Found</option>
+              <option value="No Contacts Found">🔵 No Contacts Found</option>
+              <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+              <option value="Bot Blocked">🟣 Bot Blocked</option>
+              <option value="Not Loading">🔴 Not Loading</option>
+              <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+              <option value="No Website">⚪ No Website</option>
+              <option value="In Queue">⏳ In Queue</option>
+            </select>
+          </div>
+          <div class="form-group" id="edit-group-notes">
+            <label for="edit-field-notes" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Notes / Remarks</label>
+            <input type="text" id="edit-field-notes" class="form-input-edit" placeholder="e.g. Followed up via phone" />
+          </div>
+        </div>
+
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
           <button type="button" class="btn btn-secondary" onclick="closeEditRowModal()">Cancel</button>
           <button type="submit" class="btn btn-primary" id="btn-save-edit">💾 Save Changes</button>
@@ -1200,24 +1347,59 @@
     </div>
   </div>
 
-  <!-- Batch Edit Category Modal -->
-  <div id="batch-cat-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeBatchCatModal()">
-    <div class="modal-content" style="max-width:440px;" onclick="event.stopPropagation()">
+  <!-- Batch Multi-Field Edit Modal -->
+  <div id="batch-edit-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeBatchEditModal()">
+    <div class="modal-content" style="max-width:480px;" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <span style="font-weight:700; color:#38bdf8;">🏷️ Batch Update Category</span>
-        <button class="modal-close" onclick="closeBatchCatModal()">&times;</button>
+        <span style="font-weight:700; color:#38bdf8;">✏️ Mass Edit Selected Records</span>
+        <button class="modal-close" onclick="closeBatchEditModal()">&times;</button>
       </div>
-      <div class="modal-body" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
-        <p style="font-size:0.85rem; color:#94a3b8; margin:0;" id="batch-cat-desc">Update the category for selected records:</p>
+      <form id="batch-edit-form" onsubmit="submitBatchEdit(event)" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
+        <p style="font-size:0.82rem; color:#94a3b8; margin:0;" id="batch-edit-desc">
+          Update fields across selected records. <em>Leave any field blank to keep its existing value.</em>
+        </p>
+
         <div class="form-group">
-          <label for="batch-cat-input" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">New Category Name</label>
-          <input type="text" id="batch-cat-input" class="form-input-edit" placeholder="e.g. Hair Salon, Cafe, Hotel" />
+          <label for="batch-edit-category" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">New Category Name</label>
+          <input type="text" id="batch-edit-category" class="form-input-edit" placeholder="Leave empty to keep current" />
         </div>
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
-          <button type="button" class="btn btn-secondary" onclick="closeBatchCatModal()">Cancel</button>
-          <button type="button" class="btn btn-primary" onclick="submitBatchCategory()">Apply to All Selected</button>
+
+        <div class="form-group">
+          <label for="batch-edit-status" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Status Tag</label>
+          <select id="batch-edit-status" class="form-input-edit" style="background:#1e293b; color:#cbd5e1;">
+            <option value="">-- Do Not Change Status Tag --</option>
+            <option value="Contacts Found">🟢 Contacts Found</option>
+            <option value="No Contacts Found">🔵 No Contacts Found</option>
+            <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+            <option value="Bot Blocked">🟣 Bot Blocked</option>
+            <option value="Not Loading">🔴 Not Loading</option>
+            <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+            <option value="No Website">⚪ No Website</option>
+            <option value="In Queue">⏳ In Queue</option>
+          </select>
         </div>
-      </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="batch-edit-phone" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Phone Number</label>
+            <input type="text" id="batch-edit-phone" class="form-input-edit" placeholder="Leave empty to keep" />
+          </div>
+          <div class="form-group">
+            <label for="batch-edit-city" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">City / Area / Address</label>
+            <input type="text" id="batch-edit-city" class="form-input-edit" placeholder="Leave empty to keep" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="batch-edit-notes" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Notes / Remarks</label>
+          <input type="text" id="batch-edit-notes" class="form-input-edit" placeholder="Leave empty to keep" />
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeBatchEditModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-batch-edit">Apply to All Selected</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -11,6 +11,13 @@ env/
 venv/
 ENV/
 
+# Frontend dependencies & build artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.tsbuildinfo
+
 # Browser profiles, sessions & caches (keep repo clean and light)
 chrome_live_profile/
 chrome_profile/

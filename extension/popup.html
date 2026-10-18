@@ -192,9 +192,12 @@
 
   <div class="btn-group">
     <!-- Master Live Agent Launcher in Active Chrome -->
-    <button class="btn btn-primary" id="btn-launch-agent" style="background:linear-gradient(135deg, #6366f1, #06b6d4); font-size:12px; padding:10px;">
-      <span>🚀</span> <span>Launch Live Agent in This Window</span>
-    </button>
+    <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:4px;">
+      <input type="text" id="agent-query-input" placeholder="Search (e.g. coffee in London)" style="width:100%; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:rgba(255,255,255,0.06); color:var(--text); font-size:11px;" value="dentist in mumbai" />
+      <button class="btn btn-primary" id="btn-launch-agent" style="background:linear-gradient(135deg, #6366f1, #06b6d4); font-size:12px; padding:10px;">
+        <span>🚀</span> <span>Launch Live Agent in This Window</span>
+      </button>
+    </div>
 
     <!-- Context: Google Maps Feed / Search -->
     <button class="btn btn-primary" id="btn-scroll">

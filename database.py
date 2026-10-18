@@ -1,3 +1,4 @@
+import datetime
 import urllib.parse
 import json
 import logging
@@ -214,6 +215,7 @@ def init_db():
             ("notes", "TEXT DEFAULT ''"),
             ("website_scraped_at", "TEXT DEFAULT ''"),
             ("whatsapp", "TEXT DEFAULT ''"),
+            ("source_attribution", "TEXT DEFAULT '{}'"),
         ]
         for col_name, col_def in new_platform_cols:
             try:
@@ -353,6 +355,40 @@ def init_db():
         """)
 
         conn.commit()
+
+        # Backfill initial 1st-finder source_attribution for older leads if empty
+        try:
+            unattributed = conn.execute("SELECT id, phone, website, email, instagram, facebook, linkedin, twitter, youtube, tiktok, whatsapp, maps_url, website_status, website_scraped_at, source_attribution FROM leads WHERE source_attribution IS NULL OR source_attribution = '' OR source_attribution = '{}'").fetchall()
+            for r in unattributed:
+                attr = {}
+                if r["phone"] and r["phone"] != "N/A" and r["phone"] != "":
+                    attr["phone"] = "maps"
+                if r["website"] and r["website"] != "N/A" and r["website"] != "":
+                    attr["website"] = "maps"
+                if r["email"] and r["email"] != "N/A" and r["email"] != "":
+                    attr["email"] = "web" if (r["website_status"] or r["website_scraped_at"]) else "maps"
+                is_web = bool(r["website_scraped_at"] or (r["website_status"] and r["website_status"] not in ("pending", "no_website")))
+                for sf in ["instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "whatsapp"]:
+                    if r[sf] and r[sf] != "N/A" and r[sf] != "":
+                        attr[sf] = "web" if is_web else "maps"
+                if r["maps_url"] and "google.com/maps" in r["maps_url"]:
+                    attr["lead_origin"] = "maps"
+                elif r["website"] and r["website"] != "N/A":
+                    attr["lead_origin"] = "web"
+                if attr:
+                    conn.execute("UPDATE leads SET source_attribution = ? WHERE id = ?", (json.dumps(attr), r["id"]))
+            conn.commit()
+
+            # Backfill website_scraped_at for existing inspected leads where missing
+            conn.execute("""
+                UPDATE leads
+                SET website_scraped_at = COALESCE(NULLIF(created_at, ''), CURRENT_TIMESTAMP)
+                WHERE website_status NOT IN ('pending', 'no_website', '')
+                  AND (website_scraped_at IS NULL OR website_scraped_at = '');
+            """)
+            conn.commit()
+        except Exception:
+            pass
 
         # Create census cache table to avoid redundant count probing for same location/query
         conn.execute("""
@@ -562,10 +598,15 @@ def is_platform_listing_already_scraped(platform: str, title: str, url: str = ""
 def save_lead(lead: Dict[str, Any]) -> bool:
     """Save or update a lead in the SQLite database, handling missing fields, multi-key deduplication, and merging data."""
     name = str(lead.get("name", "")).strip()
-    if not name:
+    if not name or name.lower() in ("results", "sponsored", "ad", "ads"):
         return False
 
-    category = str(lead.get("category", "") or "Business").strip()
+    raw_cat = re.sub(r'[\ue000-\uf8ff]', '', str(lead.get("category", "") or "Business")).strip()
+    if "update results" in raw_cat.lower() or "search this area" in raw_cat.lower() or "\n" in raw_cat or len(raw_cat) > 60:
+        category = "Business"
+    else:
+        category = raw_cat or "Business"
+
     raw_email = str(lead.get("email", "") or "").strip()
     email = clean_email_string(raw_email)
     phone = clean_phone_number(str(lead.get("phone", "") or "").strip())
@@ -595,13 +636,54 @@ def save_lead(lead: Dict[str, Any]) -> bool:
     order_url = str(lead.get("order_url", "") or "").strip()
     notes = str(lead.get("notes", "") or "").strip()
     whatsapp = str(lead.get("whatsapp", "") or "").strip()
+    explicit_id = lead.get("id") or lead.get("lead_id")
+    website_status = str(lead.get("website_status", "") or "").strip()
+    website_scraped_at = str(lead.get("website_scraped_at", "") or "").strip()
+    update_all_matching_domain = bool(lead.get("update_all_matching_domain", False))
+    source_agent = str(lead.get("source_agent", "") or "").strip().lower()
+    if not source_agent:
+        source_agent = "web" if lead.get("is_website_worker") or (website_status and website_status not in ("pending", "no_website")) else "maps"
+    if not website_scraped_at and (source_agent == "web" or (website_status and website_status not in ("pending", "no_website"))):
+        website_scraped_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    tracked_fields = [
+        ("phone", phone), ("email", email), ("website", website),
+        ("instagram", instagram), ("facebook", facebook), ("linkedin", linkedin),
+        ("twitter", twitter), ("youtube", youtube), ("tiktok", tiktok),
+        ("whatsapp", whatsapp), ("booking_url", booking_url)
+    ]
 
     with get_connection() as conn:
         try:
             # Check for existing matching record across all unique vectors
-            matching_id = find_matching_lead_id(conn, name=name, address=address, website=website, phone=phone)
+            matching_id = None
+            if explicit_id:
+                chk = conn.execute("SELECT id FROM leads WHERE id = ?", (explicit_id,)).fetchone()
+                if chk:
+                    matching_id = chk["id"]
+            if not matching_id:
+                matching_id = find_matching_lead_id(conn, name=name, address=address, website=website, phone=phone)
 
             if matching_id:
+                # Retrieve existing attribution to preserve 1st-finder records
+                ex_row = conn.execute("SELECT source_attribution, phone, email, website, instagram, facebook, linkedin, twitter, youtube, tiktok, whatsapp, booking_url FROM leads WHERE id = ?", (matching_id,)).fetchone()
+                attr_dict = {}
+                if ex_row and ex_row["source_attribution"]:
+                    try:
+                        attr_dict = json.loads(ex_row["source_attribution"])
+                    except Exception:
+                        attr_dict = {}
+
+                for fname, fval in tracked_fields:
+                    if fval and fval != "N/A" and fval != "":
+                        if fname not in attr_dict:
+                            ex_val = ex_row[fname] if ex_row else None
+                            if not ex_val or ex_val == "N/A" or ex_val == "":
+                                attr_dict[fname] = source_agent
+                            else:
+                                attr_dict[fname] = "maps" if fname in ["phone", "website"] else source_agent
+                source_attr_json = json.dumps(attr_dict)
+
                 # Merge incoming data into existing lead without downgrading existing valid values
                 conn.execute("""
                     UPDATE leads SET
@@ -630,11 +712,20 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                         screenshot = CASE WHEN ? != '' THEN ? ELSE screenshot END,
                         bot_protection = CASE WHEN ? != '' AND ? != 'N/A' THEN ? ELSE bot_protection END,
                         cookie_status = CASE WHEN ? != '' AND ? != 'None' THEN ? ELSE cookie_status END,
+                        website_status = CASE
+                            WHEN ? = 'pending' AND website_status IS NOT NULL AND website_status NOT IN ('', 'pending') THEN website_status
+                            WHEN ? != '' THEN ?
+                            ELSE website_status END,
+                        website_scraped_at = CASE
+                            WHEN ? != '' THEN ?
+                            WHEN (? = 'web' OR ? NOT IN ('', 'pending', 'no_website')) AND (website_scraped_at IS NULL OR website_scraped_at = '') THEN CURRENT_TIMESTAMP
+                            ELSE website_scraped_at END,
                         booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
                         platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
                         order_url = CASE WHEN ? != '' THEN ? ELSE order_url END,
                         notes = CASE WHEN ? != '' THEN ? ELSE notes END,
-                        whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END
+                        whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END,
+                        source_attribution = ?
                     WHERE id = ?
                 """, (
                     category, category, category,
@@ -659,22 +750,61 @@ def save_lead(lead: Dict[str, Any]) -> bool:
                     screenshot, screenshot,
                     bot_protection, bot_protection, bot_protection,
                     cookie_status, cookie_status, cookie_status,
+                    website_status, website_status, website_status,
+                    website_scraped_at, website_scraped_at,
+                    source_agent, website_status,
                     booking_url, booking_url,
                     platform_name, platform_name,
                     order_url, order_url,
                     notes, notes,
                     whatsapp, whatsapp,
+                    source_attr_json,
                     matching_id
                 ))
+
+                # If domain deduplication requested, update other matching domain records in database
+                if update_all_matching_domain and website:
+                    clean_dom = clean_domain(website)
+                    if clean_dom and len(clean_dom) > 3:
+                        conn.execute("""
+                            UPDATE leads SET
+                                email = CASE WHEN (email = '' OR email = 'N/A' OR email IS NULL) AND ? != '' AND ? != 'N/A' THEN ? ELSE email END,
+                                instagram = CASE WHEN (instagram = '' OR instagram IS NULL) AND ? != '' THEN ? ELSE instagram END,
+                                facebook = CASE WHEN (facebook = '' OR facebook IS NULL) AND ? != '' THEN ? ELSE facebook END,
+                                linkedin = CASE WHEN (linkedin = '' OR linkedin IS NULL) AND ? != '' THEN ? ELSE linkedin END,
+                                twitter = CASE WHEN (twitter = '' OR twitter IS NULL) AND ? != '' THEN ? ELSE twitter END,
+                                bot_protection = CASE WHEN (bot_protection = '' OR bot_protection = 'N/A' OR bot_protection IS NULL) AND ? != '' THEN ? ELSE bot_protection END,
+                                cookie_status = CASE WHEN (cookie_status = '' OR cookie_status = 'None' OR cookie_status IS NULL) AND ? != '' THEN ? ELSE cookie_status END,
+                                website_status = CASE WHEN website_status = 'pending' OR website_status IS NULL THEN ? ELSE website_status END,
+                                website_scraped_at = CASE WHEN website_scraped_at IS NULL OR website_scraped_at = '' THEN CURRENT_TIMESTAMP ELSE website_scraped_at END
+                            WHERE id != ? AND website LIKE ?
+                        """, (
+                            email, email, email,
+                            instagram, instagram,
+                            facebook, facebook,
+                            linkedin, linkedin,
+                            twitter, twitter,
+                            bot_protection, bot_protection,
+                            cookie_status, cookie_status,
+                            website_status or "clean",
+                            matching_id, f"%{clean_dom}%"
+                        ))
+
                 conn.commit()
                 return matching_id
             else:
-                # Insert brand-new lead
-                w_status = "pending" if (website and website.startswith("http")) else "no_website"
+                # Insert brand-new lead with initial 1st-finder source_attribution
+                w_status = website_status if website_status else ("pending" if (website and website.startswith("http")) else "no_website")
+                new_attr = {}
+                for fname, fval in tracked_fields:
+                    if fval and fval != "N/A" and fval != "":
+                        new_attr[fname] = source_agent
+                new_attr_json = json.dumps(new_attr)
+
                 cursor = conn.execute("""
-                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name, order_url, notes, whatsapp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, w_status, booking_url, platform_name, order_url, notes, whatsapp))
+                    INSERT INTO leads (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, website_status, website_scraped_at, booking_url, platform_name, order_url, notes, whatsapp, source_attribution)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, category, email, phone, address, hours, price, plus_code, rating, reviews, website, maps_url, lat, lon, instagram, facebook, linkedin, twitter, youtube, tiktok, screenshot, bot_protection, cookie_status, w_status, (website_scraped_at if w_status not in ("pending", "no_website") else None), booking_url, platform_name, order_url, notes, whatsapp, new_attr_json))
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
@@ -1021,13 +1151,16 @@ def update_lead_website_data(
     booking_url: str = "",
     platform_name: str = "",
     website_scraped_at: str = "",
-    whatsapp: str = ""
+    whatsapp: str = "",
+    phone: str = "",
+    category: str = "Business"
 ) -> bool:
     """
     Updates website-extracted metadata for an existing lead using robust multi-tier matching:
     1. Match by website URL if known
     2. Fallback to name + flexible address match
     3. Fallback to name match
+    If lead does not exist yet (e.g. direct URL import), inserts as a brand-new lead.
     Merges emails, social media, and booking platforms without duplicates or data loss.
     """
     clean_n = str(name or "").strip()
@@ -1062,11 +1195,64 @@ def update_lead_website_data(
                     target_id = r["id"]
 
             if not target_id:
-                return False
+                # If lead doesn't exist yet, insert via save_lead with source_agent='web'
+                new_lead = {
+                    "name": clean_n or clean_domain(clean_web) or "Website Lead",
+                    "category": category or "Business",
+                    "address": clean_addr or "N/A",
+                    "phone": phone or "N/A",
+                    "website": clean_web,
+                    "email": email,
+                    "instagram": instagram,
+                    "facebook": facebook,
+                    "linkedin": linkedin,
+                    "twitter": twitter,
+                    "youtube": youtube,
+                    "tiktok": tiktok,
+                    "screenshot": screenshot,
+                    "bot_protection": bot_protection,
+                    "cookie_status": cookie_status,
+                    "website_status": website_status,
+                    "website_scraped_at": website_scraped_at,
+                    "booking_url": booking_url,
+                    "platform_name": platform_name,
+                    "whatsapp": whatsapp,
+                    "source_agent": "web"
+                }
+                new_id = save_lead(new_lead)
+                return bool(new_id)
 
-            existing = conn.execute("SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok, booking_url, platform_name, website_scraped_at FROM leads WHERE id = ?", (target_id,)).fetchone()
+            existing = conn.execute("SELECT id, name, address, phone, email, instagram, facebook, linkedin, twitter, youtube, tiktok, booking_url, platform_name, website_scraped_at, source_attribution FROM leads WHERE id = ?", (target_id,)).fetchone()
             if not existing:
                 return False
+
+            # Smart name resolution (replace generic placeholder names like 'Home', 'Website Lead', or raw domains like 'boat.com')
+            generic_names = {"home", "welcome", "website lead", "n/a", "landing", "index", ""}
+            cur_name = (existing["name"] or "").strip()
+            final_name = cur_name
+            is_cur_generic = (
+                cur_name.lower() in generic_names
+                or not cur_name
+                or cur_name.startswith("http")
+                or ("." in cur_name and " " not in cur_name)  # e.g. "boat.com"
+            )
+            if clean_n and clean_n.lower() not in generic_names and not clean_n.startswith("http"):
+                if is_cur_generic or ("." in cur_name and "." not in clean_n):
+                    final_name = clean_n
+
+            # Smart address resolution (if existing address is N/A or empty, enrich with newly discovered address)
+            cur_addr = (existing["address"] or "").strip()
+            final_addr = cur_addr
+            if clean_addr and clean_addr != "N/A":
+                if cur_addr in ["N/A", "", "None"] or len(cur_addr) < 4:
+                    final_addr = clean_addr
+
+            # Smart phone resolution (if existing phone is N/A or empty, enrich with newly discovered phone)
+            cur_phone = (existing["phone"] or "").strip()
+            final_phone = cur_phone
+            if phone and phone != "N/A":
+                if cur_phone in ["N/A", "", "None"] or len(cur_phone) < 5:
+                    final_phone = phone
 
             # Non-redundant email merging
             existing_emails = [e.strip() for e in (existing["email"] or "").split(",") if e.strip() and e.strip() != "N/A"]
@@ -1086,8 +1272,29 @@ def update_lead_website_data(
             final_booking = booking_url or existing["booking_url"] or ""
             final_platform = platform_name or existing["platform_name"] or ""
 
+            # Source attribution enrichment
+            src_attr = {}
+            if existing["source_attribution"]:
+                try:
+                    src_attr = json.loads(existing["source_attribution"])
+                except Exception:
+                    src_attr = {}
+            if final_email and final_email != "N/A" and not src_attr.get("email"): src_attr["email"] = "web"
+            if final_addr and final_addr != "N/A" and not src_attr.get("address"): src_attr["address"] = "web"
+            if final_phone and final_phone != "N/A" and not src_attr.get("phone"): src_attr["phone"] = "web"
+            if final_fb and not src_attr.get("facebook"): src_attr["facebook"] = "web"
+            if final_ig and not src_attr.get("instagram"): src_attr["instagram"] = "web"
+            if final_li and not src_attr.get("linkedin"): src_attr["linkedin"] = "web"
+            if final_tw and not src_attr.get("twitter"): src_attr["twitter"] = "web"
+            if final_yt and not src_attr.get("youtube"): src_attr["youtube"] = "web"
+            if final_tt and not src_attr.get("tiktok"): src_attr["tiktok"] = "web"
+            src_attr_json = json.dumps(src_attr)
+
             conn.execute("""
                 UPDATE leads SET
+                    name = ?,
+                    address = ?,
+                    phone = ?,
                     email = ?,
                     instagram = ?,
                     facebook = ?,
@@ -1102,9 +1309,13 @@ def update_lead_website_data(
                     booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
                     platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
                     website_scraped_at = CASE WHEN ? != '' THEN ? ELSE website_scraped_at END,
-                    whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END
+                    whatsapp = CASE WHEN ? != '' THEN ? ELSE whatsapp END,
+                    source_attribution = ?
                 WHERE id = ?
             """, (
+                final_name,
+                final_addr,
+                final_phone,
                 final_email,
                 final_ig,
                 final_fb,
@@ -1120,10 +1331,9 @@ def update_lead_website_data(
                 final_platform, final_platform,
                 website_scraped_at, website_scraped_at,
                 whatsapp, whatsapp,
+                src_attr_json,
                 target_id
             ))
-            conn.commit()
-            return True
             conn.commit()
             return True
         except Exception as e:
@@ -1175,6 +1385,7 @@ def get_all_leads() -> List[Dict[str, Any]]:
                    COALESCE(order_url, '') AS order_url,
                    COALESCE(notes, '') AS notes,
                    COALESCE(whatsapp, '') AS whatsapp,
+                   COALESCE(source_attribution, '{}') AS source_attribution,
                    created_at
             FROM leads ORDER BY id DESC
         """)
@@ -1203,6 +1414,88 @@ def set_cached_census_total(platform: str, query: str, location: str, total: int
             ON CONFLICT(platform, query, location) DO UPDATE SET total = excluded.total, updated_at = CURRENT_TIMESTAMP
         """, (platform.strip().lower(), query.strip().lower(), location.strip().lower(), total))
 
+def get_pending_website_leads(limit: int = 50) -> List[Dict[str, Any]]:
+    """Fetches leads with a valid website that are still pending website inspection."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT id, name, address, website
+            FROM leads
+            WHERE website IS NOT NULL 
+              AND website != 'N/A' 
+              AND website != ''
+              AND website LIKE 'http%'
+              AND (website_status = 'pending' OR website_status IS NULL OR website_status = '' OR bot_protection = 'Inspecting...')
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [{"id": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]} for r in rows]
+
+def check_existing_websites(urls: List[Any]) -> Dict[str, Any]:
+    """
+    Checks a list of URLs/targets against leads in leads.db.
+    Returns:
+      existing: list of matching lead dicts with their current scraped status & contacts
+      new_targets: list of targets not found in leads.db
+    """
+    import urllib.parse
+    clean_target_map = {}
+    for item in urls:
+        u = item.get("url", "") if isinstance(item, dict) else str(item).strip()
+        if not u or not u.startswith("http"):
+            continue
+        try:
+            dom = urllib.parse.urlparse(u).netloc.replace("www.", "").lower().strip()
+            if dom and dom not in clean_target_map:
+                clean_target_map[dom] = item
+        except Exception:
+            pass
+
+    if not clean_target_map:
+        return {"existing": [], "new_targets": urls}
+
+    existing = []
+    found_doms = set()
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT id, name, website, phone, email, website_status, bot_protection, created_at
+            FROM leads
+            WHERE website IS NOT NULL AND website != 'N/A' AND website != ''
+            ORDER BY id DESC
+        """).fetchall()
+
+        for r in rows:
+            lead_id, name, web, phone, email, status, bot, created_at = r
+            try:
+                dom = urllib.parse.urlparse(web).netloc.replace("www.", "").lower().strip()
+                if dom in clean_target_map and dom not in found_doms:
+                    found_doms.add(dom)
+                    existing.append({
+                        "id": lead_id,
+                        "name": name,
+                        "website": web,
+                        "domain": dom,
+                        "phone": phone or "N/A",
+                        "email": email or "N/A",
+                        "website_status": status or "pending",
+                        "bot_protection": bot or "Clean",
+                        "created_at": created_at or "",
+                        "target_data": clean_target_map[dom]
+                    })
+            except Exception:
+                continue
+
+    new_targets = []
+    for item in urls:
+        u = item.get("url", "") if isinstance(item, dict) else str(item).strip()
+        try:
+            dom = urllib.parse.urlparse(u).netloc.replace("www.", "").lower().strip()
+            if dom not in found_doms:
+                new_targets.append(item)
+        except Exception:
+            new_targets.append(item)
+
+    return {"existing": existing, "new_targets": new_targets}
+
 def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Finds leads from database that were paused before their website or LinkedIn inspection finished.
@@ -1214,8 +1507,17 @@ def get_pending_resume_leads() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any
         rows_web = conn.execute("""
             SELECT id, name, address, website
             FROM leads
-            WHERE website IS NOT NULL AND website != 'N/A' AND website LIKE 'http%'
-              AND (website_status = 'pending' OR website_status IS NULL OR website_status = '' OR bot_protection = 'Inspecting...')
+            WHERE website IS NOT NULL AND website != 'N/A' AND website != '' AND website LIKE 'http%'
+              AND (
+                  website_status = 'pending' 
+                  OR website_status IS NULL 
+                  OR website_status = '' 
+                  OR bot_protection = 'Inspecting...'
+                  OR (
+                      (email IS NULL OR email = '' OR email = 'N/A')
+                      AND (website_status IS NULL OR website_status NOT IN ('bot_blocked', 'unsafe_ssl', 'no_website'))
+                  )
+              )
             ORDER BY id ASC
             LIMIT 500
         """).fetchall()
@@ -1293,7 +1595,7 @@ ALLOWED_LEAD_UPDATE_FIELDS = {
     "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "whatsapp", "screenshot",
     "bot_protection", "cookie_status", "employee_count", "platform_name",
     "platform_url", "platform_rating", "platform_reviews", "booking_url",
-    "platform_price", "platform_verified"
+    "platform_price", "platform_verified", "website_status", "notes", "maps_status", "order_url"
 }
 
 ALLOWED_PLATFORM_UPDATE_FIELDS = {
@@ -1731,6 +2033,11 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
     web_no_site_count = 0
     web_emails_count = 0
     web_socials_count = 0
+    web_contacts_count = 0
+    web_no_contacts_count = 0
+    web_bot_count = 0
+    web_not_loading_count = 0
+    web_unsafe_count = 0
 
     li_finished_count = 0
     li_found_count = 0
@@ -1767,7 +2074,7 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         m_row["has_phone"] = has_p
         unmatched_maps.append(m_row)
 
-        # 3. Format Website Inspector Lead
+        # 3. Format Website Inspector Lead (Unified 8 Layman Tags)
         w_url = str(l.get("website", "") or "").strip()
         email_str = str(l.get("email", "") or "").strip()
         has_e = bool(email_str and email_str != "N/A")
@@ -1780,39 +2087,53 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         wa = str(l.get("whatsapp", "") or "").strip()
         has_s = bool(ig or fb or li or tw or yt or tt or wa)
         bot = str(l.get("bot_protection", "") or "").strip()
-        w_status = str(l.get("website_status", "") or "pending").strip()
+        w_status = str(l.get("website_status", "") or "pending").strip().lower()
 
-        if not has_w:
-            w_tag = "No Website on Map"
+        if not has_w or w_status == "no_website":
+            w_tag = "No Website"
             web_no_site_count += 1
             web_finished_count += 1
-        elif has_e:
-            w_tag = "Emails Extracted"
-            web_emails_count += 1
+        elif w_status == "pending":
+            w_tag = "In Queue"
+        elif w_status == "unsafe_ssl":
+            w_tag = "Unsafe / SSL Error"
+            web_unsafe_count += 1
             web_finished_count += 1
-        elif has_s:
-            w_tag = "Socials Found"
-            web_socials_count += 1
+        elif w_status in ["not_loading", "unresponsive", "failed"]:
+            w_tag = "Not Loading"
+            web_not_loading_count += 1
             web_finished_count += 1
-        elif "Denied" in bot or "Captcha" in bot:
-            w_tag = "Bot Shielded"
+        elif w_status == "bot_blocked" or (("Denied" in bot or "Captcha" in bot) and not has_e and not has_s):
+            w_tag = "Bot Blocked"
+            web_bot_count += 1
             web_finished_count += 1
-        elif w_status in ["found", "scraped", "clean"]:
-            w_tag = "Website Found"
+        elif w_status == "bot_extracted" or (("Denied" in bot or "Captcha" in bot or "Cloudflare" in bot) and (has_e or has_s)):
+            w_tag = "Bot Shield (Data Extracted)"
+            web_bot_count += 1
+            web_contacts_count += 1
             web_finished_count += 1
-        elif w_status == "failed":
-            w_tag = "Website Unreachable"
+            if has_e: web_emails_count += 1
+            if has_s: web_socials_count += 1
+        elif w_status in ["contacts_found", "emails_found", "socials_found", "social"] or has_e or has_s:
+            w_tag = "Contacts Found"
+            web_contacts_count += 1
+            web_finished_count += 1
+            if has_e: web_emails_count += 1
+            if has_s: web_socials_count += 1
+        elif w_status in ["no_contacts", "clean", "found", "scraped"]:
+            w_tag = "No Contacts Found"
+            web_no_contacts_count += 1
             web_finished_count += 1
         else:
-            w_tag = "Pending in Queue"
+            w_tag = "In Queue"
 
         w_row = dict(l)
         w_row["status_tag"] = w_tag
         w_row["has_website"] = has_w
         w_row["has_email"] = has_e
         w_row["has_socials"] = has_s
-        # Only show leads in Website table that have actually been catered/inspected so far
-        if w_tag not in ["Pending in Queue", "No Website on Map"]:
+        # Show all leads with a website in Website tab (including In Queue, Contacts Found, Not Loading, etc.)
+        if w_tag != "No Website":
             website_leads.append(w_row)
 
         # 4. Format LinkedIn Harvester Lead
@@ -1996,7 +2317,13 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
                 "total": total_maps,
                 "inspected": web_finished_count,
                 "pending": web_pending,
+                "in_queue": web_pending,
                 "no_website": web_no_site_count,
+                "contacts_found": web_contacts_count,
+                "no_contacts": web_no_contacts_count,
+                "bot_shield": web_bot_count,
+                "not_loading": web_not_loading_count,
+                "unsafe_ssl": web_unsafe_count,
                 "emails_found": web_emails_count,
                 "socials_found": web_socials_count,
                 "percent": web_pct

@@ -47,6 +47,8 @@ from database import (
     update_lead_linkedin_data,
     save_platform_listing,
     get_lead_id_by_name,
+    get_pending_website_leads,
+    check_existing_websites,
 )
 
 # Force UTF-8 encoding on Windows
@@ -141,6 +143,7 @@ proximity_metrics: Dict[str, Any] = {
     "platforms": {}
 }
 
+last_frame_broadcast_time: Dict[str, float] = {}
 _ws_broadcast_lock = asyncio.Lock()
 
 async def broadcast(event: Dict[str, Any]):
@@ -215,7 +218,7 @@ async def health_check():
 
 @app.websocket("/ws/extension")
 async def extension_ws_endpoint(websocket: WebSocket):
-    global extension_ws, last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
+    global extension_ws, last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform, is_scraping, current_status
     await websocket.accept()
     extension_ws = websocket
     logger.info("🔌 Chrome Extension connected to /ws/extension")
@@ -229,18 +232,32 @@ async def extension_ws_endpoint(websocket: WebSocket):
                 if data.get("type") == "LIVE_FRAME":
                     st = data.get("stream_type", "maps")
                     b64 = data.get("image_base64", "")
-                    if st == "maps":
-                        last_live_frame_maps = {"stream_type": "maps", "image_base64": b64, "tab": "maps", "image": f"data:image/jpeg;base64,{b64}"}
-                        await broadcast({"type": "live_frame", "data": last_live_frame_maps})
-                    elif st == "website":
-                        last_live_frame_website = {"stream_type": "website", "image_base64": b64, "tab": "website", "image": f"data:image/jpeg;base64,{b64}"}
-                        await broadcast({"type": "live_frame", "data": last_live_frame_website})
-                    elif st == "linkedin":
-                        last_live_frame_linkedin = {"stream_type": "linkedin", "image_base64": b64, "tab": "linkedin", "image": f"data:image/jpeg;base64,{b64}"}
-                        await broadcast({"type": "live_frame", "data": last_live_frame_linkedin})
-                    elif st == "platform":
-                        last_live_frame_platform = {"stream_type": "platform", "image_base64": b64, "tab": "platform", "image": f"data:image/jpeg;base64,{b64}"}
-                        await broadcast({"type": "live_frame", "data": last_live_frame_platform})
+                    now_ts = asyncio.get_event_loop().time()
+                    if now_ts - last_frame_broadcast_time.get(st, 0) >= 0.5:
+                        last_frame_broadcast_time[st] = now_ts
+                        frame_data = {"stream_type": st, "image_base64": b64, "tab": st, "image": f"data:image/jpeg;base64,{b64}"}
+                        if st == "maps":
+                            last_live_frame_maps = frame_data
+                        elif st == "website":
+                            last_live_frame_website = frame_data
+                        elif st == "linkedin":
+                            last_live_frame_linkedin = frame_data
+                        elif st == "platform":
+                            last_live_frame_platform = frame_data
+                        asyncio.create_task(broadcast({"type": "live_frame", "data": frame_data}))
+                elif data.get("type") == "LOG":
+                    msg = data.get("message", "")
+                    ag = data.get("agent", "maps")
+                    add_log(msg, agent=ag)
+                elif data.get("type") == "STATUS":
+                    current_status = data.get("status", "Ready")
+                    await broadcast({"type": "status", "data": current_status})
+                elif data.get("type") == "JOB_FINISHED":
+                    is_scraping = False
+                    current_status = "Finished" if not data.get("aborted") else "Stopped"
+                    await broadcast({"type": "status", "data": current_status})
+                    schedule_tables_split_broadcast()
+                    await broadcast({"type": "job_finished", "data": {"total": data.get("total", get_lead_count())}})
                 elif data.get("type") == "SYNC_COOKIES":
                     cookies = data.get("cookies", [])
                     if cookies:
@@ -259,6 +276,11 @@ async def extension_ws_endpoint(websocket: WebSocket):
     finally:
         if extension_ws == websocket:
             extension_ws = None
+            if active_process is None or active_process.returncode is not None:
+                if is_scraping:
+                    is_scraping = False
+                    current_status = "Finished"
+                    await broadcast({"type": "status", "data": current_status})
 
 def radius_to_zoom(radius_km: float) -> int:
     if radius_km <= 1.0: return 16
@@ -351,9 +373,7 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         extra_str = f" | {', '.join(extra_parts)}" if extra_parts else ""
                         logger.info(f"💾 [LIVE HARVEST: MAPS -> DB #{edata.get('id', db_id)}] '{p_name}' ({p_cat}) | 📞 {p_phone} | ✉️ {p_email} | 🌐 {p_web}{soc_str}{extra_str} | ⭐ {edata.get('rating', 'N/A')}")
                     elif etype == "website_navigated":
-                        url = edata.get("url") if isinstance(edata, dict) else None
-                        if url:
-                            await send_to_extension("OPEN_SHOP_TAB", {"url": url})
+                        pass
                     elif etype == "place_updated":
                         update_lead_website_data(
                             name=edata.get("name", ""),
@@ -493,16 +513,8 @@ async def read_process_output(proc: asyncio.subprocess.Process):
                         proximity_metrics["skipped_count"] += 1
                         proximity_metrics["time_saved_sec"] = round(proximity_metrics["skipped_count"] * 3.5, 1)
                         add_log(f"⏭️ [Skipped In DB] {edata.get('name', 'Shop')} already in DB. Bypassed crawl ({proximity_metrics['time_saved_sec']}s saved).")
-                    elif etype == "linkedin_navigated":
-                        url = edata.get("url") if isinstance(edata, dict) else None
-                        if url:
-                            await send_to_extension("NAVIGATE_LINKEDIN", {"url": url})
-                    elif etype == "platform_navigated":
-                        url = edata.get("url") if isinstance(edata, dict) else None
-                        if url:
-                            await send_to_extension("NAVIGATE_PLATFORM", {"url": url})
-                    elif etype == "maps_navigated":
-                        await send_to_extension("ACTIVATE_TAB", {"tab": "maps"})
+                    elif etype in ["linkedin_navigated", "platform_navigated", "maps_navigated"]:
+                        pass
                     elif etype == "status":
                         current_status = str(edata)
                     elif etype == "log":
@@ -569,6 +581,8 @@ async def start_scraping(payload: Dict[str, Any]):
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
     kill_all_scraper_processes()
+    is_scraping = True
+    current_status = "Opening Chrome window on screen..."
 
     query = payload.get("query", "").strip()
     scrape_all = bool(payload.get("scrape_all", False))
@@ -717,8 +731,27 @@ async def start_scraping(payload: Dict[str, Any]):
 
     li_target_url = "https://www.linkedin.com/feed/" if enable_linkedin else None
 
-    # Note: Tabs are driven directly via Playwright over CDP to avoid duplicate tab spawning
+    if extension_ws is not None:
+        add_log(f"⚡ [Strict Extension Mode] Launching live agent in your active Chrome window: '{query}' (Radius: {radius_km}km)")
+        current_status = "Harvesting live in Chrome window..."
+        await broadcast({"type": "status", "data": current_status})
 
+        ext_payload = {
+            "query": query,
+            "max_results": max_results,
+            "maps_url": maps_target_url,
+            "enable_maps": enable_maps,
+            "enable_website": enable_website,
+            "enable_linkedin": enable_linkedin,
+            "enable_platform": enable_platform,
+            "platform_url": plat_target_url,
+            "scrape_all": scrape_all,
+            "radius_km": radius_km,
+        }
+        await send_to_extension("START_HARVESTER", ext_payload)
+        return {"status": "started", "mode": "extension", "query": query, "scrape_all": scrape_all}
+
+    add_log("⚠️ Chrome Extension is not connected. Launching fallback background scraper...")
     try:
         active_process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -747,6 +780,8 @@ async def start_companies_scraping(payload: Dict[str, Any]):
     if is_scraping and active_process and active_process.returncode is None:
         return {"status": "already_running", "count": get_lead_count()}
     kill_all_scraper_processes()
+    is_scraping = True
+    current_status = "Launching Tab 3 for LinkedIn Intelligence..."
 
     companies = payload.get("companies", "").strip()
     if not companies:
@@ -796,10 +831,151 @@ async def start_companies_scraping(payload: Dict[str, Any]):
         logger.error(f"Failed to start company scraper: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start company scraper: {e}")
 
+@app.post("/api/leads/check-urls")
+async def check_urls_endpoint(payload: Dict[str, Any]):
+    urls = payload.get("urls", [])
+    if not urls:
+        return {"existing": [], "new_targets": []}
+    return check_existing_websites(urls)
+
+@app.post("/api/start-website-list")
+async def start_website_list_scraping(payload: Dict[str, Any]):
+    global active_process, is_scraping, recent_logs, current_status
+    global last_live_frame_maps, last_live_frame_website, last_live_frame_linkedin, last_live_frame_platform
+    if is_scraping and active_process and active_process.returncode is None:
+        return {"status": "already_running", "count": get_lead_count()}
+    kill_all_scraper_processes()
+    is_scraping = True
+    current_status = "Launching Tab 2 for Direct Website Scraper..."
+
+    urls = payload.get("urls", [])
+    if not urls:
+        raise HTTPException(status_code=400, detail="Please provide a list of websites or upload a file.")
+
+    visible_browser = bool(payload.get("visible_browser", True))
+    deep_crawl = bool(payload.get("deep_crawl", False))
+    force_fresh = bool(payload.get("force_fresh", True))
+
+    # Write URLs to a job file in scratch
+    scratch_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scratch")
+    os.makedirs(scratch_dir, exist_ok=True)
+    job_file_path = os.path.join(scratch_dir, "website_list_job.json")
+    with open(job_file_path, "w", encoding="utf-8") as f:
+        json.dump(urls, f, ensure_ascii=False, indent=2)
+
+    recent_logs.clear()
+    for ag_key in recent_agent_logs:
+        recent_agent_logs[ag_key].clear()
+    await broadcast({"type": "logs_cleared"})
+    last_live_frame_maps = None
+    last_live_frame_website = None
+    last_live_frame_linkedin = None
+    last_live_frame_platform = None
+    is_scraping = True
+    current_status = f"Launching Direct Website Scraper for {len(urls)} sites..."
+    add_log(f"🌐 Launching Direct Website Scraper for {len(urls)} websites (Deep crawl: {deep_crawl})")
+
+    if extension_ws is not None:
+        add_log(f"⚡ [Strict Extension Mode] Launching Direct Website Scraper in your active Chrome window ({len(urls)} sites)")
+        current_status = f"Inspecting {len(urls)} websites live in Chrome..."
+        await broadcast({"type": "status", "data": current_status})
+
+        # Queue each target URL in database with 'pending' status so it shows '⏳ In Queue' in table
+        target_leads = []
+        for target in urls:
+            u = target.get("url", "") if isinstance(target, dict) else str(target).strip()
+            if not u or not u.startswith("http"): continue
+            parsed_dom = urllib.parse.urlparse(u).netloc.replace("www.", "")
+            t_name = target.get("name", "") if isinstance(target, dict) else ""
+            if not t_name:
+                t_name = parsed_dom.split(".")[0].capitalize() if parsed_dom else "Website Target"
+            t_phone = target.get("phone", "N/A") if isinstance(target, dict) else "N/A"
+            t_addr = target.get("address", "N/A") if isinstance(target, dict) else "N/A"
+            t_cat = target.get("category", "Business") if isinstance(target, dict) else "Business"
+            existing_id = target.get("id") if isinstance(target, dict) else None
+            lead_id = save_lead({
+                "id": existing_id,
+                "name": t_name,
+                "website": u,
+                "phone": t_phone,
+                "address": t_addr,
+                "category": t_cat,
+                "source_agent": "web",
+                "website_status": "pending"
+            })
+            target_leads.append({
+                "id": existing_id or lead_id or None,
+                "name": t_name,
+                "address": t_addr,
+                "website": u
+            })
+
+        schedule_tables_split_broadcast()
+
+        ext_payload = {
+            "enable_maps": False,
+            "enable_website": True,
+            "enable_linkedin": False,
+            "enable_platform": False,
+            "deep_crawl": deep_crawl,
+            "visible_browser": visible_browser,
+            "force_fresh": force_fresh,
+            "max_results": len(target_leads),
+            "targets": target_leads
+        }
+        await send_to_extension("START_HARVESTER", ext_payload)
+        return {"status": "started", "mode": "website_list", "count": len(target_leads), "extension": True}
+
+    sub_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    cmd = [
+        sys.executable,
+        "-u",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_scraper.py"),
+        "--urls-file", job_file_path,
+        "--no-maps",
+        "--enable-website",
+        "--no-linkedin",
+        "--no-platform",
+    ]
+    if visible_browser:
+        cmd.append("--visible")
+    else:
+        cmd.append("--headless")
+    if deep_crawl:
+        cmd.append("--deep-crawl")
+
+    try:
+        active_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=sub_env,
+            limit=10 * 1024 * 1024,
+        )
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.pid"), "w") as f:
+                f.write(str(active_process.pid))
+        except Exception:
+            pass
+        asyncio.create_task(read_process_output(active_process))
+        return {"status": "started", "mode": "website_list", "count": len(urls)}
+    except Exception as e:
+        is_scraping = False
+        current_status = "Failed to launch"
+        logger.error(f"Failed to start direct website scraper: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start direct website scraper: {e}")
+
 @app.post("/api/stop")
 async def stop_scraping():
     global active_process, is_scraping, current_status
-    await send_to_extension("CLOSE_SHOP_TAB")
+    if extension_ws is not None:
+        await send_to_extension("ABORT_HARVESTER")
+        current_status = "Stopping gracefully..."
+        add_log("⏹️ Stop requested: Gracefully completing in-flight website before stopping...")
+        await broadcast({"type": "log", "data": "⏹️ Stop requested: Gracefully completing in-flight website before stopping..."})
+        await broadcast({"type": "status", "data": "Stopping gracefully..."})
+        return {"status": "stopping"}
+
     is_scraping = False
     current_status = "Stopped"
     kill_all_scraper_processes()
@@ -807,6 +983,16 @@ async def stop_scraping():
     await broadcast({"type": "log", "data": "⏹️ Scraping stopped by user."})
     await broadcast({"type": "status", "data": "Stopped"})
     return {"status": "stopped"}
+
+@app.post("/api/job-finished")
+async def job_finished_endpoint(payload: Dict[str, Any]):
+    global is_scraping, current_status
+    is_scraping = False
+    current_status = "Finished" if not payload.get("aborted") else "Stopped"
+    await broadcast({"type": "status", "data": current_status})
+    schedule_tables_split_broadcast()
+    await broadcast({"type": "job_finished", "data": {"total": payload.get("total", get_lead_count())}})
+    return {"status": "ok"}
 
 @app.get("/api/status")
 async def get_status():
@@ -848,6 +1034,11 @@ async def cleanup_screenshots_endpoint():
     add_log(f"🧹 Cleanup: Removed {deleted_count} orphaned screenshot files from disk.")
     await broadcast({"type": "log", "data": f"🧹 Cleanup: Removed {deleted_count} orphaned screenshot files from disk."})
     return {"status": "ok", "deleted_count": deleted_count}
+
+@app.get("/api/leads/pending-websites")
+async def get_pending_websites_endpoint(limit: int = 50):
+    leads = get_pending_website_leads(limit=limit)
+    return {"status": "success", "count": len(leads), "leads": leads}
 
 @app.post("/api/save")
 async def save_lead_endpoint(lead_data: Dict[str, Any]):
@@ -900,10 +1091,26 @@ async def trigger_renumber():
     return {"status": "ok", "info": res, "total": len(leads), "places": leads}
 
 def get_chrome_executable_path() -> Optional[str]:
+    # Custom environment override
+    for env_var in ["CHROME_BIN", "CHROME_PATH", "BROWSER_PATH"]:
+        p = os.environ.get(env_var)
+        if p and os.path.exists(p):
+            return p
     candidates = [
+        # Standard Google Chrome
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        # Chrome Canary / Beta / Dev
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome SxS\Application\chrome.exe"),
+        r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+        r"C:\Program Files\Google\Chrome Dev\Application\chrome.exe",
+        # Microsoft Edge
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        # Brave Browser
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -939,7 +1146,7 @@ def is_primary_profile_cdp() -> bool:
              '(Get-CimInstance Win32_Process -Filter "Name = \'chrome.exe\'" | Where-Object { $_.CommandLine -like "*remote-debugging-port=9222*" } | Select-Object -ExpandProperty CommandLine) -join " "'],
             capture_output=True, text=True, timeout=2.0
         ).stdout
-        res = "ChromeAutomation" not in out
+        res = "ChromeAutomation" not in out and "DataScrapper" not in out
         _primary_cdp_cache = {"val": res, "ts": now}
         return res
     except Exception:
@@ -951,13 +1158,28 @@ async def get_chrome_status():
     cdp_active = await asyncio.to_thread(check_cdp_port_live)
     ext_active = (extension_ws is not None)
     is_primary = await asyncio.to_thread(is_primary_profile_cdp) if cdp_active else False
+    
+    is_active = cdp_active or ext_active
+    if ext_active:
+        browser_label = "This Chrome (Extension Active)"
+        msg = "Connected directly to your active Chrome profile via Extension! All tabs open right here."
+    elif cdp_active and is_primary:
+        browser_label = "Chrome (Port 9222 Active)"
+        msg = "Connected to your primary Chrome window on Port 9222."
+    elif cdp_active:
+        browser_label = "Secondary Chrome Window (9222)"
+        msg = "Port 9222 active on secondary browser instance."
+    else:
+        browser_label = None
+        msg = "Chrome not connected. Load the unpacked extension in chrome://extensions to run directly in this window."
+
     return {
-        "active": cdp_active,
+        "active": is_active,
         "cdp_active": cdp_active,
-        "is_primary": is_primary,
+        "is_primary": is_primary or ext_active,
         "extension_active": ext_active,
-        "browser": "Chrome (Port 9222 Active)" if (cdp_active and is_primary) else ("Secondary Chrome (C:\\ChromeAutomation)" if cdp_active else ("Chrome Extension Connected" if ext_active else None)),
-        "message": "Connected to your primary Chrome (Port 9222)" if (cdp_active and is_primary) else ("Port 9222 on secondary Chrome window" if cdp_active else "Chrome Port 9222 not connected")
+        "browser": browser_label,
+        "message": msg
     }
 
 @app.post("/api/chrome/restart-with-debug")
@@ -1618,4 +1840,4 @@ async def serve_index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"Starting Mavon Leads & Org Intelligence on http://localhost:{port}")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False, ws_ping_interval=None, ws_ping_timeout=60, ws_max_size=32 * 1024 * 1024)

@@ -395,6 +395,190 @@ def is_person_relevant_to_brand(brand: str, title: str, subtitle: str = "") -> b
         return True
     return any(tok in combined for tok in brand_tokens)
 
+
+def extract_address_from_html(html: str, soup: Optional[BeautifulSoup] = None) -> str:
+    """
+    Extracts physical business address from HTML across:
+    1. Schema.org JSON-LD PostalAddress
+    2. Google Maps / Share Google links where anchor text contains an address
+    3. HTML <address> tags
+    4. Text blocks following 'Visit', 'Address', 'Location', 'Headquarters' headings
+    5. Standard street address regex pattern matching
+    """
+    if not html:
+        return ""
+    if soup is None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            soup = None
+
+    if soup:
+        # 1. Schema.org PostalAddress
+        for s in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(s.string or "{}")
+                items = data if isinstance(data, list) else (data.get("@graph") or [data])
+                for item in items:
+                    addr_obj = item.get("address") if isinstance(item, dict) else None
+                    if isinstance(addr_obj, dict):
+                        parts = [
+                            addr_obj.get("streetAddress"),
+                            addr_obj.get("addressLocality"),
+                            addr_obj.get("addressRegion"),
+                            addr_obj.get("postalCode"),
+                            addr_obj.get("addressCountry")
+                        ]
+                        cleaned = [str(p).strip() for p in parts if p and str(p).strip()]
+                        if len(cleaned) >= 2:
+                            return ", ".join(cleaned)
+                    elif isinstance(addr_obj, str) and len(addr_obj) > 8:
+                        return " ".join(addr_obj.split())
+            except Exception:
+                pass
+
+        # 2. Google Maps / Share Google links (e.g. <a href="https://share.google/...">771 W Atlantic Blvd...</a>)
+        for a in soup.find_all("a", href=True):
+            h = a["href"].lower()
+            if any(k in h for k in ["share.google", "maps.google", "google.com/maps"]):
+                t = a.get_text().strip()
+                if len(t) >= 10 and re.search(r'\d+', t) and re.search(r'[A-Za-z]', t):
+                    if not any(bad in t.lower() for bad in ["view on", "get direction", "open map", "google map"]):
+                        return " ".join(t.split())
+
+        # 3. HTML <address> tags
+        for addr_tag in soup.find_all("address"):
+            t = addr_tag.get_text().strip()
+            if len(t) >= 10 and re.search(r'\d+', t) and len(t) < 180:
+                return " ".join(t.split())
+
+        # 4. Text blocks following 'Visit' / 'Address' / 'Location' headings
+        for h_tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "span"]):
+            h_text = h_tag.get_text().strip().lower()
+            if h_text in ["visit", "visit us", "our location", "address", "headquarters", "location", "our office"]:
+                next_el = h_tag.find_next_sibling()
+                if not next_el:
+                    parent = h_tag.parent
+                    if parent:
+                        next_el = parent.find_next_sibling()
+                if next_el:
+                    cand = next_el.get_text().strip()
+                    if 10 <= len(cand) <= 150 and re.search(r'\d+', cand) and re.search(r'[A-Za-z]', cand):
+                        return " ".join(cand.split())
+
+    # 5. Regex street address fallback across raw HTML
+    addr_match = re.search(
+        r'\b\d{1,6}\s+[A-Za-z0-9\s.,#-]+?\b(?:Blvd|Boulevard|Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Way|Lane|Ln|Court|Ct|Highway|Hwy|Place|Pl|Square|Sq|Pkwy|Parkway)\b[^\n<]{3,60}?\b(?:[A-Z]{2}\s+\d{5}(?:-\d{4})?|\b\d{5,6}\b|[A-Z]{1,2}\d[A-Z0-9]?\s*\d[A-Z]{2})\b',
+        html,
+        re.IGNORECASE
+    )
+    if addr_match:
+        matched_str = " ".join(addr_match.group(0).split()).strip()
+        if len(matched_str) >= 10:
+            return matched_str
+
+    return ""
+
+
+def extract_phone_from_html(html: str, soup: Optional[BeautifulSoup] = None) -> str:
+    """
+    Extracts telephone numbers from:
+    1. a[href^='tel:']
+    2. Schema.org JSON-LD telephone
+    3. Contact and footer regex patterns
+    """
+    if not html:
+        return ""
+    if soup is None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            soup = None
+
+    if soup:
+        # 1. tel: anchor links
+        for a in soup.find_all("a", href=True):
+            h = a["href"].strip()
+            if h.lower().startswith("tel:"):
+                clean = clean_phone_number(h[4:])
+                if clean and clean != "N/A":
+                    return clean
+
+        # 2. Schema.org telephone
+        for s in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(s.string or "{}")
+                items = data if isinstance(data, list) else (data.get("@graph") or [data])
+                for item in items:
+                    if isinstance(item, dict):
+                        tel = item.get("telephone") or item.get("phone")
+                        if tel:
+                            clean = clean_phone_number(str(tel))
+                            if clean and clean != "N/A":
+                                return clean
+            except Exception:
+                pass
+
+    # 3. Regex pattern in contact / phone blocks
+    phone_candidates = re.findall(r'(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}|\+\d{1,4}[-.\s]?\d{2,5}[-.\s]?\d{4,8}', html)
+    for p in phone_candidates:
+        clean = clean_phone_number(p)
+        if clean and clean != "N/A":
+            return clean
+
+    return ""
+
+
+def clean_brand_name_from_page(title: str, domain: str, soup: Optional[BeautifulSoup] = None, html: str = "") -> str:
+    """
+    Discards generic page titles ('Home', 'Welcome', 'Index') and recovers
+    the true brand name from copyright string, og:site_name, or domain name.
+    """
+    generic_words = {"home", "welcome", "homepage", "landing", "index", "website", "main", "default", "loading"}
+    raw_title = str(title or "").strip()
+    clean_t = raw_title.lower()
+
+    # 1. Authoritative Copyright string (e.g. '© 2026 BOAT INC. ALL RIGHTS RESERVED.')
+    if html:
+        c_match = re.search(r'©\s*(?:20\d\d\s*)?([A-Za-z0-9\s,.-]+?)(?:\.|\s+ALL|\s+All|$)', html)
+        if c_match:
+            c_brand = c_match.group(1).strip()
+            if 2 < len(c_brand) < 50 and c_brand.lower() not in generic_words:
+                return c_brand.title()
+
+    # 2. OpenGraph og:site_name
+    if soup:
+        og_site = soup.find("meta", property="og:site_name")
+        if og_site and og_site.get("content"):
+            c = og_site["content"].strip()
+            if c and c.lower() not in generic_words:
+                return c
+
+    # 3. Clean page title with separator resolution
+    if raw_title and clean_t not in generic_words and not raw_title.startswith("http"):
+        for sep in [" | ", " - ", " • ", " — ", " :: "]:
+            if sep in raw_title:
+                parts = [p.strip() for p in raw_title.split(sep) if p.strip()]
+                non_generic = [p for p in parts if p.lower() not in generic_words and not p.startswith("http")]
+                if non_generic:
+                    chosen = non_generic[-1] if len(non_generic[-1]) < len(non_generic[0]) and len(non_generic[-1]) > 2 else non_generic[0]
+                    clean_chosen = re.sub(r'\.(com|org|net|io|co|in|uk|ai|de|fr)$', '', chosen, flags=re.I).strip()
+                    if len(clean_chosen) >= 2:
+                        return clean_chosen.title()
+        clean_cand = re.sub(r'\.(com|org|net|io|co|in|uk|ai|de|fr)$', '', raw_title, flags=re.I).strip()
+        if len(clean_cand) >= 2 and clean_cand.lower() not in generic_words:
+            return clean_cand.title()
+
+    # 4. Domain fallback: e.g. "boat.com" -> "Boat"
+    if domain:
+        clean_d = re.sub(r'^(?:www\d?|shop|store|m)\.', '', domain.lower())
+        name_part = clean_d.split('.')[0]
+        if len(name_part) >= 2:
+            return name_part.title()
+
+    return raw_title or "Website Lead"
+
+
 def extract_socials_from_text(html: str) -> Dict[str, str]:
     """
     Extracts official social media profiles from HTML across:
@@ -727,8 +911,12 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         idx = item.get("index")
         lead_db_id = item.get("lead_id")
         name = item.get("name")
-        address = item.get("address")
+        address = item.get("address", "N/A")
         website_url = item.get("website")
+        phone = item.get("phone", "N/A")
+        category = item.get("category", "Business")
+        deep_crawl = item.get("deep_crawl", False)
+        force_crawl = item.get("force_crawl", False) or deep_crawl
 
         if not website_url or not website_url.startswith("http"):
             queue.task_done()
@@ -737,7 +925,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
         clean_target_dom = clean_domain(website_url)
 
         # 1. In-session domain cache check (prevents re-checking same website in the same run)
-        if clean_target_dom and clean_target_dom in explored_domains_cache:
+        if not force_crawl and clean_target_dom and clean_target_dom in explored_domains_cache:
             cached_data = explored_domains_cache[clean_target_dom]
             emit_event("log", f"⚡ [Agent 2: Website] #{idx} '{name}' shares domain '{clean_target_dom}' already crawled in this session. Reusing verified data.")
             try:
@@ -774,81 +962,91 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             continue
 
         # 2. Database check for previously completed crawl (across past sessions)
-        try:
-            with get_connection() as conn:
-                existing_lead = None
-                if lead_db_id:
-                    existing_lead = conn.execute(
-                        "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name FROM leads WHERE id = ?",
-                        (lead_db_id,)
-                    ).fetchone()
-                if not existing_lead and name:
-                    existing_lead = conn.execute(
-                        "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name FROM leads WHERE name = ? AND address = ?",
-                        (name, address)
-                    ).fetchone()
+        if not force_crawl:
+            try:
+                with get_connection() as conn:
+                    existing_lead = None
+                    if lead_db_id:
+                        existing_lead = conn.execute(
+                            "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name, name, address, phone FROM leads WHERE id = ?",
+                            (lead_db_id,)
+                        ).fetchone()
+                    if not existing_lead and name:
+                        existing_lead = conn.execute(
+                            "SELECT id, website_status, screenshot, email, instagram, facebook, linkedin, twitter, youtube, tiktok, bot_protection, cookie_status, booking_url, platform_name, name, address, phone FROM leads WHERE name = ? AND address = ?",
+                            (name, address)
+                        ).fetchone()
 
-                if existing_lead:
-                    w_st = str(existing_lead["website_status"] or "").strip().lower()
-                    if w_st in ["emails_found", "clean", "social", "socials_found", "failed"]:
-                        emit_event("log", f"⏩ [Agent 2: Website] #{idx} '{name}' was already explored ({w_st}). Skipping redundant crawl.")
-                        if clean_target_dom:
-                            explored_domains_cache[clean_target_dom] = {
-                                "email": existing_lead["email"] or "",
-                                "instagram": existing_lead["instagram"] or "",
-                                "facebook": existing_lead["facebook"] or "",
-                                "linkedin": existing_lead["linkedin"] or "",
-                                "twitter": existing_lead["twitter"] or "",
-                                "youtube": existing_lead["youtube"] or "",
-                                "tiktok": existing_lead["tiktok"] or "",
-                                "screenshot": existing_lead["screenshot"] or "",
-                                "bot_protection": existing_lead["bot_protection"] or "Clean",
-                                "cookie_status": existing_lead["cookie_status"] or "None",
-                                "website_status": w_st,
-                                "booking_url": existing_lead["booking_url"] or "",
-                                "platform_name": existing_lead["platform_name"] or ""
-                            }
-                        queue.task_done()
-                        continue
+                    if existing_lead:
+                        ex_addr = (existing_lead["address"] or "").strip()
+                        ex_name = (existing_lead["name"] or "").strip().lower()
+                        # Only skip if lead is NOT a stub missing address or having generic placeholder name
+                        is_stub = ex_name in ["home", "welcome", "index", clean_target_dom] or ex_addr in ["N/A", "", "None"]
+                        w_st = str(existing_lead["website_status"] or "").strip().lower()
+                        if not is_stub and w_st in ["emails_found", "clean", "social", "socials_found", "failed"]:
+                            emit_event("log", f"⏩ [Agent 2: Website] #{idx} '{name}' was already explored ({w_st}). Skipping redundant crawl.")
+                            if clean_target_dom:
+                                explored_domains_cache[clean_target_dom] = {
+                                    "email": existing_lead["email"] or "",
+                                    "instagram": existing_lead["instagram"] or "",
+                                    "facebook": existing_lead["facebook"] or "",
+                                    "linkedin": existing_lead["linkedin"] or "",
+                                    "twitter": existing_lead["twitter"] or "",
+                                    "youtube": existing_lead["youtube"] or "",
+                                    "tiktok": existing_lead["tiktok"] or "",
+                                    "screenshot": existing_lead["screenshot"] or "",
+                                    "bot_protection": existing_lead["bot_protection"] or "Clean",
+                                    "cookie_status": existing_lead["cookie_status"] or "None",
+                                    "website_status": w_st,
+                                    "booking_url": existing_lead["booking_url"] or "",
+                                    "platform_name": existing_lead["platform_name"] or ""
+                                }
+                            queue.task_done()
+                            continue
 
-                # Also check if this exact domain was already explored under another lead in DB
-                if clean_target_dom and clean_target_dom not in ("facebook.com", "instagram.com", "google.com"):
-                    prior_dom_lead = conn.execute("""
-                        SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok, 
-                               screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name 
-                        FROM leads 
-                        WHERE website LIKE ? 
-                          AND website_status IN ('emails_found', 'clean', 'social', 'socials_found')
-                        ORDER BY (screenshot IS NOT NULL AND screenshot != 'N/A' AND screenshot != '') DESC, id DESC
-                        LIMIT 1
-                    """, (f"%{clean_target_dom}%",)).fetchone()
-                    if prior_dom_lead:
-                        w_st = str(prior_dom_lead["website_status"] or "clean").strip().lower()
-                        emit_event("log", f"⏩ [Agent 2: Website] Domain '{clean_target_dom}' for #{idx} '{name}' was already explored in database ({w_st}). Reusing verified data.")
-                        data_to_copy = {
-                            "email": prior_dom_lead["email"] or "",
-                            "instagram": prior_dom_lead["instagram"] or "",
-                            "facebook": prior_dom_lead["facebook"] or "",
-                            "linkedin": prior_dom_lead["linkedin"] or "",
-                            "twitter": prior_dom_lead["twitter"] or "",
-                            "youtube": prior_dom_lead["youtube"] or "",
-                            "tiktok": prior_dom_lead["tiktok"] or "",
-                            "screenshot": prior_dom_lead["screenshot"] or "",
-                            "bot_protection": prior_dom_lead["bot_protection"] or "Clean",
-                            "cookie_status": prior_dom_lead["cookie_status"] or "None",
-                            "website_status": w_st,
-                            "booking_url": prior_dom_lead["booking_url"] or "",
-                            "platform_name": prior_dom_lead["platform_name"] or ""
-                        }
-                        explored_domains_cache[clean_target_dom] = data_to_copy
-                        update_lead_website_data(
-                            name=name, address=address, website=website_url,
-                            **data_to_copy
-                        )
-                        emit_event("place_updated", {"id": lead_db_id, "name": name, "address": address, "website": website_url, **data_to_copy})
-                        queue.task_done()
-                        continue
-        except Exception:
+                    # Also check if this exact domain was already explored under another lead in DB
+                    if clean_target_dom and clean_target_dom not in ("facebook.com", "instagram.com", "google.com"):
+                        prior_dom_lead = conn.execute("""
+                            SELECT email, instagram, facebook, linkedin, twitter, youtube, tiktok, 
+                                   screenshot, bot_protection, cookie_status, website_status, booking_url, platform_name, name, address, phone 
+                            FROM leads 
+                            WHERE website LIKE ? 
+                              AND website_status IN ('emails_found', 'clean', 'social', 'socials_found')
+                            ORDER BY (screenshot IS NOT NULL AND screenshot != 'N/A' AND screenshot != '') DESC, id DESC
+                            LIMIT 1
+                        """, (f"%{clean_target_dom}%",)).fetchone()
+                        if prior_dom_lead:
+                            ex_addr = (prior_dom_lead["address"] or "").strip()
+                            ex_name = (prior_dom_lead["name"] or "").strip().lower()
+                            is_stub = ex_name in ["home", "welcome", "index", clean_target_dom] or ex_addr in ["N/A", "", "None"]
+                            if not is_stub:
+                                w_st = str(prior_dom_lead["website_status"] or "clean").strip().lower()
+                                emit_event("log", f"⏩ [Agent 2: Website] Domain '{clean_target_dom}' for #{idx} '{name}' was already explored in database ({w_st}). Reusing verified data.")
+                                data_to_copy = {
+                                    "email": prior_dom_lead["email"] or "",
+                                    "instagram": prior_dom_lead["instagram"] or "",
+                                    "facebook": prior_dom_lead["facebook"] or "",
+                                    "linkedin": prior_dom_lead["linkedin"] or "",
+                                    "twitter": prior_dom_lead["twitter"] or "",
+                                    "youtube": prior_dom_lead["youtube"] or "",
+                                    "tiktok": prior_dom_lead["tiktok"] or "",
+                                    "screenshot": prior_dom_lead["screenshot"] or "",
+                                    "bot_protection": prior_dom_lead["bot_protection"] or "Clean",
+                                    "cookie_status": prior_dom_lead["cookie_status"] or "None",
+                                    "website_status": w_st,
+                                    "booking_url": prior_dom_lead["booking_url"] or "",
+                                    "platform_name": prior_dom_lead["platform_name"] or ""
+                                }
+                                explored_domains_cache[clean_target_dom] = data_to_copy
+                                update_lead_website_data(
+                                    name=name, address=address, website=website_url,
+                                    **data_to_copy
+                                )
+                                emit_event("place_updated", {"id": lead_db_id, "name": name, "address": address, "website": website_url, **data_to_copy})
+                                queue.task_done()
+                                continue
+            except Exception:
+                pass
             pass
 
         # Prevent opening Meta platforms (Instagram, Facebook, Threads, Meta) in Tab 2
@@ -983,14 +1181,16 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             except Exception:
                 pass
 
+            page_html = await tab_page.content()
+            soup_pre = BeautifulSoup(page_html, "html.parser")
+            name = clean_brand_name_from_page(name or page_title, clean_target_dom, soup_pre, page_html)
+
             # Show HUD on shop page via extension bridge
             try:
                 safe_shop_name = re.sub(r'[\'"]', '', name)[:22]
                 await tab_page.evaluate(f"() => window.MavonScraper && window.MavonScraper.showHUD('Shop #{idx}: {safe_shop_name}', 'Scanning emails & socials...', '#10b981')")
             except Exception:
                 pass
-
-            page_html = await tab_page.content()
 
             # 1. Detect Cloudflare / Anti-bot
             bot_status = detect_anti_bot_protection(page_html, page_title)
@@ -1034,19 +1234,52 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             except Exception:
                 rel_screenshot_path = ""
 
-            # 3. Smooth scroll down for lazy loading & email discovery
+            # 3. Dynamic scroll down to trigger lazy loading of footers & contact sections
             try:
-                await tab_page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
-                await tab_page.wait_for_timeout(700)
-                await tab_page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
-                await tab_page.wait_for_timeout(700)
+                await tab_page.evaluate("""async () => {
+                    await new Promise((resolve) => {
+                        let totalHeight = 0;
+                        const distance = 400;
+                        const maxScrolls = 15;
+                        let count = 0;
+                        const timer = setInterval(() => {
+                            const scrollHeight = document.body.scrollHeight;
+                            window.scrollBy(0, distance);
+                            totalHeight += distance;
+                            count++;
+                            if (totalHeight >= scrollHeight || count >= maxScrolls) {
+                                clearInterval(timer);
+                                resolve();
+                            }
+                        }, 200);
+                    });
+                }""")
+                await tab_page.wait_for_timeout(600)
             except Exception:
                 pass
 
-            # 4. Extract Emails & Social Media Links (Universal JSON-LD Schema + DOM Regex)
+            # 4. Extract Emails, Physical Address, Phone & Social Media Links
             fresh_html = await tab_page.content()
+            soup_fresh = BeautifulSoup(fresh_html, "html.parser")
             emails = set(extract_emails_from_text(fresh_html))
             socials = extract_socials_from_text(fresh_html)
+
+            # Re-check brand name with fresh post-scroll content if it was still generic
+            name = clean_brand_name_from_page(name, clean_target_dom, soup_fresh, fresh_html)
+
+            # Deep extraction: Physical Address
+            if not address or address == "N/A" or len(address.strip()) < 5:
+                extracted_addr = extract_address_from_html(fresh_html, soup_fresh)
+                if extracted_addr:
+                    address = extracted_addr
+                    emit_event("log", f"📍 [Agent 2: Website] Extracted physical address for #{idx} '{name}': {address}")
+
+            # Deep extraction: Phone number
+            if not phone or phone == "N/A":
+                extracted_phone = extract_phone_from_html(fresh_html, soup_fresh)
+                if extracted_phone:
+                    phone = extracted_phone
+                    emit_event("log", f"📞 [Agent 2: Website] Extracted phone for #{idx} '{name}': {phone}")
 
             # Universal Contract 1: Extract structured Schema.org / JSON-LD metadata
             try:
@@ -1110,12 +1343,12 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             except Exception:
                 pass
 
-            # 5. Check Contact / About links if emails or socials are missing (Strictly internal only - NEVER click Meta or external socials)
-            if not emails or not any(socials.values()):
+            # 5. Check Contact / About links if emails, socials, address, or phone are missing or deep_crawl is enabled
+            if deep_crawl or not emails or not any(socials.values()) or not address or address == "N/A" or not phone or phone == "N/A":
                 try:
                     contact_links = tab_page.locator('a[href*="contact" i], a[href*="about" i], a:has-text("Contact"), a:has-text("About")')
                     count = await contact_links.count()
-                    for ci in range(min(count, 4)):
+                    for ci in range(min(count, 5 if deep_crawl else 3)):
                         c_link = contact_links.nth(ci)
                         href_attr = (await c_link.get_attribute("href") or "").lower()
                         # Strictly skip external social and Meta links
@@ -1125,11 +1358,22 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                             await c_link.click(timeout=3000)
                             await tab_page.wait_for_timeout(1800)
                             sub_html = await tab_page.content()
+                            sub_soup = BeautifulSoup(sub_html, "html.parser")
                             emails.update(extract_emails_from_text(sub_html))
                             sub_socials = extract_socials_from_text(sub_html)
                             for k, v in sub_socials.items():
                                 if not socials.get(k) and v:
                                     socials[k] = v
+                            if not address or address == "N/A":
+                                sub_addr = extract_address_from_html(sub_html, sub_soup)
+                                if sub_addr:
+                                    address = sub_addr
+                                    emit_event("log", f"📍 [Agent 2: Website] Extracted physical address on contact page for #{idx} '{name}': {address}")
+                            if not phone or phone == "N/A":
+                                sub_phone = extract_phone_from_html(sub_html, sub_soup)
+                                if sub_phone:
+                                    phone = sub_phone
+                                    emit_event("log", f"📞 [Agent 2: Website] Extracted phone on contact page for #{idx} '{name}': {phone}")
                             break
                 except Exception:
                     pass
@@ -1194,7 +1438,9 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     booking_url=found_booking_url,
                     platform_name=found_platform_name,
                     website_scraped_at=now_scraped_at,
-                    whatsapp=found_wa
+                    whatsapp=found_wa,
+                    phone=phone,
+                    category=category
                 )
             except Exception as dbe:
                 pass
@@ -1225,6 +1471,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 "id": lead_db_id,
                 "name": name,
                 "address": address,
+                "phone": phone,
                 "website": website_url,
                 "email": primary_email,
                 "emails": email_list,
@@ -1245,6 +1492,9 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
             })
 
             log_parts = []
+            if name: log_parts.append(f"🏢 {name}")
+            if address and address != "N/A": log_parts.append(f"📍 {address}")
+            if phone and phone != "N/A": log_parts.append(f"📞 {phone}")
             if email_list: log_parts.append(f"✉️ Emails: {', '.join(email_list)}")
             if socials.get("instagram"): log_parts.append(f"📸 IG: {socials['instagram']}")
             if socials.get("facebook"): log_parts.append(f"📘 FB: {socials['facebook']}")
@@ -1265,7 +1515,7 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                 linkedin_queue.put_nowait({
                     "index": idx,
                     "name": name,
-                    "address": item.get("address", ""),
+                    "address": address or item.get("address", ""),
                     "website": website_url,
                     "linkedin_url": socials.get("linkedin", ""),
                     "website_emails": email_list
@@ -1304,7 +1554,15 @@ async def website_worker(context, queue: asyncio.Queue, done_event: asyncio.Even
                     "website_emails": []
                 })
         finally:
-            queue.task_done()
+            try:
+                import random
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+            except Exception:
+                pass
+            try:
+                queue.task_done()
+            except ValueError:
+                pass
 
 async def extract_single_linkedin_profile(page) -> Optional[Dict[str, Any]]:
     """Extracts profile details from an individual LinkedIn profile (/in/<username>)."""
@@ -2492,6 +2750,8 @@ async def run_scraper(
     skip_existing_db: bool = False,
     standalone_companies: Optional[str] = None,
     standalone_websites: Optional[str] = None,
+    urls_file: Optional[str] = None,
+    deep_crawl: bool = False,
     extension_active: bool = False,
 ):
     cleaned_query = query.strip() if query else ""
@@ -2505,7 +2765,11 @@ async def run_scraper(
     emit_event("log", f"Starting Desktop Chrome (Visible: {visible_browser})...")
 
     async with async_playwright() as p:
-        profile_dir = r"C:\ChromeAutomation"
+        profile_dir = os.path.expandvars(r"%LOCALAPPDATA%\DataScrapper\BrowserProfile")
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+        except Exception:
+            pass
         screen_w, screen_h = get_screen_dimensions()
 
         launch_args = [
@@ -2537,10 +2801,25 @@ async def run_scraper(
         context = None
 
         def get_chrome_executable_path() -> Optional[str]:
+            for env_var in ["CHROME_BIN", "CHROME_PATH", "BROWSER_PATH"]:
+                p = os.environ.get(env_var)
+                if p and os.path.exists(p):
+                    return p
             candidates = [
+                # Standard Google Chrome
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                 os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                # Chrome Canary / Beta / Dev
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome SxS\Application\chrome.exe"),
+                r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+                r"C:\Program Files\Google\Chrome Dev\Application\chrome.exe",
+                # Microsoft Edge
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                # Brave Browser
+                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
             ]
             for c in candidates:
                 if os.path.exists(c):
@@ -2564,7 +2843,7 @@ async def run_scraper(
 
             chrome_exe = get_chrome_executable_path()
             src_user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-            dest_user_data = r"C:\ChromeAutomation"
+            dest_user_data = profile_dir
 
             # Check if Chrome is already running on the desktop
             chrome_running = False
@@ -2578,9 +2857,9 @@ async def run_scraper(
             if chrome_running:
                 emit_event("log", "⚠️ Chrome is running without Port 9222. Click '⚡ Use This Chrome (Port 9222)' in the dashboard header so all tabs open in this window!")
             
-            # If Chrome is not running, launch user's primary profile directly with Port 9222
-            target_profile_dir = src_user_data if not chrome_running else dest_user_data
-            emit_event("log", f"🚀 Launching Chrome on Port 9222 (Profile: {'Personal' if not chrome_running else 'Automation'})...")
+            # Always launch dedicated automation profile to isolate from personal browser
+            target_profile_dir = dest_user_data
+            emit_event("log", "🚀 Launching Chrome on Port 9222 (Profile: Dedicated Automation)...")
 
             if chrome_exe:
                 cmd_args = [
@@ -2588,9 +2867,8 @@ async def run_scraper(
                     f'--user-data-dir={target_profile_dir}',
                     '--remote-debugging-port=9222',
                     '--remote-allow-origins=*',
-                    '--restore-last-session',
                     '--start-maximized',
-                    'http://localhost:8080'
+                    'about:blank'
                 ]
                 subprocess.Popen(cmd_args)
                 emit_event("log", "Launched Chrome with Port 9222 enabled.")
@@ -2778,29 +3056,66 @@ async def run_scraper(
         # =============================================================
         # STANDALONE WEBSITE AGENT (Agent 2 - Tab 2)
         # =============================================================
-        if standalone_websites or (not enable_maps and enable_website and not enable_linkedin and not enable_platform):
-            if standalone_websites:
-                site_list = [w.strip() for w in standalone_websites.split(",") if w.strip()]
-            else:
-                from database import get_all_leads
-                db_leads = get_all_leads()
-                # Prioritize unexplored leads (pending status or missing emails/screenshots)
-                site_list = [
-                    l["website"] for l in db_leads
-                    if l.get("website") and l["website"].startswith("http") and (
-                        not l.get("website_status")
-                        or l.get("website_status") in ["pending", "None", "", "failed"]
-                        or not l.get("screenshot")
-                        or l.get("email") in ["N/A", "", None]
-                    )
-                ][:25]
-                if not site_list:
-                    site_list = [l["website"] for l in db_leads if l.get("website") and l["website"].startswith("http")][:10]
-                if not site_list:
-                    site_list = ["https://grind.co.uk"]
+        if urls_file or standalone_websites or (not enable_maps and enable_website and not enable_linkedin and not enable_platform):
+            site_items = []
+            if urls_file and os.path.exists(urls_file):
+                try:
+                    with open(urls_file, "r", encoding="utf-8") as uf:
+                        loaded_data = json.load(uf)
+                    if isinstance(loaded_data, list):
+                        for item in loaded_data:
+                            if isinstance(item, str):
+                                u = item.strip()
+                                if u:
+                                    if not u.startswith("http://") and not u.startswith("https://"):
+                                        u = "https://" + u
+                                    clean_h = u.split("//")[-1].split("/")[0]
+                                    site_items.append({"url": u, "name": clean_h, "category": "Business", "address": "N/A", "phone": "N/A"})
+                            elif isinstance(item, dict):
+                                u = (item.get("url") or item.get("website") or "").strip()
+                                if u:
+                                    if not u.startswith("http://") and not u.startswith("https://"):
+                                        u = "https://" + u
+                                    clean_h = u.split("//")[-1].split("/")[0]
+                                    site_items.append({
+                                        "url": u,
+                                        "name": item.get("name") or clean_h,
+                                        "category": item.get("category") or "Business",
+                                        "address": item.get("address") or "N/A",
+                                        "phone": item.get("phone") or "N/A"
+                                    })
+                except Exception as e:
+                    emit_event("log", f"⚠️ [Agent 2: Website] Error loading urls_file: {e}")
 
-            emit_event("status", f"Scanning {len(site_list)} websites...")
-            emit_event("log", f"🌐 [Agent 2: Website] Starting Standalone Website Inspector for: {', '.join(site_list)}")
+            if not site_items:
+                if standalone_websites:
+                    site_list = [w.strip() for w in standalone_websites.split(",") if w.strip()]
+                    for s in site_list:
+                        u = s if (s.startswith("http://") or s.startswith("https://")) else "https://" + s
+                        clean_h = u.split("//")[-1].split("/")[0]
+                        site_items.append({"url": u, "name": clean_h, "category": "Business", "address": "N/A", "phone": "N/A"})
+                else:
+                    from database import get_all_leads
+                    db_leads = get_all_leads()
+                    raw_urls = [
+                        l["website"] for l in db_leads
+                        if l.get("website") and l["website"].startswith("http") and (
+                            not l.get("website_status")
+                            or l.get("website_status") in ["pending", "None", "", "failed"]
+                            or not l.get("screenshot")
+                            or l.get("email") in ["N/A", "", None]
+                        )
+                    ][:25]
+                    if not raw_urls:
+                        raw_urls = [l["website"] for l in db_leads if l.get("website") and l["website"].startswith("http")][:10]
+                    if not raw_urls:
+                        raw_urls = ["https://grind.co.uk"]
+                    for u in raw_urls:
+                        clean_h = u.split("//")[-1].split("/")[0]
+                        site_items.append({"url": u, "name": clean_h, "category": "Business", "address": "N/A", "phone": "N/A"})
+
+            emit_event("status", f"Scanning {len(site_items)} websites...")
+            emit_event("log", f"🌐 [Agent 2: Website] Starting Standalone Direct Website Scraper for {len(site_items)} target sites")
 
             website_page = await context.new_page() if cdp_connected else (context.pages[0] if context.pages else await context.new_page())
             await clear_fixed_viewport(website_page)
@@ -2813,13 +3128,16 @@ async def run_scraper(
 
             worker_task = asyncio.create_task(website_worker(context, website_queue, done_event, website_page=website_page, cdp_connected=cdp_connected))
 
-            for idx, site_url in enumerate(site_list, start=1):
-                clean_host = site_url.split("//")[-1].split("/")[0]
+            for idx, sitem in enumerate(site_items, start=1):
                 website_queue.put_nowait({
                     "index": idx,
-                    "name": clean_host,
-                    "address": "N/A",
-                    "website": site_url
+                    "name": sitem["name"],
+                    "address": sitem["address"],
+                    "website": sitem["url"],
+                    "phone": sitem.get("phone", "N/A"),
+                    "category": sitem.get("category", "Business"),
+                    "deep_crawl": deep_crawl,
+                    "force_crawl": True
                 })
 
             done_event.set()
@@ -2839,8 +3157,8 @@ async def run_scraper(
                 await context.close()
 
             emit_event("status", "Finished")
-            emit_event("log", "🏁 Finished Standalone Website Inspector.")
-            emit_event("completed", {"count": len(site_list), "places": []})
+            emit_event("log", "🏁 Finished Standalone Direct Website Scraper.")
+            emit_event("completed", {"count": len(site_items), "places": []})
             return
 
         # =============================================================
@@ -2905,9 +3223,36 @@ async def run_scraper(
             used_tabs = set(existing_maps + existing_li + existing_plat)
             blank_tabs = [p for p in context.pages if is_blank_tab(p) and p not in used_tabs]
 
-            maps_page = existing_maps[0] if (existing_maps and enable_maps) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_maps else None)
-            linkedin_page = existing_li[0] if (existing_li and enable_linkedin) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_linkedin else None)
-            platform_page = existing_plat[0] if (existing_plat and enable_platform) else ((blank_tabs.pop(0) if blank_tabs else await context.new_page()) if enable_platform else None)
+            if enable_maps and existing_maps:
+                maps_page = existing_maps[-1]
+                for extra_m in existing_maps[:-1]:
+                    try: await extra_m.close()
+                    except Exception: pass
+            elif enable_maps:
+                maps_page = blank_tabs.pop(0) if blank_tabs else await context.new_page()
+            else:
+                maps_page = None
+
+            if enable_linkedin and existing_li:
+                linkedin_page = existing_li[-1]
+                for extra_li in existing_li[:-1]:
+                    try: await extra_li.close()
+                    except Exception: pass
+            elif enable_linkedin:
+                linkedin_page = blank_tabs.pop(0) if blank_tabs else await context.new_page()
+            else:
+                linkedin_page = None
+
+            if enable_platform and existing_plat:
+                platform_page = existing_plat[-1]
+                for extra_plat in existing_plat[:-1]:
+                    try: await extra_plat.close()
+                    except Exception: pass
+            elif enable_platform:
+                platform_page = blank_tabs.pop(0) if blank_tabs else await context.new_page()
+            else:
+                platform_page = None
+
             website_page = (blank_tabs.pop(0) if blank_tabs else await context.new_page()) if (enable_website and extract_emails) else None
         else:
             pages_avail = list(context.pages)
@@ -3108,12 +3453,12 @@ async def run_scraper(
         scroll_attempts = 0
         is_infinite = (scrape_all or max_results >= 9999)
         target_max = 999999 if is_infinite else max_results
-        max_scroll_attempts = 99999 if is_infinite else max(15, (max_results // 3) + 10)
+        max_scroll_attempts = 99999 if is_infinite else max(30, (max_results * 2) + 20)
         consecutive_no_new = 0
 
         emit_event("status", "Extracting places from feed...")
 
-        while (enable_maps and maps_page) and (len(scraped_places) + skipped_count) < target_max and scroll_attempts < max_scroll_attempts:
+        while (enable_maps and maps_page) and len(scraped_places) < target_max and scroll_attempts < max_scroll_attempts:
             links = maps_page.locator('div[role="feed"] a.hfpxzc, div[role="feed"] a[href*="/maps/place/"]')
             count = await links.count()
             if count == 0:
@@ -3123,7 +3468,7 @@ async def run_scraper(
             new_found_this_scroll = 0
 
             for i in range(count):
-                if (len(scraped_places) + skipped_count) >= target_max:
+                if len(scraped_places) >= target_max:
                     break
 
                 try:
@@ -3612,7 +3957,7 @@ async def run_scraper(
                     # --- RADIUS FILTERING (Strict Haversine Distance Check) ---
                     if lat is not None and lon is not None and radius_km is not None and lat_val is not None and lon_val is not None:
                         dist_km = calculate_haversine_distance_km(lat, lon, lat_val, lon_val)
-                        if dist_km > (radius_km * 1.15):
+                        if dist_km > (radius_km * 1.5):
                             emit_event("log", f"⚠️ [Radius Filter] Skipped '{place_title}' ({dist_km:.2f}km away > {radius_km}km limit).")
                             continue
 
@@ -3793,16 +4138,21 @@ async def run_scraper(
             try:
                 feed = maps_page.locator('div[role="feed"]').first
                 if await feed.is_visible(timeout=1000):
-                    await feed.evaluate("el => { el.scrollBy(0, 3000); el.dispatchEvent(new Event('scroll', { bubbles: true })); }")
+                    try:
+                        await feed.focus()
+                        await maps_page.keyboard.press("PageDown")
+                    except Exception:
+                        pass
+                    await feed.evaluate("el => { el.scrollBy(0, 3500); el.dispatchEvent(new Event('scroll', { bubbles: true })); }")
                     if count > 0:
                         try:
                             await links.last.scroll_into_view_if_needed(timeout=800)
                         except Exception:
                             pass
-                    await maps_page.wait_for_timeout(500)
+                    await maps_page.wait_for_timeout(600)
             except Exception:
-                await maps_page.mouse.wheel(0, 2000)
-                await maps_page.wait_for_timeout(500)
+                await maps_page.mouse.wheel(0, 2500)
+                await maps_page.wait_for_timeout(600)
 
         if enable_maps and maps_page:
             emit_event("status", "Google Maps harvesting complete. Finalizing website & LinkedIn org inspections...")
@@ -3913,6 +4263,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip-existing-db", action="store_true", default=False)
     parser.add_argument("--standalone-companies", type=str, default=None)
     parser.add_argument("--standalone-websites", type=str, default=None)
+    parser.add_argument("--urls-file", type=str, default=None)
+    parser.add_argument("--deep-crawl", dest="deep_crawl", action="store_true", default=False)
     parser.add_argument("--extension-active", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -3937,5 +4289,7 @@ if __name__ == "__main__":
         skip_existing_db=args.skip_existing_db,
         standalone_companies=args.standalone_companies,
         standalone_websites=args.standalone_websites,
+        urls_file=args.urls_file,
+        deep_crawl=args.deep_crawl,
         extension_active=args.extension_active,
     ))
