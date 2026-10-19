@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DataScrapper Assistant</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #111827;
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, 0.4);
+      --cyan: #06b6d4;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      overflow-x: hidden;
+    }
+    
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 14px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 9px;
+      overflow: hidden;
+      box-shadow: 0 0 14px var(--accent-glow);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1e1b4b;
+    }
+    .brand-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .brand-text h1 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      background: linear-gradient(135deg, #ffffff, #93c5fd);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .brand-text p {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    
+    .server-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--card-border);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .server-badge:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--red);
+      transition: background 0.3s;
+    }
+    .status-dot.online {
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+    }
+
+    /* Active Tab Context Card */
+    .tab-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+    .tab-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .tab-target-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: rgba(99, 102, 241, 0.15);
+      color: #a5b4fc;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      text-transform: uppercase;
+    }
+    .tab-title-text {
+      font-size: 12px;
+      font-weight: 600;
+      color: #e2e8f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tab-url-text {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    /* Actions Grid */
+    .actions-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .btn-action {
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+      color: #f1f5f9;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 10px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+    .btn-action:hover {
+      background: #334155;
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-1px);
+    }
+    .btn-action:active {
+      transform: translateY(0);
+    }
+    .btn-action.primary {
+      background: linear-gradient(135deg, #4f46e5, #0891b2);
+      border: none;
+      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);
+    }
+    .btn-action.primary:hover {
+      background: linear-gradient(135deg, #4338ca, #0e7490);
+      box-shadow: 0 6px 18px rgba(79, 70, 229, 0.45);
+    }
+    .btn-icon {
+      font-size: 18px;
+    }
+
+    /* Full-width Scrape Button */
+    .btn-scrape-full {
+      width: 100%;
+      background: linear-gradient(135deg, #6366f1, #06b6d4);
+      border: none;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 11px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.35);
+      transition: all 0.2s ease;
+      margin-bottom: 12px;
+    }
+    .btn-scrape-full:hover {
+      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+      transform: translateY(-1px);
+    }
+    .btn-scrape-full:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Results Log Console */
+    .console-card {
+      background: #0f172a;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+    .console-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .console-body {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 10px;
+      color: #cbd5e1;
+      max-height: 90px;
+      overflow-y: auto;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+
+    /* Footer Dashboard Link */
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid var(--card-border);
+      padding-top: 10px;
+    }
+    .dashboard-link {
+      color: #38bdf8;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: color 0.15s;
+    }
+    .dashboard-link:hover {
+      color: #7dd3fc;
+      text-decoration: underline;
+    }
+    .version-text {
+      font-size: 10px;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="brand">
+      <div class="brand-icon">
+        <img src="icons/icon48.png" alt="DataScrapper Logo">
+      </div>
+      <div class="brand-text">
+        <h1>DataScrapper</h1>
+        <p>Chrome Assistant v3.0</p>
+      </div>
+    </div>
+    <div class="server-badge" id="server-badge" title="Click to change port">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="server-text">:8085</span>
+    </div>
+  </div>
+
+  <!-- Active Tab Inspector -->
+  <div class="tab-card">
+    <div class="tab-card-header">
+      <span>CURRENT TAB</span>
+      <span class="tab-target-badge" id="tab-badge">Detecting...</span>
+    </div>
+    <div class="tab-title-text" id="tab-title">Loading active tab info...</div>
+    <div class="tab-url-text" id="tab-url">about:blank</div>
+  </div>
+
+  <!-- 1-Click Fast Scrape Action -->
+  <button class="btn-scrape-full" id="btn-scrape-current">
+    <span>⚡</span>
+    <span id="btn-scrape-text">1-Click Scrape Active Page</span>
+  </button>
+
+  <!-- Secondary Actions Grid -->
+  <div class="actions-grid">
+    <button class="btn-action" id="btn-extract-directory">
+      <span class="btn-icon">🟣</span>
+      <span>Scrape Directory (Fresha/Airbnb)</span>
+    </button>
+    <button class="btn-action" id="btn-sync-cookies">
+      <span class="btn-icon">🍪</span>
+      <span>Sync LinkedIn Cookies</span>
+    </button>
+  </div>
+
+  <!-- Activity Log Console -->
+  <div class="console-card">
+    <div class="console-header">
+      <span>ACTIVITY LOG</span>
+      <span id="log-status">Ready</span>
+    </div>
+    <div class="console-body" id="console-body">Extension loaded. Standby for target page.</div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <a href="http://localhost:8085/" target="_blank" class="dashboard-link" id="dashboard-link">
+      <span>Open Live Dashboard (:8085)</span>
+      <span>↗</span>
+    </a>
+    <span class="version-text">Mavon/DataScrapper 3.0</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

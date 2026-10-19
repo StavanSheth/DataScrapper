@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mavon Leads & Org Intelligence - 4-Agent Live Harvester</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/css/app.css?v=2.3.1">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-text">
+        <h1>Mavon Leads & Org Intelligence</h1>
+        <p>4-Agent Live Chrome Suite: Maps Harvester, Website Inspector, LinkedIn Org & Platform Scout</p>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button id="btn-chrome-cdp" class="btn-chrome-pill disconnected" onclick="promptOrLaunchChromeDebug()" title="DataScrapper Extension & Chrome connection status">
+        <span class="chrome-dot"></span>
+        <span id="chrome-cdp-text">Extension Standby</span>
+      </button>
+      <button id="btn-attach-primary-chrome" class="btn-chrome-pill" style="display:none; background:rgba(99,102,241,0.25); border:1px solid #6366f1; color:#e0e7ff; font-weight:600; cursor:pointer;" onclick="attachPrimaryChrome()" title="Attach Port 9222 to this Chrome window so tabs open right here">
+        <span>⚡ Use This Chrome (Port 9222)</span>
+      </button>
+      <a href="/api/extension/download" class="btn btn-secondary" style="font-size:0.8rem; padding:7px 14px; border:1px solid rgba(16,185,129,0.35); background:rgba(16,185,129,0.15); color:#a7f3d0; text-decoration:none; display:flex; align-items:center; gap:6px;" title="Download DataScrapper Chrome Assistant (ZIP)">
+        <span>📦 Download Extension (ZIP)</span>
+      </a>
+      <button class="btn btn-secondary" onclick="openPipelineModal()" style="font-size:0.8rem; padding:7px 14px; border:1px solid rgba(99,102,241,0.35); background:rgba(99,102,241,0.15); color:#c7d2fe; display:flex; align-items:center; gap:6px;">
+        <span>📋 Verified Workflow Steps</span>
+      </button>
+      <div class="status-badge">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <!-- Mode Switcher -->
+      <div class="mode-tabs">
+        <button class="mode-tab-btn active" id="tab-mode-maps" onclick="setMode('maps')">
+          <span>📍 Platform Directory Scout</span>
+        </button>
+        <button class="mode-tab-btn" id="tab-mode-companies" style="display:none;" onclick="setMode('companies')">
+          <span>🏢 Standalone LinkedIn Org</span>
+        </button>
+        <button class="mode-tab-btn" id="tab-mode-website-list" style="display:none;" onclick="setMode('website_list')">
+          <span>🌐 Direct Website Scraper</span>
+        </button>
+      </div>
+
+      <!-- Mode 1: Maps Harvester Controls -->
+      <div id="controls-maps" style="display:flex; flex-direction:column; gap:16px;">
+        <div class="form-group" id="query-group">
+          <label id="query-label">Business Type / Keyword <span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">(Optional - leave empty to harvest all businesses in area)</span></label>
+          <input type="text" id="query-input" placeholder="e.g. Barber, Bakery, Dentist (or leave empty for all businesses)" value="">
+          <div class="chips">
+            <div class="chip" onclick="setQuery('')" style="background:rgba(99,102,241,0.25); border:1px solid #6366f1; color:#c7d2fe; font-weight:600;">🌐 All Businesses (Broad)</div>
+            <div class="chip" onclick="setQuery('Bakery London')">🥐 Bakeries</div>
+            <div class="chip" onclick="setQuery('Barber London')">💈 Barbers</div>
+            <div class="chip" onclick="setQuery('Dentist London')">🦷 Dentists</div>
+            <div class="chip" onclick="setQuery('Cafe London')">☕ Cafes</div>
+            <div class="chip" onclick="setQuery('Gym London')">🏋️ Gyms</div>
+          </div>
+        </div>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span>🔄 Continuous Harvesting (All Leads)</span>
+            <small>Scrolls Google Maps until all area businesses and locations are harvested</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="scrape-all-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label style="margin:0;">📍 Target Location & Interactive Map</label>
+            <div style="display:flex; gap:6px;">
+              <button type="button" id="fit-pins-btn" class="btn" style="padding:4px 9px; font-size:0.75rem; background:rgba(99,102,241,0.2); border:1px solid #6366f1; color:#c7d2fe; border-radius:6px; cursor:pointer; font-weight:600;" onclick="fitMapToPins()" title="Zoom to show all plotted business leads on map">
+                🗺️ Fit All Pins
+              </button>
+              <button type="button" id="locate-me-btn" class="btn" style="padding:4px 9px; font-size:0.75rem; background:rgba(6,182,212,0.15); border:1px solid var(--cyan); color:var(--cyan); border-radius:6px; cursor:pointer;" onclick="locateUserPosition()">
+                🎯 My Location
+              </button>
+            </div>
+          </div>
+
+          <!-- Location Search Bar for Map -->
+          <div style="display:flex; gap:6px; margin-bottom:8px;">
+            <input type="text" id="location-search-input" value="Mumbai" placeholder="Search city, area, address, or landmark on map..." style="flex:1; padding:7px 10px; font-size:0.8rem; border-radius:8px;" onkeydown="if(event.key==='Enter'){event.preventDefault();searchLocationOnMap();}">
+            <button type="button" class="btn" style="padding:7px 12px; font-size:0.8rem; background:var(--primary); color:#fff; border-radius:8px; border:none; cursor:pointer; font-weight:600;" onclick="searchLocationOnMap()">Find</button>
+          </div>
+
+          <!-- Quick City Preset Chips -->
+          <div class="chips" style="margin-bottom:8px; gap:4px; flex-wrap:wrap; display:flex;">
+            <div class="chip" onclick="setPresetLocation(19.0760, 72.8777, 'Mumbai', 13)">🇮🇳 Mumbai</div>
+            <div class="chip" onclick="setPresetLocation(28.6139, 77.2090, 'Delhi', 13)">🇮🇳 Delhi</div>
+            <div class="chip" onclick="setPresetLocation(12.9716, 77.5946, 'Bengaluru', 13)">🇮🇳 Bengaluru</div>
+            <div class="chip" onclick="setPresetLocation(51.5074, -0.1278, 'London', 13)">🇬🇧 London</div>
+            <div class="chip" onclick="setPresetLocation(40.7128, -74.0060, 'New York', 13)">🇺🇸 New York</div>
+            <div class="chip" onclick="setPresetLocation(25.2048, 55.2708, 'Dubai', 13)">🇦🇪 Dubai</div>
+          </div>
+
+          <div id="picker-map"></div>
+
+          <!-- Real-time Editable Lat / Lon Coordinate Inputs -->
+          <div class="coords-grid" style="margin-top: 8px;">
+            <div>
+              <label style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">Target Latitude</label>
+              <input type="number" step="any" id="lat-input" value="19.0760" style="padding:7px; font-size:0.85rem; font-family:monospace; width:100%;" oninput="onManualCoordChange()" onchange="onManualCoordChange()" placeholder="e.g. 19.0760">
+            </div>
+            <div>
+              <label style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">Target Longitude</label>
+              <input type="number" step="any" id="lon-input" value="72.8777" style="padding:7px; font-size:0.85rem; font-family:monospace; width:100%;" oninput="onManualCoordChange()" onchange="onManualCoordChange()" placeholder="e.g. 72.8777">
+            </div>
+          </div>
+          <div style="font-size:0.72rem; color:#94a3b8; margin-top:4px;">
+            💡 Click anywhere on map, drag the cyan pin, search an address above, or directly type/paste Latitude and Longitude.
+          </div>
+        </div>
+
+        <!-- Radius Selection Controls -->
+        <div class="form-group" style="background:rgba(255,255,255,0.02); border:1px solid var(--card-border); border-radius:12px; padding:12px 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <label style="margin:0;">🎯 Search Radius: <span id="radius-val" style="color:var(--cyan); font-weight:700;">5</span> km</label>
+            <span style="font-size:0.75rem; color:var(--text-muted);">(Strict Geofencing)</span>
+          </div>
+          <input type="range" id="radius-slider" min="1" max="50" step="1" value="5" style="width:100%; margin:8px 0;" oninput="updateRadius(this.value)">
+          <div class="chips" style="margin-top:2px;">
+            <div class="chip" onclick="updateRadius(1)">🚶 1 km (Local)</div>
+            <div class="chip" onclick="updateRadius(2)">🏘️ 2 km (Area)</div>
+            <div class="chip" onclick="updateRadius(5)">📍 5 km (Standard)</div>
+            <div class="chip" onclick="updateRadius(10)">🏙️ 10 km (City)</div>
+            <div class="chip" onclick="updateRadius(20)">🚗 20 km (District)</div>
+            <div class="chip" onclick="updateRadius(50)">🗺️ 50 km (Metro)</div>
+          </div>
+        </div>
+
+        <div class="form-group" id="max-results-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label style="margin:0;">Max Places Limit: <span id="max-label" style="color:var(--accent); font-weight:700;">∞ <span style="font-size:0.75rem; color:#a5b4fc;">(Unlimited / Continuous)</span></span></label>
+            <button type="button" id="infinity-badge-btn" class="btn" style="padding:2px 8px; font-size:0.7rem; background:rgba(99,102,241,0.2); border:1px solid #6366f1; color:#c7d2fe; border-radius:4px; cursor:pointer;" onclick="toggleInfinityMode()">
+              ♾️ Unlimited
+            </button>
+          </div>
+          <input type="range" id="max-slider" min="5" max="500" step="5" value="500" style="width:100%;" oninput="handleMaxSliderInput(this.value)">
+          <div class="radius-chips" style="margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;">
+            <div class="chip" onclick="setMaxLimit(20)">20</div>
+            <div class="chip" onclick="setMaxLimit(50)">50</div>
+            <div class="chip" onclick="setMaxLimit(100)">100</div>
+            <div class="chip" onclick="setMaxLimit(250)">250</div>
+            <div class="chip" onclick="setMaxLimit('infinity')">♾️ Unlimited</div>
+          </div>
+        </div>
+
+        <!-- Tri-Agent Selector Toggles -->
+        <div style="display:flex; flex-direction:column; gap:8px; background:rgba(99,102,241,0.06); border:1px solid rgba(99,102,241,0.25); border-radius:12px; padding:12px 14px;">
+          <div style="font-size:0.8rem; font-weight:700; color:#e2e8f0; text-transform:uppercase; letter-spacing:0.04em; display:flex; justify-content:space-between; align-items:center;">
+            <span>🤖 Active Scraper Agents</span>
+            <span style="font-size:0.7rem; color:var(--accent); font-weight:normal;">(LinkedIn & Platform Edition)</span>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none; opacity: 0.45; cursor: not-allowed;" title="Google Maps Agent is blocked in this codebase">
+            <div class="toggle-info">
+              <span>🗺️ Agent 1: Google Maps Harvester <span style="font-size:0.68rem; color:#ef4444; font-weight:bold; margin-left:6px;">[BLOCKED]</span></span>
+              <small>Tab 1: Blocked in 1_Linkedin_Platforms codebase</small>
+            </div>
+            <label class="switch" style="cursor: not-allowed; pointer-events: none;">
+              <input type="checkbox" id="agent-maps-toggle" disabled>
+              <span class="slider" style="background:#334155;"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none; opacity: 0.45; cursor: not-allowed;" title="Shop Website Agent is blocked in this codebase">
+            <div class="toggle-info">
+              <span>🌐 Agent 2: Shop Website Inspector <span style="font-size:0.68rem; color:#ef4444; font-weight:bold; margin-left:6px;">[BLOCKED]</span></span>
+              <small>Tab 2: Blocked in 1_Linkedin_Platforms codebase</small>
+            </div>
+            <label class="switch" style="cursor: not-allowed; pointer-events: none;">
+              <input type="checkbox" id="agent-website-toggle" disabled>
+              <span class="slider" style="background:#334155;"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none; opacity: 0.45; cursor: not-allowed;" title="LinkedIn Agent is blocked in this setup">
+            <div class="toggle-info">
+              <span>💼 Agent 3: LinkedIn Org Harvester <span style="font-size:0.68rem; color:#ef4444; font-weight:bold; margin-left:6px;">[BLOCKED]</span></span>
+              <small>Tab 3: Blocked in this setup</small>
+            </div>
+            <label class="switch" style="cursor: not-allowed; pointer-events: none;">
+              <input type="checkbox" id="agent-linkedin-toggle" disabled>
+              <span class="slider" style="background:#334155;"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>📍 Agent 4: Platform Directory Scout</span>
+              <small>Tab 4: Searches platform listings (Fresha, Airbnb, Yelp, TripAdvisor) & normalizes data</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="agent-platform-toggle" checked onchange="handlePlatformToggleChange()">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div id="platform-config-panel" style="display:block; margin: 4px 8px 8px; padding: 10px; background: rgba(168, 85, 247, 0.08); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 8px;">
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600;">Platforms (Simultaneous Area & Proximity Search):</label>
+                <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:0.68rem; background:rgba(168,85,247,0.25); border:1px solid rgba(168,85,247,0.5); color:#e9d5ff; border-radius:4px;" onclick="runManualNormalize()" title="Run Cross-Platform Normalization on current database">🔄 Normalize Now</button>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Fresha" checked onchange="handlePlatformPresetChange()">
+                  <span>🟣 Fresha</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Airbnb" checked onchange="handlePlatformPresetChange()">
+                  <span>🔴 Airbnb</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="Yelp" onchange="handlePlatformPresetChange()">
+                  <span>🟠 Yelp</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#f1f5f9; cursor:pointer; background:rgba(15,23,42,0.6); padding:5px 8px; border-radius:6px; border:1px solid #334155;">
+                  <input type="checkbox" class="platform-src-cb" value="TripAdvisor" onchange="handlePlatformPresetChange()">
+                  <span>🟢 TripAdvisor</span>
+                </label>
+              </div>
+              <div style="margin-top:2px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#cbd5e1; cursor:pointer;">
+                  <input type="checkbox" class="platform-src-cb" id="platform-src-custom" value="Custom" onchange="handlePlatformPresetChange()">
+                  <span>⚙️ Custom Platform / Directory URL</span>
+                </label>
+                <div id="platform-custom-input-group" style="display:none; margin-top:4px;">
+                  <input type="text" id="platform-custom-url" class="form-input" placeholder="e.g. https://custom.com/search?q={query}&loc={location}" style="font-size:0.75rem; padding:4px 8px; width:100%;" />
+                </div>
+              </div>
+              <select id="platform-preset-select" style="display:none;"><option value="Fresha">Fresha</option></select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Duplication Avoidance & DB Edge Cases -->
+        <div style="display:flex; flex-direction:column; gap:8px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.25); border-radius:12px; padding:12px 14px;">
+          <div style="font-size:0.8rem; font-weight:700; color:#e2e8f0; text-transform:uppercase; letter-spacing:0.04em; display:flex; justify-content:space-between; align-items:center;">
+            <span>🛡️ Duplication Avoidance</span>
+            <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="runDbDedup()" title="Clean and merge existing duplicates in SQLite database">🧹 Merge DB Dups</button>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🛡️ Area Duplication Avoidance</span>
+              <small>Prevents re-inspecting same shops if found again in area</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="dedup-area-toggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row" style="padding:6px 8px; background:transparent; border:none;">
+            <div class="toggle-info">
+              <span>🏢 Skip Already Saved in Database</span>
+              <small>If shop already exists in leads.db, skips to save time</small>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="skip-existing-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode 2: Standalone LinkedIn Org Controls -->
+      <div id="controls-companies" style="display:none; flex-direction:column; gap:16px;">
+        <div class="form-group">
+          <label>Company Names to Investigate</label>
+          <textarea id="companies-input" rows="4" placeholder="Enter company name(s), comma-separated or one per line:&#10;e.g. Grind, Marks and Spencer, Pret A Manger, Franco Manca" style="resize:vertical;"></textarea>
+          <div class="chips">
+            <div class="chip" onclick="addCompanyChip('Grind')">🥐 Grind</div>
+            <div class="chip" onclick="addCompanyChip('Marks and Spencer')">🏢 Marks & Spencer</div>
+            <div class="chip" onclick="addCompanyChip('Pret A Manger')">☕ Pret A Manger</div>
+            <div class="chip" onclick="addCompanyChip('Franco Manca')">🍕 Franco Manca</div>
+            <div class="chip" onclick="addCompanyChip('Five Guys')">🍔 Five Guys</div>
+          </div>
+        </div>
+
+        <div style="background:rgba(10, 102, 194, 0.12); border:1px solid rgba(10, 102, 194, 0.3); border-radius:10px; padding:12px 14px; font-size:0.8rem; color:#bae6fd; line-height:1.4;">
+          <strong>💼 Tab 3 Active Chrome Profile Mode:</strong><br>
+          Directly searches company LinkedIn accounts using your active logged-in Chrome profile session, crawls the People directory, classifies job roles into Seniority tiers (Executive, Management, Staff), and builds hierarchical tree charts.
+        </div>
+      </div>
+
+      <!-- Mode 3: Direct Website Scraper Controls -->
+      <div id="controls-website-list" style="display:none; flex-direction:column; gap:16px;">
+        <div class="form-group">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label style="margin:0;">Target Websites List (One URL per line)</label>
+            <span id="website-count-badge" class="badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-size:0.75rem; padding:2px 8px; border-radius:12px;">0 URLs detected</span>
+          </div>
+          <textarea id="website-list-input" rows="5" placeholder="Enter websites (one URL per line or comma-separated):&#10;e.g.&#10;https://grind.co.uk&#10;pret.co.uk&#10;https://monmouthcoffee.co.uk" style="resize:vertical; font-family:monospace; font-size:0.85rem;" oninput="onWebsiteInputChanged()"></textarea>
+          <div class="chips" style="margin-top:6px;">
+            <div class="chip" onclick="addWebsiteChip('https://grind.co.uk')">☕ Grind</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.pret.co.uk')">🥪 Pret</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.monmouthcoffee.co.uk')">☕ Monmouth Coffee</div>
+            <div class="chip" onclick="addWebsiteChip('https://www.francomanca.co.uk')">🍕 Franco Manca</div>
+            <div class="chip" onclick="clearWebsiteInput()" style="color:#ef4444; border-color:rgba(239,68,68,0.3);">🗑️ Clear</div>
+          </div>
+        </div>
+
+        <!-- File Upload Dropzone -->
+        <div id="website-dropzone" class="dropzone" onclick="document.getElementById('website-file-input').click()" ondragover="handleFileDragOver(event)" ondragleave="handleFileDragLeave(event)" ondrop="handleFileDrop(event)">
+          <input type="file" id="website-file-input" accept=".csv, .txt" style="display:none;" onchange="handleFileSelect(event)">
+          <div style="font-size:1.6rem; margin-bottom:4px;">📁</div>
+          <div style="font-weight:600; font-size:0.85rem; color:#f1f5f9;">Drag & drop CSV or TXT file here, or <span style="color:var(--primary); text-decoration:underline;">browse</span></div>
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Auto-detects URL columns (Website, URL, Link, Site) and companion columns (Name, Phone, Category)</div>
+        </div>
+
+        <!-- Deep Crawl Toggle -->
+        <div class="toggle-row" style="background:rgba(255,255,255,0.02); border:1px solid var(--card-border); border-radius:10px; padding:10px 12px;">
+          <div class="toggle-info">
+            <span>🕷️ Deep Crawl Subpages</span>
+            <small>Inspects /contact and /about links for additional emails & phone numbers</small>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="website-deep-crawl-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div style="background:rgba(16, 185, 129, 0.08); border:1px solid rgba(16, 185, 129, 0.25); border-radius:10px; padding:10px 12px; font-size:0.78rem; color:#a7f3d0; line-height:1.4;">
+          <strong>🌐 Tab 2 Direct Scraper Highlights:</strong><br>
+          Extracts Emails, Phone, WhatsApp, Instagram, Facebook, LinkedIn, Twitter, YouTube, TikTok, Booking links, Bot shield status, Cookie banners & full-color Screenshots. Automatically deduplicates against existing records in <code>leads.db</code>.
+        </div>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span>🖥️ Live On Desktop Screen</span>
+          <small>Opens Google Chrome window visibly right in front of you</small>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="visible-browser-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" id="start-btn" onclick="startScraping()">
+          <span>🚀 Start Live Agent</span>
+        </button>
+        <button class="btn btn-danger" id="stop-btn" onclick="stopScraping()" style="display:none;">
+          <span>⏹️ Stop</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="right-content">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(99,102,241,0.15); color:var(--accent);">🏢</div>
+          <div>
+            <div class="stat-val" id="stat-total">0</div>
+            <div class="stat-label">Total in Database</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:var(--green);">✉️</div>
+          <div>
+            <div class="stat-val" id="stat-emails">0</div>
+            <div class="stat-label">Emails Discovered</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(168,85,247,0.15); color:var(--purple);">👥</div>
+          <div>
+            <div class="stat-val" id="stat-orgs">0</div>
+            <div class="stat-label">Team Members Mapped</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon" style="background:rgba(245,158,11,0.15); color:var(--amber);">📍</div>
+          <div>
+            <div class="stat-val" id="stat-plotted">0</div>
+            <div class="stat-label">Plotted on Map</div>
+          </div>
+        </div>
+        <div class="stat-card clickable-kpi" onclick="openDirectoryModal()" title="Click to manage platform directory templates & target URLs">
+          <div class="stat-icon" style="background:rgba(168,85,247,0.2); color:#c084fc;">🟣</div>
+          <div>
+            <div class="stat-val" id="stat-platform-count">0</div>
+            <div class="stat-label">Directory Listings (Manage ⚙️)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-activity-grid">
+        <!-- 4-AGENT CONCURRENT LIVE VIEWPORTS (4-COLUMN SPLIT VIEW) -->
+        <div class="tri-stream-container">
+          <!-- Card 1: Google Maps (Tab 1) - BLOCKED -->
+          <div class="stream-card" id="card-maps" style="display:none;">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator" id="stream-indicator-maps">⚪ MAPS BLOCKED</span>
+                <span class="stream-tab-title" id="stream-title-maps">Google Maps</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-maps" title="Maps Feed">maps.google.com</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('maps')" title="Bring Google Maps Tab to Front in Live Chrome">👁️ View</button>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-maps')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-maps">
+              <img id="stream-img-maps" src="" alt="Google Maps Stream" style="display:none;" />
+              <div id="stream-placeholder-maps" class="stream-placeholder">
+                <div class="placeholder-icon">🗺️</div>
+                <div class="placeholder-title">Tab 1: Google Maps (Blocked)</div>
+                <small class="placeholder-desc">Agent blocked in 1_Linkedin_Platforms codebase</small>
+              </div>
+            </div>
+            <!-- Agent 1 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot maps"></span>
+                  <span>🗺️ Maps Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-maps">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('maps')" title="Clear Maps Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-maps">
+                <div class="agent-log-line maps"><span class="agent-log-time">[Maps]</span> <span>Blocked in this workspace.</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 2: Shop Website (Tab 2) - BLOCKED -->
+          <div class="stream-card" id="card-website" style="display:none;">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator website" id="stream-indicator-website">⚪ WEBSITE BLOCKED</span>
+                <span class="stream-tab-title" id="stream-title-website">Shop Website</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-website" title="Shop Website Feed">Waiting...</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('website')" title="Bring Shop Website Tab to Front in Live Chrome">👁️ View</button>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-website')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-website">
+              <img id="stream-img-website" src="" alt="Shop Website Stream" style="display:none;" />
+              <div id="stream-placeholder-website" class="stream-placeholder">
+                <div class="placeholder-icon">🌐</div>
+                <div class="placeholder-title">Tab 2: Shop Website</div>
+                <small class="placeholder-desc">Simultaneous website crawling, anti-bot handling & screenshot capture</small>
+              </div>
+            </div>
+            <!-- Agent 2 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot website"></span>
+                  <span>🌐 Website Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-website">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('website')" title="Clear Website Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-website">
+                <div class="agent-log-line website"><span class="agent-log-time">[Website]</span> <span>Ready. Waiting for shop domains...</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 3: LinkedIn Intelligence (Tab 3) - BLOCKED -->
+          <div class="stream-card" id="card-linkedin" style="display:none;">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator linkedin" id="stream-indicator-linkedin">⚪ LINKEDIN BLOCKED</span>
+                <span class="stream-tab-title" id="stream-title-linkedin">LinkedIn Org Intel</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-linkedin" title="LinkedIn Feed">linkedin.com</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('linkedin')" title="Bring LinkedIn Tab to Front in Live Chrome">👁️ View</button>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-linkedin')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-linkedin">
+              <img id="stream-img-linkedin" src="" alt="LinkedIn Stream" style="display:none;" />
+              <div id="stream-placeholder-linkedin" class="stream-placeholder">
+                <div class="placeholder-icon">💼</div>
+                <div class="placeholder-title">Tab 3: LinkedIn Intelligence</div>
+                <small class="placeholder-desc">Active Chrome session scraping company staff & org hierarchy</small>
+              </div>
+            </div>
+            <!-- Agent 3 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot linkedin"></span>
+                  <span>💼 LinkedIn Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-linkedin">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('linkedin')" title="Clear LinkedIn Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-linkedin">
+                <div class="agent-log-line linkedin"><span class="agent-log-time">[LinkedIn]</span> <span>Ready. Session bridge listening...</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 4: Platform Directory (Tab 4) -->
+          <div class="stream-card" id="card-platform">
+            <div class="stream-header">
+              <div class="stream-header-left">
+                <span class="live-indicator platform" id="stream-indicator-platform">⚪ PLATFORM IDLE</span>
+                <span class="stream-tab-title" id="stream-title-platform">Directory Scout</span>
+              </div>
+              <div class="stream-header-right">
+                <span class="stream-url-tag" id="stream-url-platform" title="Platform Feed">directory</span>
+                <button class="btn-activate-tab" onclick="activateChromeTab('platform')" title="Bring Platform Tab to Front in Live Chrome">👁️ View</button>
+                <button class="btn-expand" onclick="toggleStreamExpand('card-platform')" title="Toggle Maximize">⛶</button>
+              </div>
+            </div>
+            <div class="stream-viewport" id="stream-viewport-platform">
+              <img id="stream-img-platform" src="" alt="Platform Stream" style="display:none;" />
+              <div id="stream-placeholder-platform" class="stream-placeholder">
+                <div class="placeholder-icon">📍</div>
+                <div class="placeholder-title">Tab 4: Platform Scout</div>
+                <small class="placeholder-desc">Active Chrome session scraping directory listings & booking details</small>
+              </div>
+            </div>
+            <!-- Agent 4 Live Console Window -->
+            <div class="agent-console-wrap">
+              <div class="agent-console-header">
+                <div class="agent-console-title">
+                  <span class="console-dot platform"></span>
+                  <span>📍 Directory Console</span>
+                </div>
+                <div class="agent-console-tools">
+                  <span class="agent-log-badge" id="badge-log-platform">0 logs</span>
+                  <button type="button" class="btn-console-clear" onclick="clearAgentConsole('platform')" title="Clear Directory Console">🧹</button>
+                </div>
+              </div>
+              <div class="agent-console-box" id="console-box-platform">
+                <div class="agent-log-line platform"><span class="agent-log-time">[Directory]</span> <span>Ready. Platform scout standby...</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Terminal Logs Container -->
+        <div class="terminal-container" style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:0 4px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:0.75rem; font-weight:700; color:#cbd5e1; text-transform:uppercase; letter-spacing:0.04em;">🖥️ Live Agent Console Logs</span>
+              <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981;" title="Live Real-Time Stream Active"></span>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span id="log-count-badge" style="font-size:0.7rem; color:#94a3b8;">1 log</span>
+              <button type="button" onclick="clearTerminalLogs()" style="background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); color:#cbd5e1; font-size:0.7rem; padding:3px 9px; border-radius:6px; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.06)'" title="Clear terminal view">🧹 Clear</button>
+            </div>
+          </div>
+          <div class="terminal-box" id="terminal-box">
+            <div class="log-line"><span class="log-time">[System]</span> <span>Mavon Leads & Org Intelligence Agent ready. Database connected. Click 'Start Live Agent' to begin.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Real-Time Proximity Yield & Smart Deduplication Progress Bar -->
+      <div class="proximity-tracker-panel" id="proximity-tracker-panel">
+        <div class="tracker-header">
+          <div class="tracker-title">
+            <span class="pulse-icon">📍</span>
+            <span id="proximity-location-tag">Proximity Yield: <strong>Ready to scan area</strong></span>
+          </div>
+          <div class="tracker-badges">
+            <span class="badge-yield badge-yield-scraped" id="yield-badge-scraped">✅ 0 Scraped</span>
+            <span class="badge-yield badge-yield-skipped" id="yield-badge-skipped">⏭️ 0 Skipped (In DB)</span>
+            <span class="badge-yield badge-yield-total" id="yield-badge-total">🎯 ~0 Total in Area</span>
+          </div>
+        </div>
+
+        <div class="segmented-progress-bar">
+          <div class="bar-segment bar-segment-scraped" id="bar-scraped" style="width: 0%;" title="Newly Scraped"></div>
+          <div class="bar-segment bar-segment-skipped" id="bar-skipped" style="width: 0%;" title="Skipped (Already in DB)"></div>
+        </div>
+
+        <!-- Individual Multi-Platform Progress Bars Grid -->
+        <div class="platform-bars-grid" id="platform-bars-grid"></div>
+        
+        <div class="tracker-footer">
+          <small id="tracker-status-text">Smart pre-click deduplication active. Redundant shops are bypassed in ~2ms.</small>
+          <small id="tracker-efficiency-text" style="color: #34d399; font-weight: 700;">⚡ Time Saved: 0.0s</small>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <!-- Live Tri-Agent Queue Synchronization & Progress Header -->
+        <div class="agent-sync-progress-panel" id="agent-sync-progress-panel">
+          <!-- Maps Harvester Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>🗺️ Google Maps Harvester (Base)</span>
+              <span class="sync-stat" id="sync-stat-maps">0 leads captured</span>
+            </div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-maps">
+              <div class="sync-bar-seg" id="seg-maps-web" title="With Website" style="width: 0%; background: #10b981;"></div>
+              <div class="sync-bar-seg" id="seg-maps-phone" title="With Phone" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-maps-noweb" title="No Website" style="width: 0%; background: #f97316;"></div>
+              <div class="sync-bar" id="sync-bar-maps" style="display:none; width: 100%;"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-blue" id="sync-chip-maps-live">⚡ Stream Active</span>
+              <span class="chip-sm chip-green" id="sync-chip-maps-web">🌐 With Web: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-maps-noweb">⚠️ No Web: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-maps-phone">📞 Phone: 0</span>
+            </div>
+          </div>
+
+          <!-- Website Inspector Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>🌐 Website Inspector</span>
+              <span class="sync-stat" id="sync-stat-web">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-web">
+              <div class="sync-bar-seg" id="seg-web-pending" title="Click to filter: In Queue" style="width: 0%; background: #475569; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('In Queue')"></div>
+              <div class="sync-bar-seg" id="seg-web-contacts" title="Click to filter: Contacts Found" style="width: 0%; background: #10b981; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Contacts Found')"></div>
+              <div class="sync-bar-seg" id="seg-web-nocontacts" title="Click to filter: No Contacts Found" style="width: 0%; background: #3b82f6; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Contacts Found')"></div>
+              <div class="sync-bar-seg" id="seg-web-bot" title="Click to filter: Bot Shield" style="width: 0%; background: #f59e0b; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Bot Shield (Data Extracted)')"></div>
+              <div class="sync-bar-seg" id="seg-web-notloading" title="Click to filter: Not Loading / Unsafe" style="width: 0%; background: #ef4444; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Not Loading')"></div>
+              <div class="sync-bar-seg" id="seg-web-noweb" title="Click to filter: No Website" style="width: 0%; background: #64748b; cursor: pointer;" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Website')"></div>
+              <div class="sync-bar" id="sync-bar-web" style="display:none; width: 0%;"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-gray" id="sync-chip-web-pending" style="cursor: pointer;" title="Click to filter: In Queue" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('In Queue')">⏳ In Queue: 0</span>
+              <span class="chip-sm chip-green" id="sync-chip-web-contacts" style="cursor: pointer;" title="Click to filter: Contacts Found" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Contacts Found')">🟢 Contacts: 0</span>
+              <span class="chip-sm chip-blue" id="sync-chip-web-nocontacts" style="cursor: pointer;" title="Click to filter: No Contacts Found" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Contacts Found')">🔵 No Contacts: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-web-bot" style="cursor: pointer;" title="Click to filter: Bot Shield" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Bot Shield (Data Extracted)')">🟡 Bot Shield: 0</span>
+              <span class="chip-sm chip-red" id="sync-chip-web-notloading" style="cursor: pointer;" title="Click to filter: Not Loading / Unsafe" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('Not Loading')">🔴 Not Loading: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-web-noweb" style="cursor: pointer;" title="Click to filter: No Website" onclick="if(typeof filterByStatusTag==='function') filterByStatusTag('No Website')">⚪ No Web: 0</span>
+            </div>
+          </div>
+
+          <!-- LinkedIn Harvester Sync -->
+          <div class="sync-card">
+            <div class="sync-header">
+              <span>💼 LinkedIn Org Harvester</span>
+              <span class="sync-stat" id="sync-stat-li">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-li">
+              <div class="sync-bar-seg" id="seg-li-found" title="Found Companies" style="width: 0%; background: #0ea5e9;"></div>
+              <div class="sync-bar-seg" id="seg-li-emp" title="Hierarchy Extracted" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-li-notfound" title="Not Found" style="width: 0%; background: #ef4444;"></div>
+              <div class="sync-bar-seg" id="seg-li-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar" id="sync-bar-li" style="display:none; width: 0%;"></div>
+            </div>
+            <div class="sync-chips">
+              <span class="chip-sm chip-blue" id="sync-chip-li-found">✅ Found: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-li-emp">👥 Hierarchy: 0</span>
+              <span class="chip-sm chip-red" id="sync-chip-li-notfound">⚠️ Not Found: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-li-pending">⏳ In Queue: 0</span>
+            </div>
+          </div>
+
+          <!-- Platform Directory Scout Sync & Multi-Platform Breakdown -->
+          <div class="sync-card" id="sync-card-platform">
+            <div class="sync-header">
+              <span>🟣 Platform Directory Scout</span>
+              <span class="sync-stat" id="sync-stat-plat">0% (0 / 0)</span>
+            </div>
+            <div class="sync-bar-wrap" id="sync-bar-wrap-plat">
+              <div class="sync-bar-seg" id="seg-plat-scraped" title="Scraped Listings" style="width: 0%; background: #10b981;"></div>
+              <div class="sync-bar-seg" id="seg-plat-booking" title="Booking Links" style="width: 0%; background: #0ea5e9;"></div>
+              <div class="sync-bar-seg" id="seg-plat-rated" title="Rated" style="width: 0%; background: #f97316;"></div>
+              <div class="sync-bar-seg" id="seg-plat-matched" title="Matched to Maps" style="width: 0%; background: #a855f7;"></div>
+              <div class="sync-bar-seg" id="seg-plat-pending" title="In Queue" style="width: 0%; background: #475569;"></div>
+              <div class="sync-bar" id="sync-bar-plat" style="display:none; width: 0%;"></div>
+            </div>
+            <div class="sync-chips" id="sync-chips-plat-summary">
+              <span class="chip-sm chip-green" id="sync-chip-plat-scraped">✅ Scraped: 0</span>
+              <span class="chip-sm chip-blue" id="sync-chip-plat-booking">🔗 Booking: 0</span>
+              <span class="chip-sm chip-orange" id="sync-chip-plat-rated">⭐ Rated: 0</span>
+              <span class="chip-sm chip-purple" id="sync-chip-plat-matched">🌟 Matched: 0</span>
+              <span class="chip-sm chip-gray" id="sync-chip-plat-pending">⏳ In Queue: 0</span>
+            </div>
+            <!-- Individual Platform Breakdown Progress Bars -->
+            <div id="sync-platform-breakdown-list" style="display:flex; flex-direction:column; gap:4px; margin-top:4px; border-top:1px solid rgba(255,255,255,0.08); padding-top:4px;">
+              <!-- Dynamically populated for Fresha, Airbnb, Yelp, TripAdvisor, Custom -->
+            </div>
+          </div>
+        </div>
+
+        <div class="table-switcher-bar">
+          <div class="table-tab-group">
+            <button class="table-tab-btn active" id="btn-tab-master" onclick="switchTableTab('master')">
+              <span>🌟 Master Normalized Leads</span>
+              <span class="tab-badge" id="badge-count-master">0</span>
+            </button>
+            <button class="table-tab-btn" id="btn-tab-maps" onclick="switchTableTab('maps')">
+              <span>🗺️ Google Maps Leads</span>
+              <span class="tab-badge" id="badge-count-maps">0</span>
+            </button>
+            <button class="table-tab-btn" id="btn-tab-website" onclick="switchTableTab('website')"><span>🌐 Website Inspector</span><span class="tab-badge" id="badge-count-website">0</span></button>
+            <button class="table-tab-btn" id="btn-tab-linkedin" onclick="switchTableTab('linkedin')"><span>💼 LinkedIn Harvester</span><span class="tab-badge" id="badge-count-linkedin">0</span></button>
+            <button class="table-tab-btn" id="btn-tab-platform" onclick="switchTableTab('platform')">
+              <span>🟣 Platform Directory Listings</span>
+              <span class="tab-badge" id="badge-count-platform">0</span>
+            </button>
+          </div>
+          <div class="table-action-group">
+            <button class="btn btn-normalize" id="btn-normalize-action" onclick="triggerManualNormalization()" title="Execute Cross-Platform Normalization to produce Master Normalized Leads">
+              <span class="btn-icon">🔄</span>
+              <span>Normalize Leads</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="table-header">
+          <div class="panel-title">
+            <span id="current-table-title">🌟 Master Normalized Leads</span>
+            <span id="places-count-badge" class="badge" style="background:rgba(255,255,255,0.08); color:#cbd5e1;">0 places</span>
+          </div>
+          <div class="export-btns">
+            <button class="btn btn-secondary btn-select-all-btn" id="btn-select-all-toggle" onclick="toggleSelectAllButton()" title="Select or deselect all records with checkboxes for multi/single edit or delete">
+              <span id="select-btn-icon">☑️</span> <span id="select-btn-text">Select All</span>
+            </button>
+            <button class="btn btn-secondary" onclick="renumberDatabase()" title="Clean and renumber database sequentially (1, 2, 3...)">🔢 Clean & Renumber</button>
+            <button class="btn btn-secondary" onclick="exportCSV()">📥 Download CSV</button>
+            <button class="btn btn-secondary" onclick="exportJSON()">📥 Download JSON</button>
+            <button class="btn btn-secondary" onclick="clearDb()" style="color:#fca5a5;">🗑️ Clear DB</button>
+          </div>
+        </div>
+
+        <!-- Column-Specific Dynamic Filters Toolbar -->
+        <div class="table-filter-bar" id="table-filter-bar">
+          <div class="filter-left">
+            <!-- Universal Search (Matches Title/Name, Address, Phone, Email) -->
+            <div class="filter-input-wrapper">
+              <span class="filter-icon">🔍</span>
+              <input type="text" id="filter-search-input" class="filter-input" placeholder="Search by name, address, phone..." oninput="onFilterChange()" />
+              <button class="filter-clear-btn" id="filter-search-clear" onclick="clearSearchInput()" title="Clear search">✕</button>
+            </div>
+
+            <!-- Time Arrangement Filter: Latest First vs Oldest First (Universal across all tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-time" title="Arrange records by Time (Latest / Oldest)">
+              <select id="filter-time-sort-select" class="filter-select" onchange="onFilterChange()">
+                <option value="latest">⏱️ Latest First (Newest)</option>
+                <option value="oldest">⏱️ Oldest First</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Category -->
+            <div class="filter-select-wrapper" id="filter-wrapper-category" title="Filter by Category column">
+              <select id="filter-category-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🏷️ All Categories</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Platform Directory (Master & Platform Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-platform" title="Filter by Platform column">
+              <select id="filter-platform-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🟣 All Platforms</option>
+                <option value="Google Maps">Google Maps</option>
+                <option value="Airbnb">Airbnb</option>
+                <option value="Fresha">Fresha</option>
+                <option value="Yelp">Yelp</option>
+                <option value="TripAdvisor">TripAdvisor</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Rating & Reviews -->
+            <div class="filter-select-wrapper" id="filter-wrapper-rating" title="Filter by Rating column">
+              <select id="filter-rating-select" class="filter-select" onchange="onFilterChange()">
+                <option value="0">⭐ All Ratings</option>
+                <option value="4.0">⭐ 4.0 & above</option>
+                <option value="4.5">⭐ 4.5 & above</option>
+                <option value="4.8">⭐ 4.8 & above</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Status Tag (Website Inspector & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-status" title="Filter by Status Tag" style="display:none;">
+              <select id="filter-status-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🏷️ All Status Tags</option>
+                <option value="Contacts Found">🟢 Contacts Found</option>
+                <option value="No Contacts Found">🔵 No Contacts Found</option>
+                <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+                <option value="Bot Blocked">🟣 Bot Blocked</option>
+                <option value="Not Loading">🔴 Not Loading</option>
+                <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+                <option value="No Website">⚪ No Website</option>
+                <option value="In Queue">⏳ In Queue</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Bot Security (Maps & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-bot" title="Filter by Bot Security column">
+              <select id="filter-bot-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🛡️ All Bot Security</option>
+                <option value="clean">🛡️ Clean / None</option>
+                <option value="cloudflare">🛡️ Cloudflare</option>
+                <option value="turnstile">🛡️ Turnstile Solved</option>
+                <option value="access denied">🚫 Access Denied</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Cookie Consent (Maps & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-cookie" title="Filter by Cookies column">
+              <select id="filter-cookie-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">🍪 All Cookie Statuses</option>
+                <option value="accepted">🍪 Accepted</option>
+                <option value="detected">🍪 Detected</option>
+                <option value="none">🍪 None</option>
+              </select>
+            </div>
+
+            <!-- Column Filter: Pricing Tier (Platform & Master Tables) -->
+            <div class="filter-select-wrapper" id="filter-wrapper-price" title="Filter by Pricing column">
+              <select id="filter-price-select" class="filter-select" onchange="onFilterChange()">
+                <option value="">💰 All Pricing</option>
+                <option value="has_price">💰 Has Price Info</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="filter-right">
+            <!-- Quick Column Toggles (Filtered by Columns Present in Active Table) -->
+            <div class="filter-pill-group">
+              <button type="button" class="filter-pill" id="filter-pill-hasEmail" onclick="toggleFilterPill('hasEmail')" title="Has Email Address">✉️ Email</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasPhone" onclick="toggleFilterPill('hasPhone')" title="Has Phone Number">📞 Phone</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasWebsite" onclick="toggleFilterPill('hasWebsite')" title="Has Website URL">🌐 Website</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasScreenshot" onclick="toggleFilterPill('hasScreenshot')" title="Has Screenshot / Photo">📸 Photo</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasSocial" onclick="toggleFilterPill('hasSocial')" title="Has Social Media Profiles">🔗 Socials</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasTeam" onclick="toggleFilterPill('hasTeam')" title="Has Staff / Org Chart">👥 Team</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasBooking" onclick="toggleFilterPill('hasBooking')" title="Has Direct Booking URL">📅 Booking</button>
+              <button type="button" class="filter-pill" id="filter-pill-hasAddress" onclick="toggleFilterPill('hasAddress')" title="Has Physical Address">📍 Address</button>
+            </div>
+            <button class="btn btn-filter-reset" id="btn-filter-reset" onclick="resetTableFilters()" title="Reset all column filters">
+              <span>↺</span> Reset
+            </button>
+          </div>
+        </div>
+
+                <!-- Floating / Sticky Batch Actions Toolbar for Multi-Selection -->
+        <div id="batch-actions-bar" class="batch-actions-bar" style="display:none;">
+          <div class="batch-left">
+            <span class="batch-check-icon">✓</span>
+            <span id="batch-selected-count">0 items selected</span>
+          </div>
+          <div class="batch-buttons">
+            <button class="btn-batch-single-edit" id="btn-edit-selected" onclick="handleEditSelectedClick()" title="Edit details of the selected item(s)">
+              <span id="btn-edit-selected-icon">✏️</span> <span id="btn-edit-selected-text">Edit Record</span>
+            </button>
+            <button class="btn-batch-category" onclick="openBatchEditModal()" title="Mass Edit fields for selected items">
+              <span>✏️ Mass Edit Selected</span>
+            </button>
+            <button class="btn-batch-delete" id="btn-delete-selected" onclick="batchDeleteSelected()" title="Mass delete selected record(s)">
+              <span id="btn-delete-selected-text">🗑️ Mass Delete Selected</span>
+            </button>
+            <button class="btn-batch-export" onclick="exportSelectedCSV()" title="Export only selected rows to CSV">
+              <span>📥 Export Selected CSV</span>
+            </button>
+            <button class="btn-batch-cancel" onclick="deselectAllRows()" title="Deselect all rows">
+              <span>✕ Deselect All</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="data-table-wrapper">
+          <table id="places-table">
+            <thead>
+              <tr>
+                <th style="width: 35px;">#</th>
+                <th>Business Name</th>
+                <th>Category</th>
+                <th>Email Address</th>
+                <th>Social Media</th>
+                <th>Bot Security</th>
+                <th>Cookies</th>
+                <th>Team / Staff</th>
+                <th>Org Chart</th>
+                <th>Landing Page</th>
+                <th>Phone</th>
+                <th>Address</th>
+                <th>Rating</th>
+                <th>Platform Directory</th>
+                <th>Links</th>
+                <th>Found Date & Time</th>
+              </tr>
+            </thead>
+            <tbody id="places-tbody">
+              <tr id="empty-row">
+                <td colspan="16">
+                  <div class="empty-state">
+                    <div class="empty-icon">🔍</div>
+                    <p>No places in database. Click <strong>"Start Live Agent"</strong> to harvest leads and company hierarchies!</p>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Image Lightbox Modal -->
+  <div id="image-modal" class="modal-overlay" onclick="closeImageModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="modal-title">Landing Page Screenshot</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <a id="modal-img-download" href="#" target="_blank" download class="btn btn-secondary" style="font-size:0.75rem; padding:5px 10px; text-decoration:none; display:flex; align-items:center; gap:4px; color:#38bdf8; border:1px solid rgba(56,189,248,0.3);">
+            <span>💾 Download</span>
+          </a>
+          <a id="modal-img-newtab" href="#" target="_blank" class="btn btn-secondary" style="font-size:0.75rem; padding:5px 10px; text-decoration:none; display:flex; align-items:center; gap:4px; color:#c7d2fe; border:1px solid rgba(199,210,254,0.3);">
+            <span>↗️ Open Full</span>
+          </a>
+          <button class="modal-close" onclick="closeImageModal()">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" style="text-align:center;">
+        <img id="modal-img" src="" alt="Landing Page Screenshot" style="max-width:100%; max-height:75vh; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.6);" />
+      </div>
+    </div>
+  </div>
+
+  <!-- DUPLICATE WEBSITES REVIEW MODAL -->
+  <div id="duplicate-websites-modal" class="modal-overlay" onclick="closeDuplicateModal()" style="display:none; z-index:10000;">
+    <div class="modal-content" onclick="event.stopPropagation()" style="max-width:760px; max-height:85vh; display:flex; flex-direction:column; overflow:hidden; border:1px solid rgba(14,165,233,0.3); background:#0c1322; box-shadow:0 20px 60px rgba(0,0,0,0.8);">
+      <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.08); padding:16px 20px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.3rem;">⚠️</span>
+          <div>
+            <h3 style="margin:0; font-size:1.05rem; font-weight:700; color:#f8fafc;">Websites Already in Database</h3>
+            <small style="color:#94a3b8; font-size:0.78rem;">The following website(s) were previously scraped. Select which ones you want to re-scrape with fresh live data:</small>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeDuplicateModal()">&times;</button>
+      </div>
+
+      <div class="modal-body" style="padding:16px 20px; overflow-y:auto; flex:1;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; color:#cbd5e1; cursor:pointer;">
+            <input type="checkbox" id="dup-select-all" onchange="toggleAllDuplicates(this.checked)" checked style="accent-color:#0ea5e9;">
+            <span>Select All for Re-scrape (<span id="dup-selected-count">0</span>/<span id="dup-total-count">0</span>)</span>
+          </label>
+          <span id="dup-new-count-badge" style="font-size:0.75rem; background:rgba(16,185,129,0.15); color:#34d399; padding:3px 8px; border-radius:12px; border:1px solid rgba(16,185,129,0.3);">
+            +0 brand new sites will be scraped
+          </span>
+        </div>
+
+        <div style="max-height:360px; overflow-y:auto; border:1px solid rgba(255,255,255,0.06); border-radius:8px; background:rgba(0,0,0,0.25);">
+          <table style="width:100%; border-collapse:collapse; font-size:0.8rem; text-align:left;">
+            <thead>
+              <tr style="border-bottom:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.02); color:#94a3b8;">
+                <th style="padding:8px 12px; width:40px;"></th>
+                <th style="padding:8px 12px;">Website / Name</th>
+                <th style="padding:8px 12px;">Current Status</th>
+                <th style="padding:8px 12px;">Existing Contacts</th>
+              </tr>
+            </thead>
+            <tbody id="duplicate-websites-table-body">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="padding:14px 20px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; align-items:center; background:rgba(15,23,42,0.6);">
+        <button class="btn btn-secondary" onclick="closeDuplicateModal()" style="font-size:0.8rem; padding:7px 14px;">
+          Cancel
+        </button>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary" id="dup-btn-skip" onclick="proceedDuplicateDecision('skip_existing')" style="font-size:0.8rem; padding:7px 14px; color:#94a3b8; border:1px solid rgba(255,255,255,0.1);">
+            ⏭️ Skip Existing (New Only)
+          </button>
+          <button class="btn btn-website-theme" id="dup-btn-rescrape-selected" onclick="proceedDuplicateDecision('rescrape_selected')" style="font-size:0.8rem; padding:7px 16px;">
+            🔄 Re-scrape Selected (<span id="dup-btn-count">0</span>)
+          </button>
+          <button class="btn btn-primary" onclick="proceedDuplicateDecision('rescrape_all')" style="font-size:0.8rem; padding:7px 16px;">
+            ⚡ Re-scrape All
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- INTERACTIVE HIERARCHY TREE MODAL -->
+  <div id="org-modal" class="modal-overlay" onclick="closeOrgModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="font-size:1.3rem;">🌳</span>
+          <div>
+            <div id="org-modal-company" style="font-family:'Outfit',sans-serif; font-size:1.2rem; font-weight:700;">Company Hierarchy</div>
+            <a id="org-modal-linkedin-link" href="#" target="_blank" style="font-size:0.75rem; color:#06b6d4; text-decoration:none;">Verified LinkedIn Profile ↗</a>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeOrgModal()">&times;</button>
+      </div>
+
+      <div class="org-breakdown-bar">
+        <span class="pill-tier pill-exec" id="org-count-exec">👑 0 Leadership & Executives</span>
+        <span class="pill-tier pill-mgmt" id="org-count-mgmt">💼 0 Heads & Management</span>
+        <span class="pill-tier pill-staff" id="org-count-staff">🛠️ 0 Staff & Operations</span>
+      </div>
+
+      <div class="modal-body" id="org-modal-body">
+        <!-- Rendered Hierarchy Tree -->
+        <div class="org-tree-container" id="org-tree-render">
+          <!-- Populated dynamically via JS -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PIPELINE VERIFICATION STEPS MODAL -->
+  <div id="pipeline-modal" class="modal-overlay" onclick="closePipelineModal()" style="display:none;">
+    <div class="modal-content" onclick="event.stopPropagation()" style="width:clamp(320px, 92vw, 1260px); max-width:95vw; height:clamp(480px, 86vh, 920px); border:1px solid rgba(99,102,241,0.3); background:#090d16;">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.3rem;">📋</span>
+          <div>
+            <div style="font-family:'Outfit',sans-serif; font-size:1.2rem; font-weight:700;">Verified Tri-Tab Architecture & Execution Protocol</div>
+            <div style="font-size:0.75rem; color:#94a3b8;">Deterministic 5-Step Verification Process for Maps, Websites & LinkedIn Org Intelligence</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closePipelineModal()">&times;</button>
+      </div>
+
+      <div class="modal-body" style="padding:24px; display:grid; grid-template-columns:repeat(auto-fit, minmax(290px, 1fr)); gap:18px; overflow-y:auto;">
+        <!-- Card 1: Google Maps -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(99, 102, 241, 0.3); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🗺️</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 1: Google Maps Harvester</div>
+              <div style="font-size:0.72rem; color:#a5b4fc;">Master Area Pinning & Place Capture</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#6366f1;">Step 1: Geolocation Lock</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Calculates lat/lon coordinates and establishes the 4km radius search bounding box on Google Maps.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 2: Infinite Feed Panning</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Continuously scrolls the results feed and detects end banner to harvest all businesses in the area.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 3: Side-Panel Verification</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Clicks into each place card, validates business name, category, rating, reviews, address, phone, and opening hours.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 4: Real-Time Map Plotting</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Parses exact GPS coordinates, commits record to SQLite DB, and plots interactive pin on Leaflet map.</p>
+            </div>
+            <div>
+              <strong style="color:#6366f1;">Step 5: Multi-Tab Queue Dispatch</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Automatically hands over verified website to Tab 2 and business name to Tab 3 for parallel execution.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 2: Shop Website -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(16, 185, 129, 0.3); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🌐</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 2: Shop Website Inspector</div>
+              <div style="font-size:0.72rem; color:#34d399;">Anti-Bot, Consent & Email Capture</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#10b981;">Step 1: Domain Navigation & Health</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Opens official URL with anti-hang timeouts and verifies page is reachable without breaking the pipeline.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 2: Anti-Bot & Cloudflare Check</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Detects Cloudflare Turnstile, challenge pages, Datadome, PerimeterX, and auto-handles checkboxes.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 3: Cookie Banner Auto-Accept</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Detects OneTrust, Cookiebot, and GDPR overlays, clicks 'Accept' buttons, and logs consent status.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 4: Visual Screenshot Archiving</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Captures landing page image (with anti-bot warning if active) and saves to persistent `/static/screenshots/`.</p>
+            </div>
+            <div>
+              <strong style="color:#10b981;">Step 5: Multi-Method Contact Extraction</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Extracts clean contact emails, Instagram, Facebook, LinkedIn, Twitter/X profiles, and passes to Tab 3.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: LinkedIn Intelligence -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(10, 102, 194, 0.35); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">💼</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 3: LinkedIn Org Intelligence</div>
+              <div style="font-size:0.72rem; color:#38bdf8;">Company Hierarchy & Leadership Mapping</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#38bdf8;">Step 1: Canonical Company Resolution</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Cross-references verified company page from website or Google canonical index, avoiding promotional ads.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 2: People Directory Access</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Navigates directly to the `/people/` directory in your active Chrome profile to preserve session cookies.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 3: Progressive Infinite Scrolling</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Smoothly triggers lazy loading to discover up to 40+ employees, executive directors, and department heads.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 4: Card Sanitization & Validation</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Cleans name strings, strips connection degree tags (`• 1st`, `• 2nd`, `• 3rd+`), extracts titles, avatars, and `/in/` profile URLs.</p>
+            </div>
+            <div>
+              <strong style="color:#38bdf8;">Step 5: 3-Tier Seniority Classification</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Classifies into 👑 Executive, 💼 Management, and 🛠️ Staff tiers, saving to SQLite and rendering the Org Tree.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 4: Platform Directory Scout -->
+        <div style="background:rgba(15, 23, 42, 0.85); border:1px solid rgba(168, 85, 247, 0.35); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px;">
+            <div style="font-size:24px;">🟣</div>
+            <div>
+              <div style="font-family:'Outfit',sans-serif; font-weight:700; color:#fff; font-size:1rem;">Tab 4: Platform Directory Scout</div>
+              <div style="font-size:0.72rem; color:#c084fc;">Cross-Platform Directory Matching & Deep Booking Intel</div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:0.8rem; line-height:1.4; color:#cbd5e1;">
+            <div>
+              <strong style="color:#c084fc;">Step 1: Category & Proximity Resolution</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Extracts the search category and geographic area / proximity context from your query or GPS coordinates, exactly mirroring Google Maps area searches.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 2: Multi-Source Simultaneous Live Navigation</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Dispatches area searches across all enabled platforms (Fresha, Airbnb, Yelp, TripAdvisor) live in Chrome Tab 4, allowing simultaneous multi-directory scouting.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 3: Area Proximity Discovery & Card Harvest</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Progressively scrolls directory results in the area to discover listing cards, ratings, review counts, pricing tiers, and direct booking links across the locality.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 4: Deep Listing & Contact Detail Extraction</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Navigates Tab 4 into individual listing profiles to extract direct telephone / WhatsApp numbers, full street addresses, and verified booking portals.</p>
+            </div>
+            <div>
+              <strong style="color:#c084fc;">Step 5: Post-Search Cross-Platform Normalization</strong>
+              <p style="font-size:0.75rem; color:#94a3b8;">Once all searches are complete, normalizes and cross-references Google Maps leads with harvested directory listings, merging matches into the Master Table and keeping separate tables for unmatched records.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/js/app.js?v=2.3.2"></script>
+  <script src="/static/js/table_ext.js?v=2.3.2"></script>
+
+  <!-- PLATFORM DIRECTORY MANAGEMENT MODAL (Triggered by KPI Card) -->
+  <div class="modal-overlay" id="platform-modal" style="display:none;" onclick="if(event.target===this)closeDirectoryModal()">
+    <div class="modal-content" style="max-width:780px; max-height:88vh; display:flex; flex-direction:column; overflow:hidden;">
+      <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding:16px 20px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.5rem;">🟣</span>
+          <div>
+            <h3 style="margin:0; font-size:1.15rem; color:#fff; font-weight:700;">Platform Directory Manager</h3>
+            <small style="color:#94a3b8; font-size:0.75rem;">Manage active platforms & search URL link templates (Agent opens these URLs with {query} & {city} tags)</small>
+          </div>
+        </div>
+        <button class="btn-close" onclick="closeDirectoryModal()" style="background:none; border:none; color:#cbd5e1; font-size:1.5rem; cursor:pointer;">&times;</button>
+      </div>
+
+      <div style="padding:16px 20px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:18px;">
+        <!-- Add / Edit Form -->
+        <div style="background:rgba(168,85,247,0.08); border:1px solid rgba(168,85,247,0.25); border-radius:12px; padding:14px 16px;">
+          <h4 id="platform-form-title" style="margin:0 0 10px; font-size:0.85rem; color:#e2e8f0; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">
+            ➕ Add / Edit Platform Directory
+          </h4>
+          <input type="hidden" id="edit-platform-id" value="">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:10px;">
+            <div>
+              <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">Platform Name *</label>
+              <input type="text" id="modal-platform-name" class="form-input" placeholder="e.g. Treatwell, Airbnb, Yelp, Justdial" style="width:100%; padding:7px 10px; font-size:0.82rem;" />
+            </div>
+            <div>
+              <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">Category / Industry</label>
+              <input type="text" id="modal-platform-cat" class="form-input" placeholder="e.g. Salons, Hospitality, Directory" style="width:100%; padding:7px 10px; font-size:0.82rem;" />
+            </div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:0.75rem; color:#cbd5e1; font-weight:600; display:block; margin-bottom:4px;">
+              Target Search Link Template * <span style="font-weight:normal; color:#94a3b8;">(Agent opens this URL in Tab 4)</span>
+            </label>
+            <input type="text" id="modal-platform-url" class="form-input" placeholder="e.g. https://www.fresha.com/search?query={query}&address={city}" style="width:100%; padding:7px 10px; font-size:0.82rem; font-family:monospace;" />
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <small style="color:#c084fc; font-size:0.72rem;">💡 Dynamic Tags: <code>{query}</code> = brand/keyword, <code>{city}</code> = city/location.</small>
+            <div style="display:flex; gap:8px;">
+              <button type="button" class="btn btn-secondary" onclick="resetPlatformForm()" style="padding:6px 12px; font-size:0.78rem;">Reset</button>
+              <button type="button" class="btn btn-primary" onclick="submitPlatformForm()" style="padding:6px 16px; font-size:0.78rem; background:#a855f7; border-color:#9333ea;">💾 Save Platform</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Current Directories Table -->
+        <div>
+          <h4 style="margin:0 0 8px; font-size:0.85rem; color:#e2e8f0; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">
+            📋 Configured Platforms
+          </h4>
+          <div style="border:1px solid rgba(255,255,255,0.08); border-radius:10px; overflow:hidden;">
+            <table style="width:100%; border-collapse:collapse; font-size:0.8rem; text-align:left;">
+              <thead style="background:rgba(15,23,42,0.95); border-bottom:1px solid rgba(255,255,255,0.1); color:#94a3b8;">
+                <tr>
+                  <th style="padding:8px 12px;">Platform</th>
+                  <th style="padding:8px 12px;">Category</th>
+                  <th style="padding:8px 12px;">URL Link Template</th>
+                  <th style="padding:8px 12px; text-align:center;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="modal-platforms-tbody" style="background:#080b12;">
+                <!-- Populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Individual Row Edit Modal -->
+  <div id="edit-row-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeEditRowModal()">
+    <div class="modal-content" style="max-width:600px; max-height:90vh; overflow-y:auto;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="edit-modal-title" style="font-weight:700; color:#38bdf8;">✏️ Edit Record Details</span>
+        <button class="modal-close" onclick="closeEditRowModal()">&times;</button>
+      </div>
+      <form id="edit-row-form" onsubmit="saveRowEdit(event)" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
+        <input type="hidden" id="edit-item-id" />
+        <input type="hidden" id="edit-item-type" />
+        
+        <div class="form-group">
+          <label for="edit-field-name" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Business Name / Title *</label>
+          <input type="text" id="edit-field-name" class="form-input-edit" required />
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="edit-field-category" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Category</label>
+            <input type="text" id="edit-field-category" class="form-input-edit" placeholder="e.g. Beauty Salon, Cafe" />
+          </div>
+          <div class="form-group" id="edit-group-rating">
+            <label for="edit-field-rating" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Rating (0.0 - 5.0)</label>
+            <input type="text" id="edit-field-rating" class="form-input-edit" placeholder="e.g. 4.8" />
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="edit-field-phone" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Phone Number</label>
+            <input type="text" id="edit-field-phone" class="form-input-edit" placeholder="e.g. +1 234 567 8900" />
+          </div>
+          <div class="form-group" id="edit-group-whatsapp">
+            <label for="edit-field-whatsapp" style="font-size:0.8rem; font-weight:600; color:#4ade80;">💬 WhatsApp Number</label>
+            <input type="text" id="edit-field-whatsapp" class="form-input-edit" placeholder="e.g. +91 98765 43210 or 919876543210" />
+          </div>
+        </div>
+
+        <div class="form-group" id="edit-group-email">
+          <label for="edit-field-email" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Email Address</label>
+          <input type="text" id="edit-field-email" class="form-input-edit" placeholder="info@example.com" />
+        </div>
+
+        <div class="form-group">
+          <label for="edit-field-address" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Address / Location</label>
+          <input type="text" id="edit-field-address" class="form-input-edit" placeholder="Street, City, Postcode" />
+        </div>
+
+        <div class="form-group" id="edit-group-website">
+          <label for="edit-field-website" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Website URL</label>
+          <input type="text" id="edit-field-website" class="form-input-edit" placeholder="https://www.example.com" />
+        </div>
+
+        <div class="form-group" id="edit-group-booking">
+          <label for="edit-field-booking" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Booking / Platform URL</label>
+          <input type="text" id="edit-field-booking" class="form-input-edit" placeholder="https://..." />
+        </div>
+
+        <div class="form-group" id="edit-group-price">
+          <label for="edit-field-price" style="font-size:0.8rem; font-weight:600; color:#94a3b8;">Pricing Tier / Range</label>
+          <input type="text" id="edit-field-price" class="form-input-edit" placeholder="e.g. $$, £30 - £50" />
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;" id="edit-group-status-notes">
+          <div class="form-group" id="edit-group-status">
+            <label for="edit-field-status" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Status Tag</label>
+            <select id="edit-field-status" class="form-input-edit" style="background:#1e293b; color:#cbd5e1;">
+              <option value="">(Keep Existing / None)</option>
+              <option value="Contacts Found">🟢 Contacts Found</option>
+              <option value="No Contacts Found">🔵 No Contacts Found</option>
+              <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+              <option value="Bot Blocked">🟣 Bot Blocked</option>
+              <option value="Not Loading">🔴 Not Loading</option>
+              <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+              <option value="No Website">⚪ No Website</option>
+              <option value="In Queue">⏳ In Queue</option>
+            </select>
+          </div>
+          <div class="form-group" id="edit-group-notes">
+            <label for="edit-field-notes" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Notes / Remarks</label>
+            <input type="text" id="edit-field-notes" class="form-input-edit" placeholder="e.g. Followed up via phone" />
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeEditRowModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-save-edit">💾 Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Batch Multi-Field Edit Modal -->
+  <div id="batch-edit-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeBatchEditModal()">
+    <div class="modal-content" style="max-width:480px;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span style="font-weight:700; color:#38bdf8;">✏️ Mass Edit Selected Records</span>
+        <button class="modal-close" onclick="closeBatchEditModal()">&times;</button>
+      </div>
+      <form id="batch-edit-form" onsubmit="submitBatchEdit(event)" style="padding:20px; display:flex; flex-direction:column; gap:14px;">
+        <p style="font-size:0.82rem; color:#94a3b8; margin:0;" id="batch-edit-desc">
+          Update fields across selected records. <em>Leave any field blank to keep its existing value.</em>
+        </p>
+
+        <div class="form-group">
+          <label for="batch-edit-category" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">New Category Name</label>
+          <input type="text" id="batch-edit-category" class="form-input-edit" placeholder="Leave empty to keep current" />
+        </div>
+
+        <div class="form-group">
+          <label for="batch-edit-status" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Status Tag</label>
+          <select id="batch-edit-status" class="form-input-edit" style="background:#1e293b; color:#cbd5e1;">
+            <option value="">-- Do Not Change Status Tag --</option>
+            <option value="Contacts Found">🟢 Contacts Found</option>
+            <option value="No Contacts Found">🔵 No Contacts Found</option>
+            <option value="Bot Shield (Data Extracted)">🟡 Bot Shield (Extracted)</option>
+            <option value="Bot Blocked">🟣 Bot Blocked</option>
+            <option value="Not Loading">🔴 Not Loading</option>
+            <option value="Unsafe / SSL Error">🟠 Unsafe / SSL Error</option>
+            <option value="No Website">⚪ No Website</option>
+            <option value="In Queue">⏳ In Queue</option>
+          </select>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-group">
+            <label for="batch-edit-phone" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Phone Number</label>
+            <input type="text" id="batch-edit-phone" class="form-input-edit" placeholder="Leave empty to keep" />
+          </div>
+          <div class="form-group">
+            <label for="batch-edit-city" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">City / Area / Address</label>
+            <input type="text" id="batch-edit-city" class="form-input-edit" placeholder="Leave empty to keep" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="batch-edit-notes" style="font-size:0.8rem; font-weight:600; color:#cbd5e1;">Notes / Remarks</label>
+          <input type="text" id="batch-edit-notes" class="form-input-edit" placeholder="Leave empty to keep" />
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
+          <button type="button" class="btn btn-secondary" onclick="closeBatchEditModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-batch-edit">Apply to All Selected</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+</body>
+</html>

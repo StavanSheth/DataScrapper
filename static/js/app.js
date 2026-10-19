@@ -1809,35 +1809,57 @@ let placesData = [];
               }
               updateKPIs();
             } else if (msg.type === 'platform_listing_found') {
-              const listing = msg.data;
+              const listing = msg.data || {};
+              const titleVal = listing.title || listing.name || listing.company_name || 'Listing';
+              const urlVal = listing.url || listing.listing_url || listing.booking_url || '';
+              const rCount = listing.reviews_count || listing.review_count || listing.reviews || 0;
+              const ratVal = listing.rating || 0;
+
               const newPlatRow = {
                 id: listing.id || (placesData.length + 1),
-                platform: listing.platform,
-                platform_name: listing.platform,
-                title: listing.company_name,
-                name: listing.company_name,
-                url: listing.listing_url,
-                listing_url: listing.listing_url,
-                booking_url: listing.booking_url,
-                rating: listing.rating,
-                reviews_count: listing.review_count,
-                reviews: listing.review_count,
-                price_info: listing.price_range,
-                price_range: listing.price_range,
+                lead_id: listing.lead_id || null,
+                platform: listing.platform || 'Platform',
+                platform_name: listing.platform || 'Platform',
+                title: titleVal,
+                name: titleVal,
+                clean_brand: listing.clean_brand || titleVal,
+                category: listing.category || 'Listing',
+                url: urlVal,
+                listing_url: urlVal,
+                booking_url: listing.booking_url || urlVal,
+                rating: ratVal,
+                reviews_count: rCount,
+                reviews: rCount,
+                price_info: listing.price_info || listing.price_range || '',
                 address: listing.address || "Area Proximity",
+                email: listing.email || (listing.emails && listing.emails[0]) || '',
+                emails_json: listing.emails ? JSON.stringify(listing.emails) : (listing.emails_json || '[]'),
+                phone: listing.phone || (listing.phones && listing.phones[0]) || '',
+                website: listing.website || '',
+                maps_url: listing.maps_url || '',
+                instagram: listing.instagram || '',
+                facebook: listing.facebook || '',
+                linkedin: listing.linkedin || '',
+                twitter: listing.twitter || '',
+                youtube: listing.youtube || '',
+                tiktok: listing.tiktok || '',
+                whatsapp: listing.whatsapp || '',
+                bot_protection: listing.bot_protection || 'Clean',
+                cookie_status: listing.cookie_status || 'None',
+                website_status: listing.website_status || 'contacts_found',
                 screenshot: listing.screenshot || "",
                 verified: listing.verified ? 1 : 0,
-                created_at: new Date().toISOString()
+                created_at: listing.created_at || new Date().toISOString()
               };
 
-              const target = placesData.find(p => p.name === listing.company_name || (listing.lead_id && p.id === listing.lead_id) || (listing.matched_lead_id && p.id === listing.matched_lead_id));
+              const target = placesData.find(p => p.name === titleVal || (listing.lead_id && p.id === listing.lead_id) || (listing.matched_lead_id && p.id === listing.matched_lead_id));
               if (target) {
                 target.platform_name = listing.platform;
-                target.platform_url = listing.listing_url;
-                target.platform_rating = listing.rating;
-                target.platform_reviews = listing.review_count;
-                target.booking_url = listing.booking_url;
-                target.platform_price = listing.price_range;
+                target.platform_url = urlVal;
+                target.platform_rating = ratVal;
+                target.platform_reviews = rCount;
+                target.booking_url = listing.booking_url || urlVal;
+                target.platform_price = listing.price_info || listing.price_range || '';
                 target.platform_verified = 1;
               }
 
@@ -1845,7 +1867,6 @@ let placesData = [];
                 window.updateOrPrependLiveRow('platform', newPlatRow);
                 if (target) {
                   window.updateOrPrependLiveRow('master', target);
-                  window.updateOrPrependLiveRow('maps', target);
                 }
               } else if (typeof window.renderTable === 'function') {
                 window.renderTable();
@@ -2029,6 +2050,7 @@ let placesData = [];
         const lat = parseFloat(document.getElementById('lat-input').value);
         const lon = parseFloat(document.getElementById('lon-input').value);
 
+        const locationVal = document.getElementById('location-search-input')?.value.trim() || "Mumbai";
         const radiusKm = parseFloat(document.getElementById('radius-slider').value) || 5.0;
         const agentMaps = document.getElementById('agent-maps-toggle').checked;
         const agentWebsite = document.getElementById('agent-website-toggle').checked;
@@ -2064,7 +2086,10 @@ let placesData = [];
         if (agentMaps) parts.push("Maps");
         if (agentWebsite) parts.push("Website");
         if (agentLinkedin) parts.push("LinkedIn");
-        if (agentPlatform) parts.push(platformName);
+        if (agentPlatform) {
+          const platsStr = (selectedPlatforms && selectedPlatforms.length > 0) ? selectedPlatforms.join(', ') : platformName;
+          parts.push(`Platform (${platsStr})`);
+        }
         logMessage(`🚀 Launching Chrome Live Agents [${parts.join(' + ')}] for: "${query}" (Radius: ${radiusKm}km, Continuous: ${scrapeAll})...`);
 
         if (typeof window.switchTableTab === 'function') {
@@ -2080,6 +2105,7 @@ let placesData = [];
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               query: query,
+              location: locationVal,
               max_results: maxResults,
               scrape_all: scrapeAll,
               visible_browser: visibleBrowser,

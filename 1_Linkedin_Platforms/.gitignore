@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Dependencies & Build artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Browser profiles & temporary storage
+chrome_profile/
+chrome_live_profile/
+.tempmediaStorage/
+
+# Database WAL / locks
+*.db-shm
+*.db-wal
+
+# Local logs
+*.log

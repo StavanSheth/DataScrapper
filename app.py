@@ -1,11 +1,13 @@
 import urllib.parse
 import urllib.request
 import asyncio
+import base64
 import csv
 import io
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,6 +50,8 @@ from database import (
     save_platform_listing,
     get_lead_id_by_name,
     get_pending_website_leads,
+    get_pending_linkedin_leads,
+    save_employees_batch,
     check_existing_websites,
 )
 
@@ -83,6 +87,27 @@ screenshots_dir = os.path.join(static_dir, "screenshots")
 os.makedirs(screenshots_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
+
+def save_screenshot_from_base64(raw_b64: str, prefix: str, title: str) -> str:
+    """Decodes a base64 JPEG/PNG string and writes to static/screenshots/. Returns relative URL path."""
+    if not raw_b64:
+        return ""
+    try:
+        if "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        img_bytes = base64.b64decode(raw_b64)
+        safe_title = re.sub(r'[^a-zA-Z0-9_-]', '_', title)[:35]
+        plat_prefix = re.sub(r'[^a-zA-Z0-9_-]', '_', prefix).lower()
+        ts = int(time.time() * 1000)
+        file_name = f"{plat_prefix}_{safe_title}_{ts}.jpg"
+        file_path = os.path.join(screenshots_dir, file_name)
+        with open(file_path, "wb") as f:
+            f.write(img_bytes)
+        logger.info(f"📸 Saved real webpage screenshot to {file_path}")
+        return f"/screenshots/{file_name}"
+    except Exception as ex:
+        logger.warning(f"Error saving screenshot from base64: {ex}")
+        return ""
 
 import datetime
 
@@ -252,6 +277,47 @@ async def extension_ws_endpoint(websocket: WebSocket):
                 elif data.get("type") == "STATUS":
                     current_status = data.get("status", "Ready")
                     await broadcast({"type": "status", "data": current_status})
+                elif data.get("type") == "PLATFORM_LISTING_FOUND":
+                    edata = data.get("data", {})
+                    if edata:
+                        raw_b64 = edata.pop("screenshot_base64", None)
+                        if raw_b64:
+                            rel_path = save_screenshot_from_base64(raw_b64, edata.get("platform", "plat"), edata.get("title", "listing"))
+                            if rel_path:
+                                edata["screenshot"] = rel_path
+                        elif edata.get("screenshot") and (edata["screenshot"].startswith("http://") or edata["screenshot"].startswith("https://")):
+                            # Discard provider-uploaded CDN images to guarantee only authentic rendered screenshots
+                            edata["screenshot"] = ""
+                        edata["create_lead_if_missing"] = True
+                        plat_id = save_platform_listing(edata)
+                        if plat_id:
+                            edata["id"] = plat_id
+                        schedule_tables_split_broadcast()
+                        asyncio.create_task(broadcast({"type": "platform_listing_found", "data": edata}))
+                elif data.get("type") == "PLATFORM_PROGRESS":
+                    pdata = data.get("data", {})
+                    if pdata:
+                        pname = pdata.get("platform", "Platform")
+                        if "platforms" not in proximity_metrics:
+                            proximity_metrics["platforms"] = {}
+                        if pname not in proximity_metrics["platforms"]:
+                            proximity_metrics["platforms"][pname] = {"total": 0, "scraped": 0, "skipped": 0, "percent": 0}
+                        proximity_metrics["platforms"][pname]["scraped"] = pdata.get("scraped", 0)
+                        proximity_metrics["platforms"][pname]["total"] = pdata.get("total", 0)
+                        proximity_metrics["platforms"][pname]["percent"] = pdata.get("percent", 0)
+                        proximity_metrics["scraped_count"] = sum(x["scraped"] for x in proximity_metrics["platforms"].values())
+                        asyncio.create_task(broadcast({"type": "proximity_stats", "data": proximity_metrics}))
+                elif data.get("type") == "LINKEDIN_EMPLOYEES_FOUND":
+                    edata = data.get("data", {})
+                    co_name = edata.get("company_name", "")
+                    emps = edata.get("employees", [])
+                    lid = edata.get("lead_id")
+                    li_url = edata.get("company_linkedin_url", "")
+                    if co_name and emps:
+                        saved_ct = save_employees_batch(co_name, emps, lead_id=lid, company_linkedin_url=li_url)
+                        schedule_tables_split_broadcast()
+                        asyncio.create_task(broadcast({"type": "org_updated", "data": {"company": co_name, "employees_count": saved_ct, "employees": emps}}))
+                        add_log(f"👥 [LinkedIn Agent] Saved {saved_ct} employees for '{co_name}'", agent="linkedin")
                 elif data.get("type") == "JOB_FINISHED":
                     is_scraping = False
                     current_status = "Finished" if not data.get("aborted") else "Stopped"
@@ -641,7 +707,9 @@ async def start_scraping(payload: Dict[str, Any]):
     if enable_maps: agents_desc.append("Maps")
     if enable_website: agents_desc.append("Website")
     if enable_linkedin: agents_desc.append("LinkedIn")
-    if enable_platform: agents_desc.append(f"Platform ({platform_name})")
+    if enable_platform:
+        plat_summary = ", ".join(platforms_list) if platforms_list else platform_name
+        agents_desc.append(f"Platform ({plat_summary})")
     active_str = " + ".join(agents_desc) if agents_desc else "None"
     add_log(f"🚀 Launching Live Chrome Agents [{active_str}] for: '{query}' (Radius: {radius_km}km, Continuous: {scrape_all})")
 
@@ -711,47 +779,89 @@ async def start_scraping(payload: Dict[str, Any]):
         else:
             maps_target_url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
 
-    plat_target_url = None
+    platforms_targets = []
     if enable_platform:
-        if platform_custom_url:
-            plat_target_url = platform_custom_url
-        else:
-            p_low = platform_name.lower().strip()
-            loc_enc = urllib.parse.quote_plus(payload.get("location", "") or query)
-            if "fresha" in p_low:
-                plat_target_url = f"https://www.fresha.com/search?query={loc_enc}"
-            elif "airbnb" in p_low:
-                plat_target_url = f"https://www.airbnb.com/s/{loc_enc}/homes"
-            elif "yelp" in p_low:
-                plat_target_url = f"https://www.yelp.com/search?find_desc={urllib.parse.quote_plus(query)}&find_loc={loc_enc}"
-            elif "tripadvisor" in p_low:
-                plat_target_url = f"https://www.tripadvisor.com/Search?q={loc_enc}"
+        loc_val = (payload.get("location", "") or "").strip()
+        query_val = (query or "").strip()
+        # Fallback location if location input is empty and query represents a place name
+        if not loc_val and query_val and query_val.lower() not in ["businesses", "all", "all businesses", "all shops", "*", "shop", "shops", "places"]:
+            loc_val = query_val
+        # Fallback from coordinates if location is still empty
+        if not loc_val:
+            try:
+                c_lat = float(lat) if lat is not None else 19.0760
+                c_lon = float(lon) if lon is not None else 72.8777
+                if 18.5 <= c_lat <= 19.6 and 72.5 <= c_lon <= 73.5:
+                    loc_val = "Mumbai"
+                elif 28.2 <= c_lat <= 29.0 and 76.8 <= c_lon <= 77.6:
+                    loc_val = "Delhi"
+                elif 12.7 <= c_lat <= 13.3 and 77.3 <= c_lon <= 77.9:
+                    loc_val = "Bengaluru"
+                elif 51.2 <= c_lat <= 51.8 and -0.6 <= c_lon <= 0.4:
+                    loc_val = "London"
+                elif 40.4 <= c_lat <= 41.0 and -74.3 <= c_lon <= -73.6:
+                    loc_val = "New York"
+                elif 24.9 <= c_lat <= 25.5 and 55.0 <= c_lon <= 55.6:
+                    loc_val = "Dubai"
+                else:
+                    loc_val = "Mumbai"
+            except Exception:
+                loc_val = "Mumbai"
+        loc_enc = urllib.parse.quote_plus(loc_val)
+
+        for p in platforms_list:
+            if p == "Custom" and platform_custom_url:
+                p_url = platform_custom_url
             else:
-                plat_target_url = f"https://www.{p_low}.com/"
+                p_low = p.lower().strip()
+                # Pure location-based directory URLs (per user requirement)
+                if "fresha" in p_low:
+                    p_url = f"https://www.fresha.com/search?address={loc_enc}" if loc_val else "https://www.fresha.com/search"
+                elif "airbnb" in p_low:
+                    p_url = f"https://www.airbnb.com/s/{loc_enc}/homes" if loc_val else "https://www.airbnb.com/s/homes"
+                elif "yelp" in p_low:
+                    p_url = f"https://www.yelp.com/search?find_loc={loc_enc}" if loc_val else "https://www.yelp.com/search"
+                elif "tripadvisor" in p_low:
+                    p_url = f"https://www.tripadvisor.com/Search?q={loc_enc}" if loc_val else "https://www.tripadvisor.com"
+                elif "treatwell" in p_low:
+                    p_url = f"https://www.treatwell.co.uk/places/in-{loc_enc}/" if loc_val else "https://www.treatwell.co.uk"
+                elif "justdial" in p_low:
+                    p_url = f"https://www.justdial.com/{loc_enc}" if loc_val else "https://www.justdial.com"
+                else:
+                    p_url = f"https://www.{p_low}.com/search?q={loc_enc}" if loc_val else f"https://www.{p_low}.com"
+            platforms_targets.append({"name": p, "url": p_url})
+
+    plat_target_url = platforms_targets[0]["url"] if platforms_targets else None
+    platform_name = platforms_targets[0]["name"] if platforms_targets else platform_name
 
     li_target_url = "https://www.linkedin.com/feed/" if enable_linkedin else None
 
-    if extension_ws is not None:
-        add_log(f"⚡ [Strict Extension Mode] Launching live agent in your active Chrome window: '{query}' (Radius: {radius_km}km)")
+    # Unified Extension-Native Mode across all agents whenever Chrome Extension is connected
+    if extension_ws is not None and (enable_maps or enable_website or enable_linkedin or enable_platform):
+        add_log(f"⚡ [Chrome Extension Mode] Launching live agent tabs in your active Chrome window for {' + '.join(agents_desc)}: '{query}'")
         current_status = "Harvesting live in Chrome window..."
         await broadcast({"type": "status", "data": current_status})
 
         ext_payload = {
             "query": query,
+            "location": payload.get("location", "") or query,
             "max_results": max_results,
             "maps_url": maps_target_url,
             "enable_maps": enable_maps,
             "enable_website": enable_website,
             "enable_linkedin": enable_linkedin,
             "enable_platform": enable_platform,
+            "platforms": platforms_targets,
             "platform_url": plat_target_url,
+            "platform_name": platform_name,
+            "linkedin_url": li_target_url,
             "scrape_all": scrape_all,
             "radius_km": radius_km,
         }
         await send_to_extension("START_HARVESTER", ext_payload)
         return {"status": "started", "mode": "extension", "query": query, "scrape_all": scrape_all}
 
-    add_log("⚠️ Chrome Extension is not connected. Launching fallback background scraper...")
+    add_log(f"🚀 Launching multi-agent scraper engine for {' + '.join(agents_desc)}...")
     try:
         active_process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1040,12 +1150,39 @@ async def get_pending_websites_endpoint(limit: int = 50):
     leads = get_pending_website_leads(limit=limit)
     return {"status": "success", "count": len(leads), "leads": leads}
 
+@app.get("/api/leads/pending-linkedin")
+async def get_pending_linkedin_endpoint(limit: int = 50):
+    leads = get_pending_linkedin_leads(limit=limit)
+    return {"status": "success", "count": len(leads), "leads": leads}
+
+@app.post("/api/save_employees")
+async def save_employees_endpoint(payload: Dict[str, Any]):
+    co_name = str(payload.get("company_name", "")).strip()
+    emps = payload.get("employees", [])
+    lid = payload.get("lead_id")
+    li_url = str(payload.get("company_linkedin_url", "")).strip()
+    if not co_name:
+        raise HTTPException(status_code=400, detail="Missing company_name")
+    saved_ct = save_employees_batch(co_name, emps, lead_id=lid, company_linkedin_url=li_url)
+    schedule_tables_split_broadcast()
+    await broadcast({"type": "org_updated", "data": {"company": co_name, "employees_count": saved_ct, "employees": emps}})
+    add_log(f"👥 [LinkedIn Agent] Saved {saved_ct} employees for '{co_name}'", agent="linkedin")
+    return {"status": "success", "company": co_name, "saved_count": saved_ct}
+
 @app.post("/api/save")
 async def save_lead_endpoint(lead_data: Dict[str, Any]):
     name = str(lead_data.get("name", "")).strip()
     if not name:
         raise HTTPException(status_code=400, detail="Missing required field 'name'")
     
+    raw_b64 = lead_data.pop("screenshot_base64", None)
+    if raw_b64:
+        rel_path = save_screenshot_from_base64(raw_b64, "web", name)
+        if rel_path:
+            lead_data["screenshot"] = rel_path
+    elif lead_data.get("screenshot") and (lead_data["screenshot"].startswith("http://") or lead_data["screenshot"].startswith("https://")):
+        lead_data["screenshot"] = ""
+
     saved = save_lead(lead_data)
     if saved:
         add_log(f"💾 Lead saved via Chrome Extension: {name}")
@@ -1377,6 +1514,18 @@ async def activate_chrome_tab_endpoint(payload: Dict[str, Any]):
         return {"status": "success", "via": "extension", "tab": target_tag}
 
     return {"status": "not_found", "tab": target_tag}
+
+@app.post("/api/chrome/reload-extension")
+async def reload_chrome_extension_endpoint():
+    global extension_ws
+    if extension_ws:
+        try:
+            await send_to_extension("RELOAD_EXTENSION", {})
+            add_log("🔄 Reload signal sent to Chrome Extension service worker.", agent="system")
+            return {"status": "ok", "message": "Reload signal dispatched to extension"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    return {"status": "not_connected", "message": "Chrome Extension is not currently connected"}
 
 @app.get("/api/platform-listings")
 async def get_all_platform_directory_listings(platform: Optional[str] = None, lead_id: Optional[int] = None):

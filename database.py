@@ -265,6 +265,22 @@ def init_db():
                 latitude REAL,
                 longitude REAL,
                 verified INTEGER DEFAULT 0,
+                website_status TEXT DEFAULT 'pending',
+                email TEXT DEFAULT '',
+                emails_json TEXT DEFAULT '[]',
+                phone TEXT DEFAULT '',
+                website TEXT DEFAULT '',
+                maps_url TEXT DEFAULT '',
+                instagram TEXT DEFAULT '',
+                facebook TEXT DEFAULT '',
+                linkedin TEXT DEFAULT '',
+                twitter TEXT DEFAULT '',
+                youtube TEXT DEFAULT '',
+                tiktok TEXT DEFAULT '',
+                whatsapp TEXT DEFAULT '',
+                bot_protection TEXT DEFAULT 'Clean',
+                cookie_status TEXT DEFAULT 'None',
+                notes TEXT DEFAULT '',
                 services_json TEXT,
                 raw_metadata_json TEXT,
                 screenshot TEXT DEFAULT '',
@@ -292,7 +308,33 @@ def init_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_lead_plat ON platform_listings(lead_id, platform);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_verified ON platform_listings(verified);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_platform_listings_title ON platform_listings(title);")
-            conn.execute("ALTER TABLE platform_listings ADD COLUMN screenshot TEXT DEFAULT '';")
+
+            # Safe migrations for existing databases to support deep page extraction
+            new_platform_cols = [
+                ("website_status", "TEXT DEFAULT 'pending'"),
+                ("email", "TEXT DEFAULT ''"),
+                ("emails_json", "TEXT DEFAULT '[]'"),
+                ("phone", "TEXT DEFAULT ''"),
+                ("address", "TEXT DEFAULT ''"),
+                ("website", "TEXT DEFAULT ''"),
+                ("maps_url", "TEXT DEFAULT ''"),
+                ("instagram", "TEXT DEFAULT ''"),
+                ("facebook", "TEXT DEFAULT ''"),
+                ("linkedin", "TEXT DEFAULT ''"),
+                ("twitter", "TEXT DEFAULT ''"),
+                ("youtube", "TEXT DEFAULT ''"),
+                ("tiktok", "TEXT DEFAULT ''"),
+                ("whatsapp", "TEXT DEFAULT ''"),
+                ("bot_protection", "TEXT DEFAULT 'Clean'"),
+                ("cookie_status", "TEXT DEFAULT 'None'"),
+                ("notes", "TEXT DEFAULT ''"),
+                ("screenshot", "TEXT DEFAULT ''"),
+            ]
+            for col_name, col_def in new_platform_cols:
+                try:
+                    conn.execute(f"ALTER TABLE platform_listings ADD COLUMN {col_name} {col_def};")
+                except Exception:
+                    pass
 
             # High-performance segmented SQLite views for fast table streaming
             conn.execute("""
@@ -1430,6 +1472,29 @@ def get_pending_website_leads(limit: int = 50) -> List[Dict[str, Any]]:
         """, (limit,)).fetchall()
         return [{"id": r[0], "name": r[1], "address": r[2] or "N/A", "website": r[3]} for r in rows]
 
+def get_pending_linkedin_leads(limit: int = 50) -> List[Dict[str, Any]]:
+    """Fetches leads awaiting LinkedIn employee roster harvesting."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT id, name, address, website, linkedin
+            FROM leads
+            WHERE (org_scraped = 0 OR org_scraped IS NULL)
+              AND id NOT IN (SELECT DISTINCT lead_id FROM employees WHERE lead_id IS NOT NULL)
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [
+            {
+                "id": r[0],
+                "lead_id": r[0],
+                "name": r[1],
+                "address": r[2] or "N/A",
+                "website": r[3] if r[3] and r[3] != "N/A" else "",
+                "linkedin_url": r[4] if r[4] and r[4] != "N/A" else ""
+            }
+            for r in rows
+        ]
+
 def check_existing_websites(urls: List[Any]) -> Dict[str, Any]:
     """
     Checks a list of URLs/targets against leads in leads.db.
@@ -1601,7 +1666,10 @@ ALLOWED_LEAD_UPDATE_FIELDS = {
 ALLOWED_PLATFORM_UPDATE_FIELDS = {
     "title", "clean_brand", "category", "url", "booking_url", "rating",
     "reviews_count", "price_info", "address", "latitude", "longitude",
-    "verified", "screenshot", "platform", "phone"
+    "verified", "screenshot", "platform", "phone",
+    "website_status", "email", "emails_json", "website", "maps_url",
+    "instagram", "facebook", "linkedin", "twitter", "youtube", "tiktok", "whatsapp",
+    "bot_protection", "cookie_status", "notes"
 }
 
 def get_lead_by_id(lead_id: int) -> Optional[Dict[str, Any]]:
@@ -1903,55 +1971,177 @@ def save_platform_listing(listing: Dict[str, Any]) -> int:
     raw_metadata = json.dumps(listing.get("metadata", {})) if isinstance(listing.get("metadata"), dict) else "{}"
     lead_id = listing.get("lead_id")
 
+    website = str(listing.get("website", "")).strip()
+    phone = clean_phone_number(str(listing.get("phone", "")).strip())
+    email = clean_email_string(str(listing.get("email", "")).strip())
+    emails_raw = listing.get("emails", [])
+    if isinstance(emails_raw, list) and emails_raw:
+        clean_list = [clean_email_string(e) for e in emails_raw if clean_email_string(e)]
+        emails_json = json.dumps(clean_list)
+        if not email and clean_list:
+            email = clean_list[0]
+    elif isinstance(listing.get("emails_json"), str):
+        emails_json = listing.get("emails_json", "[]")
+    else:
+        emails_json = "[]"
+
+    maps_url = str(listing.get("maps_url", "")).strip()
+    instagram = str(listing.get("instagram", "")).strip()
+    facebook = str(listing.get("facebook", "")).strip()
+    linkedin = clean_linkedin_url(str(listing.get("linkedin", "")).strip())
+    twitter = str(listing.get("twitter", "")).strip()
+    youtube = str(listing.get("youtube", "")).strip()
+    tiktok = str(listing.get("tiktok", "")).strip()
+    whatsapp = str(listing.get("whatsapp", "")).strip()
+    cookie_status = str(listing.get("cookie_status", "")).strip() or "None"
+    bot_protection = str(listing.get("bot_protection", "")).strip() or "Clean"
+    notes = str(listing.get("notes", "")).strip()
+    website_status = str(listing.get("website_status", "")).strip()
+    if not website_status:
+        if email or instagram or facebook or linkedin or twitter or whatsapp:
+            website_status = "contacts_found"
+        elif bot_protection and bot_protection != "Clean" and bot_protection != "None":
+            website_status = "bot_shield"
+        else:
+            website_status = "pending"
+
     with get_connection() as conn:
-        # If lead_id not explicitly given, attempt to find matching lead
+        # If lead_id not explicitly given, attempt to find matching lead using multi-vector matching
         if not lead_id:
-            lead_id = find_matching_lead_id(conn, name=title, address=address)
+            lead_id = find_matching_lead_id(conn, name=title, address=address, website=website, phone=phone)
             if not lead_id and clean_brand:
-                lead_id = find_matching_lead_id(conn, name=clean_brand, address=address)
+                lead_id = find_matching_lead_id(conn, name=clean_brand, address=address, website=website, phone=phone)
+
+        # If explicitly requested, auto-create a lead record so it appears in the master CRM
+        if not lead_id and listing.get("create_lead_if_missing", False):
+            try:
+                conn.commit()  # Release lock before calling save_lead
+                new_lead_id = save_lead({
+                    "name": title,
+                    "address": address,
+                    "category": category or "Business",
+                    "phone": phone if phone != "N/A" else "",
+                    "email": email,
+                    "website": website,
+                    "maps_url": maps_url,
+                    "lat": lat,
+                    "lon": lon,
+                    "platform_name": platform,
+                    "platform_url": url,
+                    "platform_rating": str(rating) if rating > 0 else "N/A",
+                    "platform_reviews": str(reviews_count),
+                    "booking_url": booking_url,
+                    "platform_price": price_info,
+                    "platform_verified": verified,
+                    "screenshot": screenshot,
+                    "instagram": instagram,
+                    "facebook": facebook,
+                    "linkedin": linkedin,
+                    "twitter": twitter,
+                    "youtube": youtube,
+                    "tiktok": tiktok,
+                    "whatsapp": whatsapp,
+                    "cookie_status": cookie_status or "None",
+                    "bot_protection": bot_protection or "Clean",
+                    "website_status": website_status,
+                    "notes": notes,
+                    "source_agent": "platform"
+                })
+                if new_lead_id and new_lead_id > 0:
+                    lead_id = new_lead_id
+            except Exception as e:
+                logger.warning(f"Auto-create lead for platform listing failed: {e}")
 
         # Upsert into platform_listings
         cursor = conn.execute("""
             INSERT INTO platform_listings (
                 lead_id, platform, listing_id, title, clean_brand, category, url, booking_url,
                 rating, reviews_count, price_info, address, latitude, longitude, verified,
+                website_status, email, emails_json, phone, website, maps_url,
+                instagram, facebook, linkedin, twitter, youtube, tiktok, whatsapp,
+                bot_protection, cookie_status, notes,
                 screenshot, services_json, raw_metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(platform, url) DO UPDATE SET
                 lead_id = COALESCE(excluded.lead_id, platform_listings.lead_id),
                 title = excluded.title,
                 clean_brand = excluded.clean_brand,
+                category = CASE WHEN excluded.category != '' THEN excluded.category ELSE platform_listings.category END,
                 rating = excluded.rating,
                 reviews_count = excluded.reviews_count,
                 price_info = excluded.price_info,
+                address = CASE WHEN excluded.address != '' THEN excluded.address ELSE platform_listings.address END,
                 booking_url = excluded.booking_url,
                 verified = excluded.verified,
                 screenshot = CASE WHEN excluded.screenshot != '' THEN excluded.screenshot ELSE platform_listings.screenshot END,
-                services_json = excluded.services_json
+                services_json = excluded.services_json,
+                website_status = CASE WHEN excluded.website_status != '' AND excluded.website_status != 'pending' THEN excluded.website_status ELSE platform_listings.website_status END,
+                email = CASE WHEN excluded.email != '' AND excluded.email != 'N/A' THEN excluded.email ELSE platform_listings.email END,
+                emails_json = CASE WHEN excluded.emails_json != '[]' AND excluded.emails_json != '' THEN excluded.emails_json ELSE platform_listings.emails_json END,
+                phone = CASE WHEN excluded.phone != '' AND excluded.phone != 'N/A' THEN excluded.phone ELSE platform_listings.phone END,
+                website = CASE WHEN excluded.website != '' AND excluded.website != 'N/A' THEN excluded.website ELSE platform_listings.website END,
+                maps_url = CASE WHEN excluded.maps_url != '' THEN excluded.maps_url ELSE platform_listings.maps_url END,
+                instagram = CASE WHEN excluded.instagram != '' THEN excluded.instagram ELSE platform_listings.instagram END,
+                facebook = CASE WHEN excluded.facebook != '' THEN excluded.facebook ELSE platform_listings.facebook END,
+                linkedin = CASE WHEN excluded.linkedin != '' THEN excluded.linkedin ELSE platform_listings.linkedin END,
+                twitter = CASE WHEN excluded.twitter != '' THEN excluded.twitter ELSE platform_listings.twitter END,
+                youtube = CASE WHEN excluded.youtube != '' THEN excluded.youtube ELSE platform_listings.youtube END,
+                tiktok = CASE WHEN excluded.tiktok != '' THEN excluded.tiktok ELSE platform_listings.tiktok END,
+                whatsapp = CASE WHEN excluded.whatsapp != '' THEN excluded.whatsapp ELSE platform_listings.whatsapp END,
+                bot_protection = CASE WHEN excluded.bot_protection != '' AND excluded.bot_protection != 'Clean' THEN excluded.bot_protection ELSE platform_listings.bot_protection END,
+                cookie_status = CASE WHEN excluded.cookie_status != '' AND excluded.cookie_status != 'None' THEN excluded.cookie_status ELSE platform_listings.cookie_status END,
+                notes = CASE WHEN excluded.notes != '' THEN excluded.notes ELSE platform_listings.notes END
             RETURNING id;
         """, (
             lead_id, platform, str(listing.get("listing_id", "")), title, clean_brand, category, url, booking_url,
             rating, reviews_count, price_info, address, lat, lon, verified,
+            website_status, email, emails_json, phone, website, maps_url,
+            instagram, facebook, linkedin, twitter, youtube, tiktok, whatsapp,
+            bot_protection, cookie_status, notes,
             screenshot, services_json, raw_metadata
         ))
         row = cursor.fetchone()
         inserted_id = row[0] if row else 0
 
-        # If linked to a lead, update leads table with normalized platform metadata
+        # If linked to a lead, update leads table with normalized platform metadata and backfill missing contact/social/maps info
         if lead_id:
             conn.execute("""
                 UPDATE leads SET
-                    platform_name = ?,
-                    platform_url = ?,
-                    platform_rating = ?,
-                    platform_reviews = ?,
-                    booking_url = ?,
+                    platform_name = CASE WHEN ? != '' THEN ? ELSE platform_name END,
+                    platform_url = CASE WHEN ? != '' THEN ? ELSE platform_url END,
+                    platform_rating = CASE WHEN ? != '' AND ? != '0' AND ? != '0.0' THEN ? ELSE platform_rating END,
+                    platform_reviews = CASE WHEN ? != '' AND ? != '0' THEN ? ELSE platform_reviews END,
+                    booking_url = CASE WHEN ? != '' THEN ? ELSE booking_url END,
                     platform_price = CASE WHEN ? != '' THEN ? ELSE platform_price END,
-                    platform_verified = ?
+                    platform_verified = CASE WHEN ? = 1 THEN 1 ELSE platform_verified END,
+                    maps_url = CASE WHEN (maps_url IS NULL OR maps_url = '') AND ? != '' THEN ? ELSE maps_url END,
+                    website = CASE WHEN (website IS NULL OR website = '' OR website = 'N/A') AND ? != '' THEN ? ELSE website END,
+                    phone = CASE WHEN (phone IS NULL OR phone = '' OR phone = 'N/A') AND ? != '' AND ? != 'N/A' THEN ? ELSE phone END,
+                    screenshot = CASE WHEN (screenshot IS NULL OR screenshot = '' OR screenshot = 'N/A') AND ? != '' THEN ? ELSE screenshot END,
+                    instagram = CASE WHEN (instagram IS NULL OR instagram = '') AND ? != '' THEN ? ELSE instagram END,
+                    facebook = CASE WHEN (facebook IS NULL OR facebook = '') AND ? != '' THEN ? ELSE facebook END,
+                    linkedin = CASE WHEN (linkedin IS NULL OR linkedin = '') AND ? != '' THEN ? ELSE linkedin END,
+                    twitter = CASE WHEN (twitter IS NULL OR twitter = '') AND ? != '' THEN ? ELSE twitter END,
+                    whatsapp = CASE WHEN (whatsapp IS NULL OR whatsapp = '') AND ? != '' THEN ? ELSE whatsapp END
                 WHERE id = ?;
             """, (
-                platform, url, str(rating) if rating > 0 else "N/A", str(reviews_count), booking_url,
-                price_info, price_info, verified, lead_id
+                platform, platform,
+                url, url,
+                str(rating), str(rating), str(rating), str(rating),
+                str(reviews_count), str(reviews_count), str(reviews_count),
+                booking_url, booking_url,
+                price_info, price_info,
+                verified,
+                maps_url, maps_url,
+                website, website,
+                phone, phone, phone,
+                screenshot, screenshot,
+                instagram, instagram,
+                facebook, facebook,
+                linkedin, linkedin,
+                twitter, twitter,
+                whatsapp, whatsapp,
+                lead_id
             ))
 
         conn.commit()
@@ -2049,30 +2239,40 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         if l.get("platform_verified") == 1 or (l.get("platform_name") and l.get("platform_name") != "N/A"):
             master_leads.append(l)
 
-        # 2. Format Google Maps Lead
+        # 2. Format Google Maps Lead - ONLY include genuine Maps leads (do not pollute with pure platform directory listings)
+        maps_link = str(l.get("maps_url", "") or "").strip()
+        has_real_maps = bool(maps_link and ("google.com/maps" in maps_link or "goo.gl/maps" in maps_link or "maps.app.goo.gl" in maps_link))
+        source_attr_str = str(l.get("source_attribution", "") or "")
+        is_pure_platform = (not has_real_maps) and (
+            ('"lead_origin": "platform"' in source_attr_str) or 
+            ('"booking_url": "platform"' in source_attr_str and not has_real_maps) or
+            (l.get("platform_name") and l.get("platform_name") != "N/A" and not has_real_maps)
+        )
+
         m_row = dict(l)
         has_w = bool(m_row.get("website") and str(m_row.get("website")).strip() != "N/A")
         has_p = bool(m_row.get("phone") and str(m_row.get("phone")).strip() != "N/A")
         has_r = bool(m_row.get("rating") and str(m_row.get("rating")).strip() != "N/A")
 
-        if has_w: maps_with_web += 1
-        else: maps_no_web += 1
-        if has_p: maps_with_phone += 1
-        if has_r: maps_with_rating += 1
+        if not is_pure_platform:
+            if has_w: maps_with_web += 1
+            else: maps_no_web += 1
+            if has_p: maps_with_phone += 1
+            if has_r: maps_with_rating += 1
 
-        if has_w and has_p:
-            m_tag = "Full Contact (Web & Phone)"
-        elif has_w:
-            m_tag = "Has Website"
-        elif has_p:
-            m_tag = "Phone Only"
-        else:
-            m_tag = "Location Only"
+            if has_w and has_p:
+                m_tag = "Full Contact (Web & Phone)"
+            elif has_w:
+                m_tag = "Has Website"
+            elif has_p:
+                m_tag = "Phone Only"
+            else:
+                m_tag = "Location Only"
 
-        m_row["status_tag"] = m_tag
-        m_row["has_website"] = has_w
-        m_row["has_phone"] = has_p
-        unmatched_maps.append(m_row)
+            m_row["status_tag"] = m_tag
+            m_row["has_website"] = has_w
+            m_row["has_phone"] = has_p
+            unmatched_maps.append(m_row)
 
         # 3. Format Website Inspector Lead (Unified 8 Layman Tags)
         w_url = str(l.get("website", "") or "").strip()
@@ -2201,29 +2401,45 @@ def get_tables_split_data(limit: Optional[int] = None, offset: int = 0) -> Dict[
         except Exception:
             r_val = 0.0
         has_rate = (r_val > 0.0)
+        w_stat = str(p_row.get("website_status") or "").strip().lower()
+        has_e = bool(p_row.get("email") and p_row.get("email") != "N/A")
+        has_p = bool(p_row.get("phone") and p_row.get("phone") != "N/A")
+        has_w = bool(p_row.get("website") and p_row.get("website") != "N/A")
+        has_soc = bool(p_row.get("instagram") or p_row.get("facebook") or p_row.get("linkedin") or p_row.get("twitter") or p_row.get("whatsapp"))
+        has_sc = bool(p_row.get("screenshot") and p_row.get("screenshot") != "N/A")
+        bot_p = str(p_row.get("bot_protection") or "Clean")
 
-        if is_ver == 1 or has_lead:
+        if "Cloudflare" in bot_p or "Turnstile" in bot_p or "Captcha" in bot_p or "Challenge" in bot_p or "Denied" in bot_p:
+            tag = "Bot Shield (Data Extracted)" if (has_e or has_soc) else "Bot Shield Active"
+        elif w_stat == "contacts_found" or has_e or has_soc:
+            tag = "Contacts Found"
+        elif w_stat == "no_contacts" or w_stat == "clean":
+            tag = "No Contacts Found"
+        elif is_ver == 1 or has_lead:
             tag = "Master Matched"
-            plat_matched_count += 1
         elif has_book:
             tag = "Direct Booking"
-            plat_booking_count += 1
         elif r_val >= 4.0:
             tag = "Top Rated"
-            plat_rated_count += 1
         elif has_rate:
             tag = "Verified Listing"
-            plat_rated_count += 1
+        elif w_stat == "pending":
+            tag = "In Queue"
         else:
             tag = "Directory Listing"
 
         p_row["status_tag"] = tag
         p_row["has_booking"] = has_book
         p_row["has_rating"] = has_rate
+        p_row["has_email"] = has_e
+        p_row["has_phone"] = has_p
+        p_row["has_website"] = has_w
+        p_row["has_socials"] = has_soc
+        p_row["has_screenshot"] = has_sc
         p_row["is_matched"] = bool(is_ver == 1 or has_lead)
         unmatched_platform.append(p_row)
 
-    total_maps = len(all_leads)
+    total_maps = len(unmatched_maps)
     web_pending = max(0, total_maps - web_finished_count)
     web_pct = min(100, round((web_finished_count / max(1, total_maps)) * 100))
 

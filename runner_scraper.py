@@ -2301,12 +2301,20 @@ async def platform_area_search_worker(
                     pass
 
                 # 1. Accept cookies & handle anti-bot on directory page
+                cookie_res = "None"
+                bot_res = "Clean"
                 try:
-                    await detect_and_handle_cookies(platform_page)
+                    cookie_res = await detect_and_handle_cookies(platform_page)
                 except Exception:
                     pass
                 try:
                     await attempt_turnstile_solve(platform_page)
+                except Exception:
+                    pass
+                try:
+                    html_src = await platform_page.content()
+                    p_title = await platform_page.title()
+                    bot_res = detect_anti_bot_protection(html_src, p_title, has_extracted_data=False)
                 except Exception:
                     pass
 
@@ -2332,6 +2340,30 @@ async def platform_area_search_worker(
                     }""")
                 except Exception:
                     pass
+
+                # 3. Smart Location Fallback: If 0 cards detected for micro-location, auto-widen to parent city
+                loc_parts = [p.strip() for p in re.split(r'[,–-]+', location_name) if p.strip()]
+                if len(loc_parts) > 1:
+                    try:
+                        init_cards = await platform_page.evaluate("""() => {
+                            return document.querySelectorAll('div[data-testid="card-container"], div[data-qa="venue-card"], a[href*="/a/"], a[href*="/v/"], [data-testid="serp-ia-card"], div.listing_details, article, [role="article"]').length;
+                        }""")
+                        if init_cards == 0:
+                            parent_city = loc_parts[-1]
+                            fallback_url = build_platform_area_url(p_name, category, parent_city, custom_url_pattern)
+                            if fallback_url != target_url:
+                                emit_event("log", f"🔄 [Tab 4 - {p_name}] 0 listings for '{loc_parts[0]}'. Smart Fallback auto-widening to parent city '{parent_city}'...")
+                                try:
+                                    await platform_page.goto(fallback_url, wait_until="domcontentloaded", timeout=12000)
+                                    target_url = fallback_url
+                                    try:
+                                        await detect_and_handle_cookies(platform_page)
+                                    except Exception:
+                                        pass
+                                except Exception as fb_err:
+                                    emit_event("log", f"⚠️ [Tab 4 - {p_name}] Smart Fallback notice: {str(fb_err)[:50]}")
+                    except Exception:
+                        pass
 
                 # 5X PLATFORM SPEEDUP: Abort heavy images, videos, webfonts, and third-party trackers
                 async def handle_plat_routes(route):
@@ -2548,6 +2580,56 @@ async def platform_area_search_worker(
                                 if (textToScan.toLowerCase().includes('night')) priceText = priceText + ' / night';
                             }
 
+                            // Extra fields: maps, social links, website, phone
+                            let mapsUrl = '';
+                            let igLink = '';
+                            let fbLink = '';
+                            let liLink = '';
+                            let twLink = '';
+                            let waLink = '';
+                            let extWebsite = '';
+                            let phoneNum = '';
+
+                            const allCardLinks = Array.from(card.querySelectorAll('a[href]'));
+                            for (const a of allCardLinks) {
+                                const h = (a.href || '').trim();
+                                const hLower = h.toLowerCase();
+                                if (!h || h.startsWith('javascript:') || h.startsWith('#')) continue;
+
+                                if (hLower.includes('maps.google.') || hLower.includes('goo.gl/maps') || hLower.includes('maps.app.goo.gl') || hLower.includes('google.com/maps')) {
+                                    if (!mapsUrl) mapsUrl = h;
+                                } else if (hLower.includes('instagram.com/')) {
+                                    if (!igLink && !hLower.includes('/p/') && !hLower.includes('/explore/')) igLink = h;
+                                } else if (hLower.includes('facebook.com/') || hLower.includes('fb.com/')) {
+                                    if (!fbLink && !hLower.includes('/sharer') && !hLower.includes('/share')) fbLink = h;
+                                } else if (hLower.includes('linkedin.com/')) {
+                                    if (!liLink) liLink = h;
+                                } else if (hLower.includes('twitter.com/') || hLower.includes('x.com/')) {
+                                    if (!twLink && !hLower.includes('/intent/')) twLink = h;
+                                } else if (hLower.includes('wa.me/') || hLower.includes('whatsapp.com/send') || hLower.includes('api.whatsapp.com')) {
+                                    if (!waLink) waLink = h;
+                                } else if (h.startsWith('tel:')) {
+                                    if (!phoneNum) phoneNum = h.replace(/^tel:/i, '').trim();
+                                } else if (h.startsWith('http')) {
+                                    const currHost = window.location.hostname.replace(/^www\./, '');
+                                    try {
+                                        const linkHost = new URL(h).hostname.replace(/^www\./, '');
+                                        if (linkHost && !linkHost.includes(currHost) && !currHost.includes(linkHost)) {
+                                            if (!extWebsite && !hLower.match(/\.(png|jpg|jpeg|gif|svg|pdf)$/)) {
+                                                extWebsite = h;
+                                            }
+                                        }
+                                    } catch(e) {}
+                                }
+                            }
+
+                            if (!phoneNum) {
+                                const telMatch = textToScan.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}/);
+                                if (telMatch && telMatch[0].replace(/\D/g, '').length >= 8) {
+                                    phoneNum = telMatch[0].trim();
+                                }
+                            }
+
                             results.push({
                                 card_dom_idx: c_idx,
                                 title: title.replace(/[\r\n]+/g, ' ').trim(),
@@ -2556,6 +2638,14 @@ async def platform_area_search_worker(
                                 rating: ratingVal,
                                 reviews_count: revCount,
                                 price_info: priceText.replace(/[\r\n]+/g, ' ').trim(),
+                                maps_url: mapsUrl,
+                                instagram: igLink,
+                                facebook: fbLink,
+                                linkedin: liLink,
+                                twitter: twLink,
+                                whatsapp: waLink,
+                                website: extWebsite,
+                                phone: phoneNum,
                                 screenshot: ""
                             });
                         });
@@ -2583,6 +2673,10 @@ async def platform_area_search_worker(
 
                     if len(extracted_listings) >= max_results:
                         emit_event("log", f"🎯 [Agent 4: Platform - {p_name}] Reached target quota of {max_results} listings!")
+                        break
+
+                    if scroll_pass >= 2 and len(extracted_listings) == 0:
+                        emit_event("log", f"⚡ [Agent 4: Platform - {p_name}] Zero listings detected after 2 passes. Fast circuit breaker activated.")
                         break
 
                     if new_in_pass == 0:
@@ -2691,7 +2785,17 @@ async def platform_area_search_worker(
                         "price_info": cand.get("price_info", ""),
                         "address": c_addr,
                         "screenshot": cand.get("screenshot", ""),
-                        "verified": 0
+                        "verified": 0,
+                        "maps_url": cand.get("maps_url", ""),
+                        "instagram": cand.get("instagram", ""),
+                        "facebook": cand.get("facebook", ""),
+                        "linkedin": cand.get("linkedin", ""),
+                        "twitter": cand.get("twitter", ""),
+                        "whatsapp": cand.get("whatsapp", ""),
+                        "website": cand.get("website", ""),
+                        "phone": cand.get("phone", ""),
+                        "cookie_status": cookie_res,
+                        "bot_protection": bot_res
                     }
                     save_platform_listing(cand_data)
                     saved_count += 1
@@ -2715,6 +2819,16 @@ async def platform_area_search_worker(
                         "listing_url": cand.get("url", target_url),
                         "booking_url": cand.get("url", target_url),
                         "price_range": cand.get("price_info", ""),
+                        "maps_url": cand.get("maps_url", ""),
+                        "instagram": cand.get("instagram", ""),
+                        "facebook": cand.get("facebook", ""),
+                        "linkedin": cand.get("linkedin", ""),
+                        "twitter": cand.get("twitter", ""),
+                        "whatsapp": cand.get("whatsapp", ""),
+                        "website": cand.get("website", ""),
+                        "phone": cand.get("phone", ""),
+                        "cookie_status": cookie_res,
+                        "bot_protection": bot_res,
                         "verified": False
                     })
 

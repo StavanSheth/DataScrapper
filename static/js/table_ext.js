@@ -803,18 +803,22 @@ window.renderTableHeader = function() {
     theadTr.innerHTML = `
       ${selectAllTh}
       <th style="width: 35px;">#</th>
-      <th>Platform Directory</th>
-      <th>Status Tag</th>
-      <th>Business / Listing Title</th>
+      <th>Business Name</th>
       <th>Category</th>
-      <th>Screenshot / Photo</th>
-      <th>Rating & Reviews</th>
-      <th>Pricing Tier</th>
+      <th>Website Status</th>
+      <th>Extracted Emails</th>
+      <th>Social Media</th>
+      <th>Platform / Booking</th>
+      <th>Anti-Bot Shield</th>
+      <th>Cookie Diagnostics</th>
+      <th>Screenshot</th>
+      <th>Notes</th>
       <th>Phone</th>
-      <th>Address / Location</th>
-      <th>Direct Booking URL</th>
-      <th>Listing Link</th>
-      <th>Found Date & Time</th>
+      <th>Address</th>
+      <th>Rating & Reviews</th>
+      <th>Website URL</th>
+      <th>Maps Link</th>
+      <th title="Discovered & Deep Inspected Timestamp">Found Date & Time (Maps & Web)</th>
       ${actionsTh}
     `;
   } else if (window.currentTableTab === 'maps') {
@@ -961,18 +965,18 @@ window.renderFiltersForCurrentTable = function() {
     if (pillAddr) pillAddr.style.display = 'none';
   } else if (tab === 'platform') {
     // Table 3: Platform Directory Listings
-    if (searchInput) searchInput.placeholder = "Filter by listing title, address, phone...";
-    if (wrapStatus) wrapStatus.style.display = 'none';
+    if (searchInput) searchInput.placeholder = "Filter platform listings by title, email, phone, category, address...";
+    if (wrapStatus) wrapStatus.style.display = 'inline-flex';
     if (wrapPlatform) wrapPlatform.style.display = 'inline-flex';
-    if (wrapBot) wrapBot.style.display = 'none';
-    if (wrapCookie) wrapCookie.style.display = 'none';
+    if (wrapBot) wrapBot.style.display = 'inline-flex';
+    if (wrapCookie) wrapCookie.style.display = 'inline-flex';
     if (wrapPrice) wrapPrice.style.display = 'inline-flex';
 
-    if (pillEmail) pillEmail.style.display = 'none';
+    if (pillEmail) pillEmail.style.display = 'inline-flex';
     if (pillPhone) pillPhone.style.display = 'inline-flex';
-    if (pillWeb) pillWeb.style.display = 'none';
+    if (pillWeb) pillWeb.style.display = 'inline-flex';
     if (pillScreen) pillScreen.style.display = 'inline-flex';
-    if (pillSocial) pillSocial.style.display = 'none';
+    if (pillSocial) pillSocial.style.display = 'inline-flex';
     if (pillTeam) pillTeam.style.display = 'none';
     if (pillBooking) pillBooking.style.display = 'inline-flex';
     if (pillAddr) pillAddr.style.display = 'inline-flex';
@@ -1236,6 +1240,7 @@ Platform Directory Listings (Intact): ${counts.platform || 0}`;
 
 window.buildSinglePlaceRow = function(place, index, curTab) {
   curTab = curTab || window.currentTableTab || 'maps';
+  const displayName = place.name || place.title || place.company_name || 'Listing';
   const rowId = place.id || index;
   const tr = document.createElement('tr');
   tr.id = `row-${rowId}`;
@@ -1283,8 +1288,12 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
     ? `<span class="badge badge-category">${escapeHtml(place.category)}</span>`
     : '<span class="badge badge-none">Business</span>';
 
-  const ratingHtml = (place.rating && place.rating !== 'N/A')
-    ? `<span class="rating-pill">⭐ ${place.rating} <small style="color:#94a3b8;">(${place.reviews || '0'})</small></span>`
+  const revCountVal = place.reviews_count || place.reviews || '0';
+  const ratingVal = (place.rating && place.rating !== 'N/A' && place.rating != 0 && place.rating !== '0.0')
+    ? place.rating
+    : (place.platform_rating && place.platform_rating !== 'N/A' && place.platform_rating != 0 ? place.platform_rating : null);
+  const ratingHtml = ratingVal
+    ? `<span class="rating-pill">⭐ ${ratingVal} <small style="color:#94a3b8;">(${revCountVal})</small></span>`
     : '<span style="color:#64748b;">N/A</span>';
 
   const siteSrc = getSourceBadge('website');
@@ -1434,9 +1443,9 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
 
   const screenHtml = (place.screenshot && place.screenshot !== 'N/A')
     ? `
-      <div class="screen-thumb-container" onclick="event.stopPropagation(); openImageModal('${encodeURI(place.screenshot)}', '${escapeHtml(place.name)}')">
-        <div class="screen-thumb-box" title="Click to view full screenshot of ${escapeHtml(place.name)}">
-          <img src="${encodeURI(place.screenshot)}" alt="${escapeHtml(place.name)}" onerror="handleImgError(this)">
+      <div class="screen-thumb-container" onclick="event.stopPropagation(); openImageModal('${encodeURI(place.screenshot)}', '${escapeHtml(displayName)}')">
+        <div class="screen-thumb-box" title="Click to view full screenshot of ${escapeHtml(displayName)}">
+          <img src="${encodeURI(place.screenshot)}" alt="${escapeHtml(displayName)}" onerror="handleImgError(this)">
           <div class="screen-thumb-overlay">🔍 View</div>
         </div>
         <button class="btn-screen-view" title="Expand screenshot">
@@ -1552,51 +1561,45 @@ window.buildSinglePlaceRow = function(place, index, curTab) {
   } else if (curTab === 'platform') {
     const pName = escapeHtml(place.platform || place.platform_name || 'Platform');
     const itemUrl = place.url || place.listing_url || place.platform_url || '';
-    const pRating = (place.rating && place.rating !== 'N/A') ? `⭐ ${place.rating}` : '';
-    const pReviews = (place.reviews_count || place.reviews) ? `(${place.reviews_count || place.reviews})` : '';
 
-    const platformColHtml = itemUrl
-      ? `
-        <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
-          <a href="${encodeURI(itemUrl)}" target="_blank" class="badge-platform-btn" title="Open '${escapeHtml(place.title || place.name || 'Listing')}' on ${pName}">
-            🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span>
-          </a>
-          <a href="${encodeURI(itemUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(itemUrl)}">
-            🔗 ${cleanDisplayUrl(itemUrl)}
-          </a>
+    const platformColHtml = `
+      <div style="display:flex; flex-direction:column; gap:4px;" onclick="event.stopPropagation();">
+        <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+          ${itemUrl ? `<a href="${encodeURI(itemUrl)}" target="_blank" class="badge-platform-btn" title="Open '${escapeHtml(displayName)}' on ${pName}">🟣 ${pName} <span style="font-size:0.75rem; opacity:0.85;">↗</span></a>` : `<span class="badge badge-platform">🟣 ${pName}</span>`}
+          ${(place.booking_url && place.booking_url !== 'N/A') ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:2px 6px; text-decoration:none; width:auto; border-radius:6px;" title="Direct Booking / Reservation URL" onclick="event.stopPropagation();">📅 Book</a>` : ''}
         </div>
-      `
-      : `<span class="badge badge-platform">🟣 ${pName}</span>`;
+        ${itemUrl ? `<a href="${encodeURI(itemUrl)}" target="_blank" class="platform-direct-link" title="${escapeHtml(itemUrl)}">🔗 ${cleanDisplayUrl(itemUrl)}</a>` : ''}
+      </div>
+    `;
 
-    const bookLink = (place.booking_url && place.booking_url !== 'N/A')
-      ? `<a href="${encodeURI(place.booking_url)}" target="_blank" class="badge-social" style="color:#a855f7; background:rgba(168,85,247,0.15); border:1px solid rgba(168,85,247,0.3); font-size:0.72rem; padding:3px 8px; text-decoration:none; width:auto; border-radius:6px;" title="Direct Booking / Reservation URL" onclick="event.stopPropagation();">📅 Book Now</a>`
-      : '<span class="badge badge-none">—</span>';
-
-    const listLink = itemUrl
-      ? `<a href="${encodeURI(itemUrl)}" target="_blank" class="link-btn" style="color:#c084fc; font-size:0.76rem;" title="View Listing Page" onclick="event.stopPropagation();">🔗 Open on ${pName}</a>`
-      : '<span class="badge badge-none">—</span>';
+    const wStatusTag = place.status_tag || (place.website_status === 'contacts_found' ? 'Contacts Found' : (place.website_status === 'bot_blocked' ? 'Bot Shield Active' : (place.website_status === 'no_contacts' ? 'No Contacts Found' : 'In Queue')));
+    const wStatusBadge = window.renderWebsiteStatusBadge ? window.renderWebsiteStatusBadge(wStatusTag) : renderWebsiteStatusBadge(wStatusTag);
 
     const platActionsTd = `<td style="text-align:center;" onclick="event.stopPropagation();">
       <div style="display:flex; gap:6px; justify-content:center;">
         <button class="btn-row-action btn-row-edit" onclick="window.openEditRowModal('platform', ${place.id})" title="Edit listing">✏️</button>
-        <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('platform', ${place.id}, '${escapeHtml(place.title || 'Listing')}')" title="Delete listing">🗑️</button>
+        <button class="btn-row-action btn-row-delete" onclick="window.deleteSingleRow('platform', ${place.id}, '${escapeHtml(displayName)}')" title="Delete listing">🗑️</button>
       </div>
     </td>`;
 
     tr.innerHTML = `
       ${checkTd}
       <td style="color:#64748b; font-weight:600; text-align:center;" title="Database ID #${place.id || ''}">${index + 1}</td>
+      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(displayName)}</span>${originBadge}</div></td>
+      <td>${categoryHtml}</td>
+      <td>${wStatusBadge}</td>
+      <td>${emailHtml}</td>
+      <td>${socialsHtml}</td>
       <td>${platformColHtml}</td>
-      <td><span class="badge badge-verified" style="background:rgba(168,85,247,0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.3);">🟣 Listed</span></td>
-      <td class="shop-title"><div style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"><span>${escapeHtml(place.title || place.name || place.company_name || 'Listing')}</span>${originBadge}</div></td>
-      <td><span class="badge badge-category">${escapeHtml(place.category || 'Listing')}</span></td>
+      <td>${botHtml}</td>
+      <td>${cookieHtml}</td>
       <td>${screenHtml}</td>
-      <td><span class="rating-pill">${pRating} <small style="color:#94a3b8;">${pReviews}</small></span></td>
-      <td>${place.price_info || place.price_range ? `<span style="font-size:0.75rem; color:#34d399; font-weight:600;">💰 ${escapeHtml(place.price_info || place.price_range)}</span>` : '<span class="badge badge-none">—</span>'}</td>
+      <td>${notesHtml}</td>
       <td>${phoneHtml}</td>
-      <td style="color:#94a3b8; font-size:0.8rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(place.address || 'N/A')}</td>
-      <td>${bookLink}</td>
-      <td>${listLink}</td>
+      <td style="color:#94a3b8; font-size:0.82rem; max-width:200px; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(place.address || 'N/A')}">${escapeHtml(place.address || 'N/A')}</td>
+      <td>${ratingHtml}</td>
+      <td>${siteHtml}</td>
+      <td>${place.maps_url ? `<a href="${encodeURI(place.maps_url)}" target="_blank" class="link-btn" title="Open Google Maps listing" onclick="event.stopPropagation();">🗺️ Maps</a>` : '<span class="badge badge-none">—</span>'}</td>
       <td>${window.formatDateTime(place.created_at)}</td>
       ${platActionsTd}
     `;
@@ -2404,25 +2407,15 @@ window.openEditRowModal = async function(type, id) {
   const emailGroup = document.getElementById('edit-group-email');
   const emailInput = document.getElementById('edit-field-email');
   if (emailGroup && emailInput) {
-    if (isPlatform) {
-      emailGroup.style.display = 'none';
-      emailInput.value = '';
-    } else {
-      emailGroup.style.display = 'flex';
-      emailInput.value = (record.email && record.email !== 'N/A') ? record.email : '';
-    }
+    emailGroup.style.display = 'flex';
+    emailInput.value = (record.email && record.email !== 'N/A') ? record.email : '';
   }
 
   const websiteGroup = document.getElementById('edit-group-website');
   const websiteInput = document.getElementById('edit-field-website');
   if (websiteGroup && websiteInput) {
-    if (isPlatform) {
-      websiteGroup.style.display = 'none';
-      websiteInput.value = '';
-    } else {
-      websiteGroup.style.display = 'flex';
-      websiteInput.value = (record.website && record.website !== 'N/A') ? record.website : '';
-    }
+    websiteGroup.style.display = 'flex';
+    websiteInput.value = (record.website && record.website !== 'N/A') ? record.website : '';
   }
 
   const bookingGroup = document.getElementById('edit-group-booking');
@@ -2481,16 +2474,23 @@ window.saveRowEdit = async function(e) {
   let endpoint = '';
 
   if (isPlatform) {
-    const bookingVal = document.getElementById('edit-field-booking').value.trim();
+    const bookingVal = document.getElementById('edit-field-booking') ? document.getElementById('edit-field-booking').value.trim() : '';
+    const emailVal = document.getElementById('edit-field-email') ? document.getElementById('edit-field-email').value.trim() : '';
+    const websiteVal = document.getElementById('edit-field-website') ? document.getElementById('edit-field-website').value.trim() : '';
     payload = {
       title: nameVal,
       category: catVal,
       phone: phoneVal,
+      whatsapp: waVal,
+      email: emailVal,
+      website: websiteVal,
       address: addrVal,
       rating: ratingVal ? parseFloat(ratingVal) || 0.0 : 0.0,
       price_info: priceVal,
       booking_url: bookingVal
     };
+    if (statusVal) payload.website_status = statusVal;
+    if (notesVal !== undefined) payload.notes = notesVal;
     endpoint = `/api/platform-listings/${id}`;
   } else {
     const emailVal = document.getElementById('edit-field-email').value.trim();
