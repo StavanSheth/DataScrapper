@@ -2105,7 +2105,7 @@ async function scrapeSinglePlatformTab(platInfo, maxListings, locationName, targ
   const discoveredListings = [];
   let harvestedCount = 0;
   let consecutiveStagnant = 0;
-  const maxScrollPasses = Math.min(40, Math.ceil(maxListings / 2) + 6);
+  const maxScrollPasses = Math.max(60, Math.min(400, Math.ceil(maxListings / 5) * 3 + 12));
 
   // =========================================================================
   // PHASE 1: DIRECTORY SCROLL & LISTING CARD DISCOVERY
@@ -2290,45 +2290,76 @@ async function scrapeSinglePlatformTab(platInfo, maxListings, locationName, targ
       consecutiveStagnant++;
 
       // Try pagination if stagnant after multiple scroll passes
-      if (consecutiveStagnant >= 3 && harvestedCount < maxListings) {
+      if (consecutiveStagnant >= 2 && harvestedCount < maxListings) {
         let pageChanged = false;
         try {
           const pageRes = await execScriptWithTimeout({
             target: { tabId: platformTabId },
             func: () => {
-              // 1. Next button by selector
+              const u = new URL(window.location.href);
+              const host = (window.location.hostname || "").toLowerCase();
+              const isAirbnb = host.includes('airbnb');
+
+              // 0. Ensure we scroll to the bottom so pagination footers are hydrated
+              try {
+                window.scrollTo(0, document.body.scrollHeight || document.documentElement.scrollHeight);
+              } catch (_) {}
+
+              // 1. Next button by selector (including Airbnb pagination nav)
               const nextSelectors = [
+                'nav[aria-label*="pagination" i] a[aria-label*="next" i]',
+                'nav[aria-label*="pagination" i] a[aria-label="Next"]',
+                'nav[aria-label*="pagination" i] a:last-child',
+                'nav[data-testid*="pagination" i] a[aria-label*="next" i]',
+                'a[aria-label="Next"]', 'a[aria-label="Next page"]',
+                'button[aria-label="Next"]', 'button[aria-label="Next page"]',
                 'a[aria-label*="next" i]', 'button[aria-label*="next" i]',
                 '[data-testid*="pagination-next"]', 'button[data-testid*="next"]',
                 'a[rel="next"]', 'li.next a', 'a[class*="next" i]',
-                '[aria-label="Next page"]', '[aria-label="Next"]',
                 '[data-qa*="pagination-next"]', 'a[data-qa="next-page"]'
               ];
               for (const sel of nextSelectors) {
                 const btn = document.querySelector(sel);
-                if (btn && btn.offsetParent !== null && !btn.disabled && !btn.getAttribute('aria-disabled')) {
-                  btn.click();
-                  return true;
+                if (btn && !btn.disabled && !btn.getAttribute('aria-disabled')) {
+                  try {
+                    btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    btn.click();
+                    return true;
+                  } catch (_) {}
                 }
               }
 
               // 2. Numeric pagination - find current page + 1
               const activePageEl = document.querySelector('[aria-current="page"], .active[class*="page"], [class*="pagination"] [class*="selected"]');
               if (activePageEl) {
-                const curPageNum = parseInt(activePageEl.innerText.trim());
+                const curPageNum = parseInt(activePageEl.innerText.trim(), 10);
                 if (!isNaN(curPageNum)) {
                   const nextPageEl = Array.from(document.querySelectorAll('a, button')).find(el => el.innerText.trim() === String(curPageNum + 1));
                   if (nextPageEl) {
-                    nextPageEl.click();
-                    return true;
+                    try {
+                      nextPageEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                      nextPageEl.click();
+                      return true;
+                    } catch (_) {}
                   }
                 }
               }
 
-              // 3. URL query parameter fallback
+              // 3. Platform-specific URL query parameter fallback
+              if (isAirbnb) {
+                try {
+                  const curOffset = parseInt(u.searchParams.get("items_offset") || "0", 10);
+                  const nextOffset = curOffset + 18;
+                  u.searchParams.set("items_offset", String(nextOffset));
+                  u.searchParams.set("pagination_search", "true");
+                  window.location.href = u.toString();
+                  return true;
+                } catch (_) {}
+              }
+
+              // 4. Generic URL query parameter fallback
               try {
-                const u = new URL(window.location.href);
-                const curPage = parseInt(u.searchParams.get("page") || "1");
+                const curPage = parseInt(u.searchParams.get("page") || "1", 10);
                 u.searchParams.set("page", String(curPage + 1));
                 window.location.href = u.toString();
                 return true;
@@ -2346,13 +2377,14 @@ async function scrapeSinglePlatformTab(platInfo, maxListings, locationName, targ
             ws.send(JSON.stringify({
               type: "LOG",
               agent: "platform",
-              message: `📄 [Agent 4: Platform - ${pName}] Next page navigation triggered, hydrating new listings...`
+              message: `📄 [Agent 4: Platform - ${pName}] Next page navigation triggered (found: ${harvestedCount}/${maxListings}), hydrating new listings...`
             }));
           }
           await waitForTabLoaded(platformTabId, 8000);
           await new Promise(r => setTimeout(r, 2000));
           await dismissPlatformPopups(platformTabId);
           consecutiveStagnant = 0;
+          scrollPass = Math.max(1, scrollPass - 2);
           continue;
         }
       }

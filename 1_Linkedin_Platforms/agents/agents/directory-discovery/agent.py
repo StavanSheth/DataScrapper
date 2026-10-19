@@ -5,6 +5,7 @@ across Fresha, Airbnb, Yelp, TripAdvisor, Treatwell, and Justdial.
 """
 import asyncio
 import logging
+import math
 from typing import Dict, Any, List, Optional
 
 from connectors.directories.connector import (
@@ -96,13 +97,17 @@ async def platform_area_search_worker(
         try:
             saved_on_platform = 0
             page_num = 1
-            max_pages = 4
+            max_pages = max(4, math.ceil(max_results / 15))
 
             while page_num <= max_pages and saved_on_platform < max_results:
                 current_url = target_url
                 if page_num > 1:
                     sep = "&" if "?" in target_url else "?"
-                    current_url = f"{target_url}{sep}page={page_num}"
+                    if "airbnb" in p_name.lower():
+                        offset = (page_num - 1) * 18
+                        current_url = f"{target_url}{sep}pagination_search=true&items_offset={offset}"
+                    else:
+                        current_url = f"{target_url}{sep}page={page_num}"
 
                 emit("log", f"🌐 [Agent 4: Platform] Accessing {p_name} Page {page_num}: {current_url}")
                 await platform_page.goto(current_url, wait_until="domcontentloaded", timeout=15000)
