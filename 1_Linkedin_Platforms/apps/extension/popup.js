@@ -43,33 +43,34 @@ function updatePortUI() {
 
 async function checkHealth() {
   try {
+    // 1. Ask background service worker for live WS connection status
+    const bgStatus = await new Promise(resolve => {
+      chrome.runtime.sendMessage({ type: "GET_STATUS" }, res => {
+        if (chrome.runtime.lastError || !res) resolve(null);
+        else resolve(res);
+      });
+    });
+
+    if (bgStatus && bgStatus.connected) {
+      statusDot.className = "status-dot online";
+      logStatus.innerText = "Online & Connected";
+      log(`Connected to DataScrapper Bridge on :${currentPort}`);
+      return true;
+    }
+
+    // 2. Direct HTTP probe
     const res = await fetch(`http://127.0.0.1:${currentPort}/api/health`, {
       cache: "no-store",
       headers: { "Accept": "application/json" }
     });
     if (res.ok) {
       statusDot.className = "status-dot online";
-      logStatus.innerText = "Online";
-      log(`Connected to DataScrapper Backend on :${currentPort}`);
+      logStatus.innerText = "Backend Active (Connecting WS...)";
+      log(`Backend reachable on :${currentPort}. Connecting WebSocket...`);
+      chrome.runtime.sendMessage({ type: "RECONNECT" }, () => {});
       return true;
     }
-  } catch (e) {
-    // Check fallback port 8080 if 8085 fails
-    if (currentPort === 8085) {
-      try {
-        const fallbackRes = await fetch("http://127.0.0.1:8080/api/health", { cache: "no-store" });
-        if (fallbackRes.ok) {
-          currentPort = 8080;
-          await chrome.storage.local.set({ backendPort: 8080 });
-          updatePortUI();
-          statusDot.className = "status-dot online";
-          logStatus.innerText = "Online (:8080)";
-          log(`Auto-switched to active backend on :8080`);
-          return true;
-        }
-      } catch (fe) {}
-    }
-  }
+  } catch (e) {}
 
   statusDot.className = "status-dot";
   logStatus.innerText = "Offline";

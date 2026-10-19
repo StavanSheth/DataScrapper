@@ -2079,6 +2079,24 @@ let placesData = [];
               logMessage("⚡ Chrome Extension active: Agent tabs will open directly inside this Chrome profile.");
             } else if (cData.cdp_active) {
               logMessage("⚡ Remote Debugging active on Port 9222.");
+            } else {
+              const proceed = confirm(
+                "⚠️ Chrome Extension is NOT connected to :8085!\n\n" +
+                "To see tabs LIVE in front of you:\n" +
+                "1. Open chrome://extensions in Chrome\n" +
+                "2. Turn on Developer Mode (top-right)\n" +
+                "3. Click 'Load unpacked' and select:\n" +
+                "   c:\\Projects\\Data Scrapper\\1_Linkedin_Platforms\\apps\\extension\n" +
+                "4. Check that the extension icon badge says 'ON'\n\n" +
+                "Click CANCEL to connect the extension first (recommended),\n" +
+                "or click OK to proceed with local background worker."
+              );
+              if (!proceed) {
+                setScrapingState(false, "Ready");
+                isActionPending = false;
+                return;
+              }
+              logMessage("⚠️ Proceeding with local background worker without extension.");
             }
           } catch (e) {}
         }

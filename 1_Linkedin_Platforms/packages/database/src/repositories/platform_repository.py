@@ -204,15 +204,18 @@ def is_platform_listing_already_scraped(
     if dedup_cache:
         if clean_u and clean_u in dedup_cache.get("listings_urls", set()):
             return True
-        if clean_t and clean_t in dedup_cache.get("listings_titles", set()):
+        if not clean_u and clean_t and clean_t in dedup_cache.get("listings_titles", set()):
             return True
 
     with get_connection(db_path) as conn:
         if clean_u:
-            row = conn.execute("SELECT id FROM platform_listings WHERE url = ?", (clean_u,)).fetchone()
+            row = conn.execute(
+                "SELECT id FROM platform_listings WHERE (url = ? OR booking_url = ?) AND platform = ?",
+                (clean_u, clean_u, platform)
+            ).fetchone()
             if row:
                 return True
-        if clean_t:
+        elif clean_t:
             row = conn.execute(
                 "SELECT id FROM platform_listings WHERE LOWER(title) = ? AND platform = ?",
                 (clean_t, platform)

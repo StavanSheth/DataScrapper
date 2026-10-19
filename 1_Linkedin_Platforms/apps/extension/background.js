@@ -7,6 +7,24 @@
 
 let BACKEND_PORT = 8085;
 
+function updateBadge(connected) {
+  try {
+    if (chrome.action && chrome.action.setBadgeText) {
+      if (connected) {
+        chrome.action.setBadgeText({ text: "ON" });
+        chrome.action.setBadgeBackgroundColor({ color: "#059669" });
+        chrome.action.setTitle({ title: `DataScrapper Bridge (:${BACKEND_PORT}) — Connected & Ready` });
+      } else {
+        chrome.action.setBadgeText({ text: "OFF" });
+        chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
+        chrome.action.setTitle({ title: `DataScrapper Bridge (:${BACKEND_PORT}) — Offline / Reconnecting` });
+      }
+    }
+  } catch (e) {
+    // Ignore badge updates in worker headless mode
+  }
+}
+
 async function getActiveBackendPort() {
   try {
     const s = await chrome.storage.local.get(["backendPort"]);
@@ -26,7 +44,6 @@ function getHealthUrl() {
 function getApiUrl(path) {
   return `http://127.0.0.1:${BACKEND_PORT}${path}`;
 }
-
 
 let ws = null;
 let reconnectTimer = null;
@@ -103,8 +120,10 @@ async function connect() {
 
   isConnecting = true;
   try {
+    BACKEND_PORT = await getActiveBackendPort();
     const reachable = await isBackendReachable();
     if (!reachable) {
+      updateBadge(false);
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 3000);
       return;
@@ -114,12 +133,12 @@ async function connect() {
       return;
     }
 
-    BACKEND_PORT = await getActiveBackendPort();
     console.log("[DataScrapper Extension] Connecting to Dashboard WebSocket at", getWsUrl());
     ws = new WebSocket(getWsUrl());
 
     ws.onopen = () => {
       console.log("[DataScrapper Extension] Connected to DataScrapper Dashboard on port " + BACKEND_PORT + "!");
+      updateBadge(true);
       ws.send(JSON.stringify({
         type: "HELLO",
         payload: { client: "chrome_extension", version: "3.1.0" }
@@ -154,12 +173,14 @@ async function connect() {
 
     ws.onclose = () => {
       console.log("[Mavon Extension] Disconnected from Dashboard, retrying in 3s...");
+      updateBadge(false);
       ws = null;
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 3000);
     };
   } catch (err) {
     console.debug("[Mavon Extension] Connection probe catch:", err);
+    updateBadge(false);
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 4000);
   } finally {
@@ -288,8 +309,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === platformTabId) platformTabId = null;
 });
 
-// Listen for messages from content scripts (e.g. dashboard page)
+// Listen for messages from popup or content scripts (e.g. dashboard page)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "GET_STATUS") {
+    sendResponse({
+      connected: ws !== null && ws.readyState === WebSocket.OPEN,
+      wsUrl: getWsUrl(),
+      healthUrl: getHealthUrl(),
+      port: BACKEND_PORT,
+      version: "3.1.0"
+    });
+    return true;
+  }
+  if (msg && msg.type === "RECONNECT") {
+    connect().then(() => {
+      sendResponse({ success: true, connected: ws !== null && ws.readyState === WebSocket.OPEN, port: BACKEND_PORT });
+    });
+    return true;
+  }
+
   if (sender && sender.tab && sender.tab.windowId) {
     msg.senderWindowId = sender.tab.windowId;
   }

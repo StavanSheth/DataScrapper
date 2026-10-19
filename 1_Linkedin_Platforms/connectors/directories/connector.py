@@ -73,7 +73,20 @@ async def extract_platform_listing_cards(platform_page, platform_name: str) -> L
                 const lines = cardText.split('\n')
                     .map(l => l.trim())
                     .filter(l => l.length > 0 && !l.toLowerCase().includes('mi away') && !badgeWords.includes(l.toLowerCase()));
-                const title = lines[0] || a.getAttribute('aria-label') || '';
+                
+                let explicitTitle = '';
+                if (parent) {
+                    const tEl = parent.querySelector('[data-testid="listing-card-title"], div[id^="title_"], [data-qa="venue-name"], h2, h3, h4');
+                    if (tEl && tEl.innerText && tEl.innerText.trim().length > 2) {
+                        explicitTitle = tEl.innerText.trim().split('\n')[0].trim();
+                    }
+                }
+                const aria = (a.getAttribute('aria-label') || '').trim();
+                let ariaTitle = '';
+                if (aria) {
+                    ariaTitle = aria.split(' - ')[0].split(' · ')[0].split(', rated')[0].trim();
+                }
+                const title = explicitTitle || ariaTitle || lines[0] || '';
                 
                 // Parse rating (e.g. 4.8)
                 let rating = 0.0;
