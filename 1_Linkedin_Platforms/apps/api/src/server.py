@@ -214,6 +214,84 @@ async def job_finished_endpoint(payload: Optional[Dict[str, Any]] = None):
     await broadcast({"type": "status", "data": "Ready"})
     return {"status": "ok"}
 
+@app.get("/api/tables-split")
+async def get_tables_split_endpoint():
+    listings = get_platform_listings()
+    unmatched_platform = []
+    for l in listings:
+        p_row = dict(l)
+        w_stat = str(p_row.get("website_status") or "").strip().lower()
+        has_e = bool(p_row.get("email") and p_row.get("email") != "N/A")
+        has_p = bool(p_row.get("phone") and p_row.get("phone") != "N/A")
+        has_soc = bool(p_row.get("instagram") or p_row.get("facebook") or p_row.get("linkedin") or p_row.get("twitter") or p_row.get("whatsapp"))
+        bot_p = str(p_row.get("bot_protection") or "Clean")
+        if "Cloudflare" in bot_p or "Turnstile" in bot_p or "Captcha" in bot_p or "Challenge" in bot_p or "Denied" in bot_p:
+            tag = "Bot Shield (Data Extracted)" if (has_e or has_soc) else "Bot Shield Active"
+        elif w_stat == "contacts_found" or has_e or has_soc:
+            tag = "Contacts Found"
+        elif w_stat == "no_contacts" or w_stat == "clean":
+            tag = "No Contacts Found"
+        elif p_row.get("verified") == 1 or p_row.get("lead_id"):
+            tag = "Master Matched"
+        elif p_row.get("booking_url"):
+            tag = "Booking Link Available"
+        elif has_p:
+            tag = "Phone Only"
+        else:
+            tag = "Directory Discovered"
+        p_row["status_tag"] = tag
+        p_row["name"] = p_row.get("title", "")
+        p_row["platform_name"] = p_row.get("platform", "Platform")
+        unmatched_platform.append(p_row)
+
+    with get_connection() as conn:
+        lead_rows = conn.execute("SELECT * FROM leads ORDER BY id DESC").fetchall()
+        leads_list = [dict(r) for r in lead_rows]
+
+    unmatched_maps = []
+    website_leads = []
+    linkedin_leads = []
+    master_leads = []
+
+    for l in leads_list:
+        maps_link = str(l.get("maps_url", "") or "").strip()
+        has_real_maps = bool(maps_link and ("google.com/maps" in maps_link or "goo.gl/maps" in maps_link or "maps.app.goo.gl" in maps_link))
+        if has_real_maps:
+            m_row = dict(l)
+            has_w = bool(m_row.get("website") and str(m_row.get("website")).strip() != "N/A")
+            has_p = bool(m_row.get("phone") and str(m_row.get("phone")).strip() != "N/A")
+            m_row["status_tag"] = "Full Contact (Web & Phone)" if (has_w and has_p) else ("Has Website" if has_w else ("Phone Only" if has_p else "Location Only"))
+            unmatched_maps.append(m_row)
+            if l.get("platform_verified") == 1:
+                master_leads.append(m_row)
+            if has_w:
+                w_row = dict(l)
+                w_row["status_tag"] = "Contacts Found" if (l.get("email") or l.get("instagram")) else "In Queue"
+                website_leads.append(w_row)
+            if l.get("linkedin"):
+                li_row = dict(l)
+                li_row["status_tag"] = "LinkedIn Found"
+                linkedin_leads.append(li_row)
+
+    return {
+        "master_leads": master_leads,
+        "unmatched_maps": unmatched_maps,
+        "unmatched_platform": unmatched_platform,
+        "website_leads": website_leads,
+        "linkedin_leads": linkedin_leads,
+        "counts": {
+            "master": len(master_leads),
+            "maps": len(unmatched_maps),
+            "platform": len(unmatched_platform),
+            "website": len(website_leads),
+            "linkedin": len(linkedin_leads),
+            "total_listings": len(unmatched_platform)
+        },
+        "queue_progress": {
+            "platform": {"total": len(unmatched_platform)}
+        }
+    }
+
 @app.post("/api/activate-tab")
 async def activate_chrome_tab_endpoint(payload: Dict[str, Any]):
     target_tag = (payload.get("tab") or "").lower().strip()
@@ -338,23 +416,9 @@ async def websocket_extension_bridge(websocket: WebSocket):
                         lid = save_platform_listing(listing_data, db_path=DEFAULT_DB_PATH)
                         if lid:
                             listing_data["id"] = lid
+                            listing_data["status_tag"] = "Contacts Found" if (primary_phone or primary_email) else "Directory Discovered"
+                            await broadcast({"type": "platform_listing_found", "data": listing_data})
                             await broadcast({"type": "platform_listing_saved", "data": listing_data})
-                            place_obj = {
-                                "id": lid,
-                                "name": title,
-                                "title": title,
-                                "clean_brand": clean_brand,
-                                "website": p_data.get("website", "") or url,
-                                "url": url,
-                                "phone": primary_phone,
-                                "category": p_data.get("category", "Salon"),
-                                "address": p_data.get("address", ""),
-                                "rating": p_data.get("rating", 0.0),
-                                "reviews": p_data.get("reviews_count", 0),
-                                "platform": p_name,
-                                "website_status": p_data.get("website_status", "captured")
-                            }
-                            await broadcast({"type": "place_scraped", "data": place_obj})
                             proximity_metrics["scraped_count"] += 1
                             await broadcast({"type": "proximity_update", "data": proximity_metrics})
                             add_log(f"💾 [Agent 4: Platform] Upserted listing: '{title}' ({p_name}) - Phone: {primary_phone or 'N/A'}", agent="platform")

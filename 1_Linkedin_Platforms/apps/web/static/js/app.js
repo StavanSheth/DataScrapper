@@ -1758,6 +1758,14 @@ let placesData = [];
               }
             } else if (msg.type === 'place_scraped') {
               const place = msg.data;
+              if (place && place.platform && place.platform !== 'Google Maps' && place.platform !== 'maps') {
+                if (typeof window.updateOrPrependLiveRow === 'function') {
+                  window.updateOrPrependLiveRow('platform', place);
+                  window.updateOrPrependLiveRow('master', place);
+                }
+                updateKPIs();
+                return;
+              }
               placesData.unshift(place);
               const has_w = Boolean(place.website && place.website !== 'N/A' && place.website !== '');
               const has_p = Boolean(place.phone && place.phone !== 'N/A' && place.phone !== '');
@@ -1807,7 +1815,7 @@ let placesData = [];
                 window.renderTable();
               }
               updateKPIs();
-            } else if (msg.type === 'platform_listing_found') {
+            } else if (msg.type === 'platform_listing_found' || msg.type === 'platform_listing_saved') {
               const listing = msg.data || {};
               const titleVal = listing.title || listing.name || listing.company_name || 'Listing';
               const urlVal = listing.url || listing.listing_url || listing.booking_url || '';
