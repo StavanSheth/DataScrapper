@@ -1758,14 +1758,6 @@ let placesData = [];
               }
             } else if (msg.type === 'place_scraped') {
               const place = msg.data;
-              if (place && place.platform && place.platform !== 'Google Maps' && place.platform !== 'maps') {
-                if (typeof window.updateOrPrependLiveRow === 'function') {
-                  window.updateOrPrependLiveRow('platform', place);
-                  window.updateOrPrependLiveRow('master', place);
-                }
-                updateKPIs();
-                return;
-              }
               placesData.unshift(place);
               const has_w = Boolean(place.website && place.website !== 'N/A' && place.website !== '');
               const has_p = Boolean(place.phone && place.phone !== 'N/A' && place.phone !== '');

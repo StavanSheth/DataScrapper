@@ -202,7 +202,7 @@ window.getItemTimeValue = getItemTimeValue;
 // TABLE EXTENSION & PLATFORM DIRECTORY MANAGER (LIVE 3-TABLES & MODAL)
 // =======================================================================
 
-window.currentTableTab = 'master'; // 'master' | 'maps' | 'platform'
+window.currentTableTab = 'platform'; // Default active view for 1_Linkedin_Platforms
 window.tablesSplitData = {
   master_leads: [],
   unmatched_maps: [],
@@ -2027,6 +2027,9 @@ window.renderTable = function() {
 // =======================================================================
 
 window.addEventListener('DOMContentLoaded', () => {
+  if (typeof window.switchTableTab === 'function') {
+    window.switchTableTab('platform');
+  }
   window.refreshTablesSplit();
 });
 
