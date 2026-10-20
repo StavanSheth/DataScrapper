@@ -13,6 +13,9 @@
     "cookies"
   ],
   "host_permissions": [
+    "http://127.0.0.1:8085/*",
+    "http://localhost:8085/*",
+    "ws://127.0.0.1:8085/*",
     "<all_urls>"
   ],
   "action": {

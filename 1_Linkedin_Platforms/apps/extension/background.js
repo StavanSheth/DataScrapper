@@ -5,7 +5,16 @@
 // opens Shop Website tab on-demand, and streams live screencast frames.
 // ==============================================================================
 
-let BACKEND_PORT = 8085;
+const BACKEND_PORT = 8085;
+const WS_URL = "ws://127.0.0.1:8085/ws/extension";
+const HEALTH_URL = "http://127.0.0.1:8085/api/health";
+const HEALTH_URL_LOCALHOST = "http://localhost:8085/api/health";
+
+try {
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.set({ backendPort: 8085 });
+  }
+} catch (e) {}
 
 function updateBadge(connected) {
   try {
@@ -13,11 +22,11 @@ function updateBadge(connected) {
       if (connected) {
         chrome.action.setBadgeText({ text: "ON" });
         chrome.action.setBadgeBackgroundColor({ color: "#059669" });
-        chrome.action.setTitle({ title: `DataScrapper Bridge (:${BACKEND_PORT}) — Connected & Ready` });
+        chrome.action.setTitle({ title: `DataScrapper Bridge (:8085) — Connected & Ready` });
       } else {
         chrome.action.setBadgeText({ text: "OFF" });
         chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-        chrome.action.setTitle({ title: `DataScrapper Bridge (:${BACKEND_PORT}) — Offline / Reconnecting` });
+        chrome.action.setTitle({ title: `DataScrapper Bridge (:8085) — Offline / Reconnecting` });
       }
     }
   } catch (e) {
@@ -25,25 +34,20 @@ function updateBadge(connected) {
   }
 }
 
-const BACKEND_PORT = 8085;
-
 async function getActiveBackendPort() {
-  try {
-    await chrome.storage.local.set({ backendPort: 8085 });
-  } catch (e) {}
   return 8085;
 }
 
 function getWsUrl() {
-  return `ws://127.0.0.1:${BACKEND_PORT}/ws/extension`;
+  return WS_URL;
 }
 
 function getHealthUrl() {
-  return `http://127.0.0.1:${BACKEND_PORT}/api/health`;
+  return HEALTH_URL;
 }
 
 function getApiUrl(path) {
-  return `http://127.0.0.1:${BACKEND_PORT}${path}`;
+  return `http://127.0.0.1:8085${path}`;
 }
 
 let ws = null;
@@ -67,22 +71,23 @@ let isLinkedinHarvesting = false;
 let abortHarvester = false;
 const exploredDomainsCache = new Map();
 
-// Check if backend is reachable before opening WebSocket
+// Check if backend is reachable before opening WebSocket (checks 127.0.0.1 and localhost)
 async function isBackendReachable() {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1200);
-    const res = await fetch(getHealthUrl(), {
-      method: "GET",
-      cache: "no-store",
-      headers: { "Accept": "application/json" },
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    return res.ok;
-  } catch (e) {
-    return false;
+  for (const url of [HEALTH_URL, HEALTH_URL_LOCALHOST]) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const res = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        headers: { "Accept": "application/json" },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) return true;
+    } catch (e) {}
   }
+  return false;
 }
 
 // Sync user's real LinkedIn cookies with backend to preserve authenticated login
