@@ -1,10 +1,11 @@
 // ==============================================================================
 // DataScrapper Assistant - Popup Controller
-// Supports configurable backend port (defaults to 8085), active tab inspection,
-// 1-click DOM extraction for Directories & LinkedIn, and cookie sync.
+// Fixed firmly to port 8085 (matching MessageV2 architecture).
+// Active tab inspection, 1-click DOM extraction, and instant reconnect bridge.
 // ==============================================================================
 
-let currentPort = 8085;
+const BACKEND_PORT = 8085;
+const HEALTH_URL = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
 let currentTab = null;
 
 const statusDot = document.getElementById("status-dot");
@@ -25,20 +26,17 @@ function log(msg) {
   consoleBody.innerText = `[${t}] ${msg}\n` + consoleBody.innerText.slice(0, 500);
 }
 
-// 1. Load Port Configuration & Check Health
+// 1. Initialize Connection (Purge any legacy port overrides)
 async function initBackendConnection() {
-  currentPort = 8085;
   try {
-    await chrome.storage.local.set({ backendPort: 8085 });
+    await chrome.storage.local.remove(["backendPort"]);
   } catch (e) {}
-  updatePortUI();
-  await checkHealth();
-}
 
-function updatePortUI() {
-  serverText.innerText = `:${currentPort}`;
-  dashboardLink.href = `http://localhost:${currentPort}/`;
-  dashboardLink.querySelector("span").innerText = `Open Live Dashboard (:${currentPort})`;
+  serverText.innerText = `:${BACKEND_PORT}`;
+  dashboardLink.href = `http://localhost:${BACKEND_PORT}/`;
+  dashboardLink.querySelector("span").innerText = `Open Live Dashboard (:${BACKEND_PORT})`;
+
+  await checkHealth();
 }
 
 async function checkHealth() {
@@ -54,19 +52,21 @@ async function checkHealth() {
     if (bgStatus && bgStatus.connected) {
       statusDot.className = "status-dot online";
       logStatus.innerText = "Online & Connected";
-      log(`Connected to DataScrapper Bridge on :${currentPort}`);
+      logStatus.style.color = "#10b981";
+      log(`Connected to DataScrapper Bridge on :${BACKEND_PORT}`);
       return true;
     }
 
     // 2. Direct HTTP probe
-    const res = await fetch(`http://127.0.0.1:${currentPort}/api/health`, {
+    const res = await fetch(HEALTH_URL, {
       cache: "no-store",
       headers: { "Accept": "application/json" }
     });
     if (res.ok) {
       statusDot.className = "status-dot online";
       logStatus.innerText = "Backend Active (Connecting WS...)";
-      log(`Backend reachable on :${currentPort}. Connecting WebSocket...`);
+      logStatus.style.color = "#38bdf8";
+      log(`Backend reachable on :${BACKEND_PORT}. Reconnecting WebSocket...`);
       chrome.runtime.sendMessage({ type: "RECONNECT" }, () => {});
       return true;
     }
@@ -74,24 +74,19 @@ async function checkHealth() {
 
   statusDot.className = "status-dot";
   logStatus.innerText = "Offline";
-  log(`Backend offline on :${currentPort}. Launch 'py apps/api/src/server.py'`);
+  logStatus.style.color = "#f43f5e";
+  log(`Backend offline on :${BACKEND_PORT}. Run 'py apps/api/src/server.py'`);
   return false;
 }
 
-// 2. Port Switch Toggle on Badge Click
+// 2. Click on Badge triggers Reconnect probe
 serverBadge.addEventListener("click", async () => {
-  const nextPort = currentPort === 8085 ? 8080 : 8085;
-  const input = prompt("Enter DataScrapper Backend Port (e.g. 8085 or 8080):", nextPort.toString());
-  if (input) {
-    const parsed = parseInt(input.trim(), 10);
-    if (!isNaN(parsed) && parsed > 0 && parsed < 65536) {
-      currentPort = parsed;
-      await chrome.storage.local.set({ backendPort: currentPort });
-      updatePortUI();
-      log(`Switched target port to :${currentPort}. Verifying...`);
-      await checkHealth();
-    }
-  }
+  log("Manual reconnect triggered...");
+  statusDot.className = "status-dot";
+  logStatus.innerText = "Reconnecting...";
+  chrome.runtime.sendMessage({ type: "RECONNECT" }, () => {
+    setTimeout(checkHealth, 500);
+  });
 });
 
 // 3. Inspect Current Active Tab
@@ -140,14 +135,12 @@ btnScrapeCurrent.addEventListener("click", async () => {
   log(`Executing DOM extraction on tab #${currentTab.id}...`);
 
   try {
-    // Send extract message to content script or background
     chrome.tabs.sendMessage(currentTab.id, { action: "EXTRACT_PAGE_DATA" }, async (response) => {
       btnScrapeCurrent.disabled = false;
       document.getElementById("btn-scrape-text").innerText = "1-Click Scrape Active Page";
 
       if (chrome.runtime.lastError || !response) {
         log(`Injecting extractor into page directly...`);
-        // Fallback: execute script via chrome.scripting
         chrome.scripting.executeScript({
           target: { tabId: currentTab.id },
           func: () => {
@@ -239,7 +232,7 @@ async function syncDirectoryCardsToBackend(cards) {
   try {
     let saved = 0;
     for (const c of cards.slice(0, 10)) {
-      const res = await fetch(`http://127.0.0.1:${currentPort}/api/platforms`, {
+      const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/platforms`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -268,7 +261,7 @@ async function syncDirectoryCardsToBackend(cards) {
 // 7. Sync General Lead to Backend
 async function syncToBackend(data) {
   try {
-    const res = await fetch(`http://127.0.0.1:${currentPort}/api/save`, {
+    const res = await fetch(`http://127.0.0.1:${BACKEND_PORT}/api/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -310,4 +303,5 @@ btnSyncCookies.addEventListener("click", async () => {
 document.addEventListener("DOMContentLoaded", async () => {
   await initBackendConnection();
   await inspectActiveTab();
+  setInterval(checkHealth, 3000);
 });

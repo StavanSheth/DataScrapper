@@ -270,8 +270,10 @@ async def websocket_extension_bridge(websocket: WebSocket):
                     global current_status
                     current_status = data.get("status", "Ready")
                     await broadcast({"type": "status", "data": current_status})
-                elif evt_type == "HEARTBEAT":
+                elif evt_type in ("PING", "HEARTBEAT"):
                     await websocket.send_json({"type": "PONG"})
+                elif evt_type == "HELLO":
+                    await websocket.send_json({"type": "HELLO_ACK", "status": "ok"})
                 elif evt_type == "LIVE_FRAME":
                     stream_type = data.get("stream_type") or "platform"
                     b64_img = data.get("image_base64", "")

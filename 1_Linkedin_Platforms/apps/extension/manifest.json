@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DataScrapper Platform & Lead Scout (:8085)",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Dedicated Chrome Extension for 1_Linkedin_Platforms (Port 8085). 1-click Directory extraction (Fresha, Airbnb, Yelp, TripAdvisor), LinkedIn Org capture, and real-time dashboard bridge.",
   "permissions": [
     "activeTab",
@@ -13,9 +13,6 @@
     "cookies"
   ],
   "host_permissions": [
-    "http://127.0.0.1:8085/*",
-    "http://localhost:8085/*",
-    "ws://127.0.0.1:8085/*",
     "<all_urls>"
   ],
   "action": {

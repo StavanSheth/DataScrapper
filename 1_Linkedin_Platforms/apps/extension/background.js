@@ -5,38 +5,8 @@
 // opens Shop Website tab on-demand, and streams live screencast frames.
 // ==============================================================================
 
-const BACKEND_PORT = 8085;
 const WS_URL = "ws://127.0.0.1:8085/ws/extension";
 const HEALTH_URL = "http://127.0.0.1:8085/api/health";
-const HEALTH_URL_LOCALHOST = "http://localhost:8085/api/health";
-
-try {
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.set({ backendPort: 8085 });
-  }
-} catch (e) {}
-
-function updateBadge(connected) {
-  try {
-    if (chrome.action && chrome.action.setBadgeText) {
-      if (connected) {
-        chrome.action.setBadgeText({ text: "ON" });
-        chrome.action.setBadgeBackgroundColor({ color: "#059669" });
-        chrome.action.setTitle({ title: `DataScrapper Bridge (:8085) — Connected & Ready` });
-      } else {
-        chrome.action.setBadgeText({ text: "OFF" });
-        chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-        chrome.action.setTitle({ title: `DataScrapper Bridge (:8085) — Offline / Reconnecting` });
-      }
-    }
-  } catch (e) {
-    // Ignore badge updates in worker headless mode
-  }
-}
-
-async function getActiveBackendPort() {
-  return 8085;
-}
 
 function getWsUrl() {
   return WS_URL;
@@ -49,6 +19,43 @@ function getHealthUrl() {
 function getApiUrl(path) {
   return `http://127.0.0.1:8085${path}`;
 }
+
+function updateBadge(connected) {
+  try {
+    if (chrome.action && chrome.action.setBadgeText) {
+      if (connected) {
+        chrome.action.setBadgeText({ text: "ON" });
+        chrome.action.setBadgeBackgroundColor({ color: "#059669" });
+        chrome.action.setTitle({ title: "DataScrapper Bridge (:8085) — Connected & Ready" });
+      } else {
+        chrome.action.setBadgeText({ text: "OFF" });
+        chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
+        chrome.action.setTitle({ title: "DataScrapper Bridge (:8085) — Offline / Reconnecting" });
+      }
+    }
+  } catch (e) {
+    // Ignore badge updates in worker headless mode
+  }
+}
+
+// Listen for status requests from the extension popup
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "GET_STATUS") {
+    sendResponse({
+      connected: ws !== null && ws.readyState === WebSocket.OPEN,
+      wsUrl: WS_URL,
+      healthUrl: HEALTH_URL,
+      version: "3.2.0"
+    });
+    return true;
+  }
+  if (msg && msg.type === "RECONNECT") {
+    connect().then(() => {
+      sendResponse({ success: true, connected: ws !== null && ws.readyState === WebSocket.OPEN });
+    });
+    return true;
+  }
+});
 
 let ws = null;
 let reconnectTimer = null;
@@ -71,26 +78,25 @@ let isLinkedinHarvesting = false;
 let abortHarvester = false;
 const exploredDomainsCache = new Map();
 
-// Check if backend is reachable before opening WebSocket (checks 127.0.0.1 and localhost)
+// Check if backend is reachable before opening WebSocket
 async function isBackendReachable() {
-  for (const url of [HEALTH_URL, HEALTH_URL_LOCALHOST]) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
-      const res = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-        headers: { "Accept": "application/json" },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      if (res.ok) return true;
-    } catch (e) {}
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch(HEALTH_URL, {
+      method: "GET",
+      cache: "no-store",
+      headers: { "Accept": "application/json" },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return res.ok;
+  } catch (e) {
+    return false;
   }
-  return false;
 }
 
-// Sync user's real LinkedIn cookies with backend to preserve authenticated login
+// Sync user's real LinkedIn cookies with backend when explicitly requested
 async function syncLinkedInCookies() {
   if (!chrome.cookies) return;
   try {
@@ -110,10 +116,10 @@ async function syncLinkedInCookies() {
           sameSite: c.sameSite === "no_restriction" ? "None" : (c.sameSite === "lax" ? "Lax" : "Strict")
         }))
       }));
-      console.log(`[Mavon Extension] Synced ${cookies.length} LinkedIn session cookies to backend!`);
+      console.log(`[DataScrapper Extension] Synced ${cookies.length} LinkedIn session cookies to backend!`);
     }
   } catch (err) {
-    console.warn("[Mavon Extension] Cookie sync catch:", err);
+    console.warn("[DataScrapper Extension] Cookie sync catch:", err);
   }
 }
 
@@ -126,7 +132,6 @@ async function connect() {
 
   isConnecting = true;
   try {
-    BACKEND_PORT = await getActiveBackendPort();
     const reachable = await isBackendReachable();
     if (!reachable) {
       updateBadge(false);
@@ -139,24 +144,26 @@ async function connect() {
       return;
     }
 
-    console.log("[DataScrapper Extension] Connecting to Dashboard WebSocket at", getWsUrl());
-    ws = new WebSocket(getWsUrl());
+    console.log("[DataScrapper Extension] Connecting to Dashboard WebSocket at", WS_URL);
+    ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
-      console.log("[DataScrapper Extension] Connected to DataScrapper Dashboard on port " + BACKEND_PORT + "!");
+      console.log("[DataScrapper Extension] Connected to DataScrapper Dashboard on port 8085!");
       updateBadge(true);
       ws.send(JSON.stringify({
         type: "HELLO",
-        payload: { client: "chrome_extension", version: "3.1.0" }
+        payload: { client: "chrome_extension", version: "3.2.0" }
       }));
-      syncLinkedInCookies().catch(() => {});
     };
 
     ws.onmessage = async (event) => {
       let data = null;
       try {
         data = JSON.parse(event.data);
-        console.log("[Mavon Extension] Received command:", data.action, data);
+        if (data.type === "PONG" || data.type === "HELLO_ACK") {
+          return;
+        }
+        console.log("[DataScrapper Extension] Received command:", data.action, data);
         const res = await handleCommand(data);
         if (ws && ws.readyState === WebSocket.OPEN && data.id) {
           ws.send(JSON.stringify({
@@ -166,7 +173,7 @@ async function connect() {
           }));
         }
       } catch (err) {
-        console.warn("[Mavon Extension] Error handling message:", err);
+        console.warn("[DataScrapper Extension] Error handling message:", err);
         if (data && data.id && ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ id: data.id, success: false, error: String(err) }));
         }
@@ -174,18 +181,18 @@ async function connect() {
     };
 
     ws.onerror = (e) => {
-      console.log("[Mavon Extension] WS state:", ws ? ws.readyState : "null");
+      console.log("[DataScrapper Extension] WS state:", ws ? ws.readyState : "null");
     };
 
     ws.onclose = () => {
-      console.log("[Mavon Extension] Disconnected from Dashboard, retrying in 3s...");
+      console.log("[DataScrapper Extension] Disconnected from Dashboard, retrying in 3s...");
       updateBadge(false);
       ws = null;
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 3000);
     };
   } catch (err) {
-    console.debug("[Mavon Extension] Connection probe catch:", err);
+    console.debug("[DataScrapper Extension] Connection probe catch:", err);
     updateBadge(false);
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 4000);
@@ -202,7 +209,6 @@ try {
       connect();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "PING" }));
-        syncLinkedInCookies().catch(() => {});
       }
     });
   }

@@ -98,7 +98,6 @@ async def platform_area_search_worker(
             saved_on_platform = 0
             page_num = 1
             max_pages = max(4, math.ceil(max_results / 15))
-            consecutive_zero_new = 0
 
             while page_num <= max_pages and saved_on_platform < max_results:
                 current_url = target_url
@@ -166,14 +165,6 @@ async def platform_area_search_worker(
                 emit("log", f"📄 [Agent 4: Platform] Page {page_num} on {p_name}: {new_on_page} new saved (Total for platform: {saved_on_platform}/{max_results}).")
                 if len(cards) == 0:
                     break
-                if new_on_page == 0:
-                    consecutive_zero_new += 1
-                    if consecutive_zero_new >= 2:
-                        emit("log", f"🏁 [Agent 4: Platform] No new listings on {p_name} across 2 consecutive pages. Platform crawl complete.")
-                        break
-                else:
-                    consecutive_zero_new = 0
-
                 page_num += 1
 
             emit("log", f"✅ [Agent 4: Platform] Completed {p_name} extraction: {saved_on_platform} new listings saved.")
