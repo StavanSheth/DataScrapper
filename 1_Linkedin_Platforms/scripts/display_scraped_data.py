@@ -8,8 +8,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-conn = sqlite3.connect('data/database/leads.db')
-conn.row_factory = sqlite3.Row
+from packages.database.src.adapters.sqlite.connection import get_connection, DEFAULT_DB_PATH
+
+conn = get_connection()
 cursor = conn.cursor()
 
 cursor.execute('SELECT COUNT(*) FROM platform_listings')

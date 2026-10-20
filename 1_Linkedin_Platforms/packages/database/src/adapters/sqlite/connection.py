@@ -6,9 +6,11 @@ import os
 import sqlite3
 from typing import Optional
 
-DEFAULT_DB_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../../../../data/database/leads.db")
+# Base directory for 1_Linkedin_Platforms codebase
+CODEBASE_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../../../..")
 )
+DEFAULT_DB_PATH = os.path.join(CODEBASE_ROOT, "data", "database", "leads.db")
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Returns a SQLite connection configured with WAL mode, optimized cache, and busy timeout."""
