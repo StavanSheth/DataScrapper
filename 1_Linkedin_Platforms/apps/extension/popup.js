@@ -27,10 +27,10 @@ function log(msg) {
 
 // 1. Load Port Configuration & Check Health
 async function initBackendConnection() {
-  const stored = await chrome.storage.local.get(["backendPort"]);
-  if (stored && stored.backendPort) {
-    currentPort = parseInt(stored.backendPort, 10);
-  }
+  currentPort = 8085;
+  try {
+    await chrome.storage.local.set({ backendPort: 8085 });
+  } catch (e) {}
   updatePortUI();
   await checkHealth();
 }

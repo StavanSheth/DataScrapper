@@ -25,10 +25,11 @@ function updateBadge(connected) {
   }
 }
 
+const BACKEND_PORT = 8085;
+
 async function getActiveBackendPort() {
   try {
-    const s = await chrome.storage.local.get(["backendPort"]);
-    if (s && s.backendPort) return parseInt(s.backendPort, 10);
+    await chrome.storage.local.set({ backendPort: 8085 });
   } catch (e) {}
   return 8085;
 }
